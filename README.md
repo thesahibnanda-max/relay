@@ -150,6 +150,24 @@ make fuzz         # every fuzz target for 10 s each
 make cross        # linux/darwin x amd64/arm64 builds into ./dist
 ```
 
+### Website (`ui/`)
+
+A one-page site (problem, solution, demo video, install) in plain HTML/CSS/JS under `ui/site/`. Node is only
+needed for local preview and the tests.
+
+```sh
+cd ui
+npm ci
+npm run dev       # http://localhost:4173, copies ../install.sh into the site first
+npm test          # Playwright: layout at 320-1440px, video loop, install.sh check, accessibility
+npx playwright install chromium   # once, to download the test browser
+```
+
+The site serves its own copy of the installer at `/install.sh`. The root `install.sh` stays the single source of
+truth: `npm run dev`, `npm run build` and `npm test` copy it to `ui/site/install.sh` (git-ignored), and a test
+fails if the served copy ever differs. To host it, point any static host (e.g. Vercel with Root Directory `ui`;
+`ui/vercel.json` holds the settings) at `ui/site` after running `npm run build`.
+
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works and [docs/SECURITY.md](docs/SECURITY.md)
 for the threat model. The end-to-end tests drive the real `relay` binary against a scripted fake tool;
 opt-in checks against real Claude and Codex are described in the architecture notes.
