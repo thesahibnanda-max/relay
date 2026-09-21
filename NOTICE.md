@@ -216,7 +216,11 @@ nobody can sneak commands into another terminal, and names and roles are limited
 * A `LICENSE` (BSD 3-Clause, copyright Sahib Nanda) and a third-party notices file.
 * A `Makefile`: `make check` runs the full tests, `make fuzz` stress-tests the parsers, `make cross` builds
   for other systems, `make notices` regenerates the third-party notices.
-* Automatic testing and release setup for GitHub (not yet run, because the project is not on GitHub).
+* Automatic testing and release setup on GitHub: every pull request is tested, and every merge to `main`
+  publishes a release with builds for macOS and Linux (WSL uses the Linux build).
+* A project website in `ui/` (plain HTML, CSS and JavaScript; no framework) with its own browser tests. It uses the
+  Inter and JetBrains Mono fonts, both under the SIL Open Font License; their licence files are in
+  `ui/site/assets/fonts/`.
 * Tests from tiny units up to running the real program against a fake assistant, plus stress and chaos tests.
 
 ---

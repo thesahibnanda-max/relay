@@ -2,6 +2,17 @@ bin/
 dist/
 *.test
 
+# Website (ui/): dependencies, test output, generated copy of install.sh, hosting metadata
+ui/node_modules/
+ui/playwright-report/
+ui/test-results/
+ui/blob-report/
+ui/site/install.sh
+ui/.vercel/
+.vercel/
+.DS_Store
+*.log
+
 # AI assistant notes and config: local only, never pushed
 MEMORY.md
 CLAUDE.md
