@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,4 +35,15 @@ test('the site does not serve its own source scripts', async ({ request }) => {
     const res = await request.get(p);
     expect([403, 404]).toContain(res.status());
   }
+});
+
+test('root vercel.json points at real paths and serves install.sh as text', () => {
+  const repo = path.resolve(here, '../..');
+  const cfg = JSON.parse(readFileSync(path.join(repo, 'vercel.json'), 'utf8'));
+  expect(existsSync(path.join(repo, cfg.outputDirectory, 'index.html'))).toBe(true);
+  const script = /^node (\S+)$/.exec(cfg.buildCommand);
+  expect(script, 'buildCommand should be "node <script>"').not.toBeNull();
+  expect(existsSync(path.join(repo, script![1]))).toBe(true);
+  const rule = cfg.headers.find((h: { source: string }) => h.source === '/install.sh');
+  expect(rule.headers).toContainEqual({ key: 'Content-Type', value: 'text/plain; charset=utf-8' });
 });

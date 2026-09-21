@@ -165,8 +165,9 @@ npx playwright install chromium   # once, to download the test browser
 
 The site serves its own copy of the installer at `/install.sh`. The root `install.sh` stays the single source of
 truth: `npm run dev`, `npm run build` and `npm test` copy it to `ui/site/install.sh` (git-ignored), and a test
-fails if the served copy ever differs. To host it, point any static host (e.g. Vercel with Root Directory `ui`;
-`ui/vercel.json` holds the settings) at `ui/site` after running `npm run build`.
+fails if the served copy ever differs. To host it, use any static host: run `npm run build` in `ui/` and publish
+`ui/site`. On Vercel just import the repo with the default Root Directory: the root `vercel.json` sets the build
+command (`node ui/scripts/sync-install.mjs`), the output folder (`ui/site`) and the headers.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works and [docs/SECURITY.md](docs/SECURITY.md)
 for the threat model. The end-to-end tests drive the real `relay` binary against a scripted fake tool;

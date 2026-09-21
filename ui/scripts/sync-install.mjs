@@ -20,8 +20,8 @@ try {
 } catch {
   fail(
     `cannot read ${src}\n` +
-      '  On Vercel: Project Settings > General > Root Directory = "ui", and keep ' +
-      '"Include source files outside of the Root Directory in the Build Step" turned ON.',
+      '  The build must run with the whole repository available. On Vercel, leave Root Directory at the ' +
+      'repository root (the root vercel.json points at ui/site).',
   );
 }
 if (data.length === 0) fail(`${src} is empty`);
