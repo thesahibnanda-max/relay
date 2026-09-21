@@ -29,11 +29,22 @@ and what its limits are.
 
 ## Install
 
+**macOS, Linux and WSL** (one line: picks the right build, checks it, and adds it to your PATH):
+
 ```sh
-go install github.com/thesahibnanda-max/relay@latest     # or: make install
-# or download an archive from the releases page, or:  make build   ->  ./bin/relay
-relay doctor                                               # verify the installation
+curl -fsSL https://raw.githubusercontent.com/thesahibnanda-max/relay/main/install.sh | bash
 ```
+
+Then open a new terminal and run `relay doctor` to verify the installation.
+
+* **Which build?** The script detects it for you. By hand: Mac with an Apple chip = `darwin_arm64`,
+  Intel Mac = `darwin_amd64`, Linux/WSL = `linux_amd64` (Intel/AMD) or `linux_arm64` (ARM). WSL is just Linux.
+* **Options** (set before `bash`): `RELAY_VERSION=v1.2.3` pins a version, `RELAY_INSTALL_DIR=/dir` changes
+  where it goes (default `~/.local/bin`), `RELAY_NO_MODIFY_PATH=1` leaves your shell startup files alone.
+  Example: `curl -fsSL .../install.sh | RELAY_VERSION=v1.2.3 bash`.
+* **Manual install:** every [release](../../releases) lists the downloads and the step-by-step commands.
+* **Remove it:** delete `~/.local/bin/relay` and the `# added by relay installer` line in your shell startup file.
+* **From source** (needs Go): `go install github.com/thesahibnanda-max/relay@latest`, or `make build` for `./bin/relay`.
 
 Relay wraps tools you already have (`claude`, `codex`) found on your `PATH`.
 
