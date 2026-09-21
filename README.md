@@ -34,7 +34,7 @@ and what its limits are.
 **macOS, Linux and WSL** (one line: picks the right build, checks it, and adds it to your PATH):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/thesahibnanda-max/relay/main/install.sh | bash
+curl -fsSL https://relay-sahib-nanda.vercel.app/install.sh | bash
 ```
 
 Then open a new terminal and run `relay doctor` to verify the installation.

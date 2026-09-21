@@ -48,3 +48,13 @@ test('vercel.json (used with Root Directory = ui) points at real paths and serve
   const rule = cfg.headers.find((h: { source: string }) => h.source === '/install.sh');
   expect(rule.headers).toContainEqual({ key: 'Content-Type', value: 'text/plain; charset=utf-8' });
 });
+
+test('every place that shows the install command uses the site URL, not raw.githubusercontent.com', () => {
+  const repo = path.resolve(here, '../..');
+  const site = 'https://relay-sahib-nanda.vercel.app/install.sh';
+  for (const f of ['README.md', 'install.sh', '.goreleaser.yaml', 'ui/site/index.html']) {
+    const text = readFileSync(path.join(repo, f), 'utf8');
+    expect(text, f).toContain(site);
+    expect(text, f).not.toContain('raw.githubusercontent.com');
+  }
+});
