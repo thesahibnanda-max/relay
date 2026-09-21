@@ -1,3 +1,5 @@
+*Inspired by [Iris](https://www.iris-tl.dev/), made by [psrth](https://github.com/psrth).*
+
 # Relay
 
 Relay lets AI coding agents in separate terminals work as one team. Run Claude Code and Codex
