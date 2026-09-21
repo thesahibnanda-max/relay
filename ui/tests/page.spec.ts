@@ -6,7 +6,7 @@ test('loads cleanly: no console errors, page errors or failed requests', async (
   const problems: string[] = [];
   page.on('console', (m) => { if (m.type() === 'error') problems.push(`console: ${m.text()}`); });
   page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
-  page.on('requestfailed', (r) => { if (!r.url().endsWith('.mp4')) problems.push(`failed: ${r.url()}`); });
+  page.on('requestfailed', (r) => problems.push(`failed: ${r.url()}`));
   page.on('response', (r) => { if (r.status() >= 400) problems.push(`${r.status()} ${r.url()}`); });
   await page.goto('/');
   await page.waitForLoadState('networkidle');
@@ -108,44 +108,53 @@ test.describe('small screens', () => {
   });
 });
 
-test.describe('demo video', () => {
-  test('is set up to autoplay, muted, on a loop, and is served with range support', async ({ page }) => {
+test.describe('demo screenshot', () => {
+  test('is served as a small WebP with a PNG fallback and a full-size link', async ({ page }) => {
     await page.goto('/');
-    const v = page.locator('#demo-video');
-    await expect(v).toHaveAttribute('loop', '');
-    await expect(v).toHaveAttribute('autoplay', '');
-    await expect(v).toHaveAttribute('playsinline', '');
-    expect(await v.evaluate((el) => (el as HTMLVideoElement).muted)).toBe(true);
-    const poster = await page.request.get(await v.getAttribute('poster') as string);
-    expect(poster.status()).toBe(200);
-    expect(poster.headers()['content-type']).toBe('image/jpeg');
-    const res = await page.request.get('assets/demo.mp4', { headers: { Range: 'bytes=0-1023' } });
-    expect(res.status()).toBe(206);
-    expect(res.headers()['content-type']).toBe('video/mp4');
+    const img = page.locator('#demo img');
+    const alt = await img.getAttribute('alt');
+    expect(alt!.length).toBeGreaterThan(40);
+    await expect(img).toHaveAttribute('width', '1774');
+    await expect(img).toHaveAttribute('height', '887');
+    await expect(img).toHaveAttribute('loading', 'lazy');
+    const srcset = await page.locator('#demo picture source').getAttribute('srcset');
+    for (const url of srcset!.split(',').map((x) => x.trim().split(' ')[0])) {
+      const res = await page.request.get(url);
+      expect(res.status(), url).toBe(200);
+      expect(res.headers()['content-type'], url).toBe('image/webp');
+      expect((await res.body()).length, `${url} should stay light`).toBeLessThan(150_000);
+    }
+    const link = page.locator('#demo a.shot-frame');
+    const full = await page.request.get((await link.getAttribute('href'))!);
+    expect(full.status()).toBe(200);
+    expect(full.headers()['content-type']).toBe('image/png');
+    await expect(link).toHaveAttribute('rel', /noopener/);
   });
 
-  test('plays, and when it ends it starts again by itself', async ({ page }) => {
+  test('actually renders, sharp, without stretching', async ({ page }) => {
     await page.goto('/');
-    const canPlay = await page.evaluate(() => document.createElement('video').canPlayType('video/mp4; codecs="avc1.42E01E"') !== '');
-    test.skip(!canPlay, 'this browser build cannot decode H.264 (Playwright\'s bundled Chromium); covered by the chrome and safari projects in CI');
-    const v = page.locator('#demo-video');
-    await v.scrollIntoViewIfNeeded();
-    await expect.poll(() => v.evaluate((el: HTMLVideoElement) => !el.paused && el.currentTime > 0.3), { timeout: 15_000 }).toBe(true);
-    const duration = await v.evaluate((el: HTMLVideoElement) => el.duration);
-    expect(duration).toBeGreaterThan(10);
-    await v.evaluate((el: HTMLVideoElement) => { el.currentTime = el.duration - 0.6; });
-    // It must wrap around to the start and keep playing, not freeze on the last frame.
-    await expect.poll(() => v.evaluate((el: HTMLVideoElement) => el.currentTime < 5 && !el.paused && !el.ended), { timeout: 15_000 }).toBe(true);
+    const img = page.locator('#demo img');
+    await img.scrollIntoViewIfNeeded();
+    await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
+    const m = await img.evaluate((el: HTMLImageElement) => ({ nw: el.naturalWidth, nh: el.naturalHeight, w: el.clientWidth, h: el.clientHeight, src: el.currentSrc }));
+    expect(m.src).toMatch(/\.webp$/);
+    expect(m.nw / m.nh).toBeCloseTo(2, 1);
+    expect(m.w / m.h).toBeCloseTo(2, 1);
   });
 
-  test.describe('with reduced motion', () => {
-    test.use({ reducedMotion: 'reduce' });
-    test('does not autoplay and offers a play button', async ({ page }) => {
-      await page.goto('/');
-      const v = page.locator('#demo-video');
-      await page.waitForTimeout(500);
-      expect(await v.evaluate((el: HTMLVideoElement) => el.paused)).toBe(true);
-      await expect(page.locator('#play-overlay')).toBeVisible();
+  test('has three numbered markers on the image and a matching legend', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('#demo .marker')).toHaveCount(3);
+    await expect(page.locator('#demo .legend li')).toHaveCount(3);
+    const inside = await page.locator('#demo .marker').evaluateAll((els) => {
+      const frame = els[0].closest('.shot-frame')!.getBoundingClientRect();
+      return els.map((e) => { const r = e.getBoundingClientRect(); return r.left >= frame.left && r.right <= frame.right && r.top >= frame.top && r.bottom <= frame.bottom; });
     });
+    expect(inside).toEqual([true, true, true]);
+  });
+
+  test('there is no video left on the page', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('video')).toHaveCount(0);
   });
 });

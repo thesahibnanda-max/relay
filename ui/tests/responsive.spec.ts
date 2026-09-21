@@ -17,7 +17,7 @@ for (const width of WIDTHS) {
       expect(m.doc).toBeLessThanOrEqual(m.inner);
       expect(m.body).toBeLessThanOrEqual(m.inner);
       // Every important block sits inside the viewport.
-      for (const sel of ['.hero-copy', '.cmd', '.term', '.video-frame', '.tabs', '.site-footer .foot']) {
+      for (const sel of ['.hero-copy', '.cmd', '.term', '.shot-frame', '.legend', '.tabs', '.site-footer .foot']) {
         for (const box of await page.locator(sel).evaluateAll((els) => els.map((e) => { const r = e.getBoundingClientRect(); return { l: r.left, r: r.right }; }))) {
           expect(box.l, sel).toBeGreaterThanOrEqual(-0.5);
           expect(box.r, sel).toBeLessThanOrEqual(width + 0.5);
@@ -25,10 +25,20 @@ for (const width of WIDTHS) {
       }
     });
 
-    test('video keeps a 16:9 frame', async ({ page }) => {
+    test('demo screenshot fills the width, keeps its 2:1 shape and stays on screen', async ({ page }) => {
       await page.goto('/');
-      const box = (await page.locator('.video-frame').boundingBox())!;
-      expect(box.width / box.height).toBeCloseTo(16 / 9, 1);
+      const frame = page.locator('.shot-frame');
+      await frame.scrollIntoViewIfNeeded();
+      const box = (await frame.boundingBox())!;
+      expect(box.width / box.height).toBeCloseTo(2, 1);
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(width);
+      // Markers scale with the image and never leave it.
+      const bad = await page.locator('.marker').evaluateAll((els) => {
+        const f = els[0].closest('.shot-frame')!.getBoundingClientRect();
+        return els.filter((e) => { const r = e.getBoundingClientRect(); return r.left < f.left || r.right > f.right || r.top < f.top || r.bottom > f.bottom; }).length;
+      });
+      expect(bad).toBe(0);
     });
 
     test('header collapses into a menu below 768px only', async ({ page }) => {

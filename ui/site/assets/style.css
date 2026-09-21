@@ -71,7 +71,7 @@ body {
   -webkit-font-smoothing: antialiased;
   overflow-x: hidden;
 }
-img, svg, video { max-width: 100%; }
+img, svg { max-width: 100%; }
 a { color: var(--accent); text-underline-offset: 3px; }
 a:hover { text-decoration-thickness: 2px; }
 code, pre { font-family: var(--font-mono); }
@@ -239,20 +239,40 @@ code:not(pre code) {
 @media (min-width: 52rem) { .steps { grid-template-columns: repeat(3, 1fr); } }
 .section .cards-4 { margin-top: 1rem; }
 
-/* ---------- video ---------- */
-.video-frame {
-  position: relative; margin-top: 2rem; width: 100%; aspect-ratio: 16 / 9; background: #000;
-  border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden;
-  box-shadow: 0 30px 70px -35px rgb(0 0 0 / .7);
+/* ---------- demo screenshot ---------- */
+.shot { margin: 2rem 0 0; }
+.shot-frame {
+  position: relative; display: block; overflow: hidden; line-height: 0;
+  border: 1px solid var(--line); border-radius: 18px; background: var(--surface-2);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent),
+    0 45px 90px -45px color-mix(in srgb, var(--accent) 50%, transparent),
+    0 25px 50px -30px rgb(0 0 0 / .6);
+  cursor: zoom-in; transition: transform .25s ease, box-shadow .25s ease;
 }
-.video-frame video { display: block; width: 100%; height: 100%; object-fit: contain; background: #000; }
-.play-overlay {
-  position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: .5rem;
-  border: 0; cursor: pointer; background: rgb(0 0 0 / .55); color: #fff; font: inherit; font-weight: 700; font-size: 1.05rem;
+@media (hover: hover) { .shot-frame:hover { transform: translateY(-3px); } }
+.shot-frame img { display: block; width: 100%; height: auto; }
+/* numbered markers, positioned in % of the image so they stay put at every size */
+.marker {
+  position: absolute; display: grid; place-items: center; transform: translate(-50%, -50%);
+  width: clamp(20px, 2.6vw, 30px); height: clamp(20px, 2.6vw, 30px); border-radius: 50%;
+  background: var(--accent); color: var(--accent-ink);
+  font: 700 clamp(.65rem, 1.3vw, .85rem) / 1 var(--font-mono);
+  box-shadow: 0 0 0 3px rgb(0 0 0 / .35), 0 6px 16px rgb(0 0 0 / .45);
 }
-.play-overlay[hidden] { display: none; }
-.play-overlay svg { width: 64px; height: 64px; padding: 15px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); }
-.caption { margin-top: .9rem; color: var(--muted); font-size: .9rem; text-align: center; }
+.m1 { left: 17.8%; top: 38.7%; }  /* the "Say Hi to codex" prompt */
+.m2 { left: 47%; top: 49%; }      /* "Message sent to codex!" */
+.m3 { left: 96.2%; top: 68%; }      /* corner of the "New message from claude" box */
+
+.legend { list-style: none; counter-reset: leg; margin: 1.5rem 0 0; padding: 0; display: grid; gap: 1rem; }
+.legend li { counter-increment: leg; display: grid; grid-template-columns: auto 1fr; gap: .85rem; align-items: start; color: var(--muted); }
+.legend li::before {
+  content: counter(leg); display: grid; place-items: center; width: 1.9rem; height: 1.9rem; border-radius: 50%;
+  background: var(--accent); color: var(--accent-ink); font: 700 .85rem / 1 var(--font-mono);
+}
+.legend strong { display: block; color: var(--text); font-weight: 650; }
+@media (min-width: 52rem) { .legend { grid-template-columns: repeat(3, 1fr); gap: 1.5rem; } }
+.caption { margin-top: 1.1rem; color: var(--muted); font-size: .9rem; text-align: center; }
 
 /* ---------- install ---------- */
 .tabs { margin-top: 2rem; }

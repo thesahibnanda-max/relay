@@ -1,6 +1,6 @@
 // Tiny static file server for local development and the Playwright tests (no dependencies).
-// Behaves like a real static host where it matters here: byte-range requests for the video,
-// and install.sh served as text/plain.
+// Behaves like a real static host where it matters here: correct MIME types, with install.sh
+// served as text/plain.
 import { createServer } from 'node:http';
 import { createReadStream, statSync } from 'node:fs';
 import path from 'node:path';
@@ -20,7 +20,6 @@ const types = {
   '.webp': 'image/webp',
   '.ico': 'image/x-icon',
   '.json': 'application/json; charset=utf-8',
-  '.mp4': 'video/mp4',
   '.woff2': 'font/woff2',
   '.txt': 'text/plain; charset=utf-8',
   '.sh': 'text/plain; charset=utf-8',
@@ -53,21 +52,9 @@ createServer((req, res) => {
 
   const headers = {
     'Content-Type': types[path.extname(file)] || 'application/octet-stream',
-    'Accept-Ranges': 'bytes',
     'Cache-Control': 'no-store',
     'X-Content-Type-Options': 'nosniff',
   };
-
-  const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
-  if (range) {
-    let start = range[1] === '' ? st.size - Number(range[2]) : Number(range[1]);
-    let end = range[1] === '' || range[2] === '' ? st.size - 1 : Number(range[2]);
-    end = Math.min(end, st.size - 1);
-    if (!(start >= 0) || start > end) return send(res, 416, 'range not satisfiable', { 'Content-Range': `bytes */${st.size}` });
-    res.writeHead(206, { ...headers, 'Content-Range': `bytes ${start}-${end}/${st.size}`, 'Content-Length': end - start + 1 });
-    if (req.method === 'HEAD') return res.end();
-    return createReadStream(file, { start, end }).pipe(res);
-  }
 
   res.writeHead(200, { ...headers, 'Content-Length': st.size });
   if (req.method === 'HEAD') return res.end();

@@ -152,14 +152,14 @@ make cross        # linux/darwin x amd64/arm64 builds into ./dist
 
 ### Website (`ui/`)
 
-A one-page site (problem, solution, demo video, install) in plain HTML/CSS/JS under `ui/site/`. Node is only
+A one-page site (problem, solution, demo screenshot, install) in plain HTML/CSS/JS under `ui/site/`. Node is only
 needed for local preview and the tests.
 
 ```sh
 cd ui
 npm ci
 npm run dev       # http://localhost:4173, copies ../install.sh into the site first
-npm test          # Playwright: layout at 320-1440px, video loop, install.sh check, accessibility
+npm test          # Playwright: layout at 320-1440px, demo image, install.sh check, accessibility
 npx playwright install chromium   # once, to download the test browser
 ```
 

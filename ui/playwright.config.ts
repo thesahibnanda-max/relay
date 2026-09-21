@@ -20,8 +20,7 @@ export default defineConfig({
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
     { name: 'mobile-chromium', use: { ...devices['Pixel 7'] } },
-    // CI only: real Chrome can decode the H.264 demo video (Playwright's bundled Chromium cannot),
-    // and WebKit covers Safari on iPhone.
+    // CI only: real Chrome, and WebKit for Safari on iPhone (they can't be installed without sudo locally).
     ...(CI
       ? [
           { name: 'chrome', use: { ...devices['Desktop Chrome'], channel: 'chrome' } },

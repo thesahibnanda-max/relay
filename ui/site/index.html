@@ -66,7 +66,7 @@
         <noscript><p class="fine">JavaScript is off, so the exact command can't be shown here. Use the manual download steps on the <a href="https://github.com/thesahibnanda-max/relay/releases/latest">latest release page</a>.</p></noscript>
 
         <div class="cta">
-          <a class="btn btn-primary" href="#demo">Watch the demo</a>
+          <a class="btn btn-primary" href="#demo">See the demo</a>
           <a class="btn btn-ghost" href="https://github.com/thesahibnanda-max/relay" rel="noopener">View on GitHub</a>
         </div>
       </div>
@@ -149,14 +149,25 @@
     <section class="section wrap" id="demo" aria-labelledby="demo-h">
       <p class="eyebrow">See it work</p>
       <h2 id="demo-h">Demo</h2>
-      <div class="video-frame">
-        <video id="demo-video" src="assets/demo.mp4" poster="assets/demo-poster.jpg" width="1024" height="576" autoplay muted loop playsinline controls preload="auto" aria-label="Screen recording: Claude Code is asked to say hi to Codex. The message appears in the Codex terminal, Codex replies, and the answer comes back to Claude Code. The recording plays on a loop."></video>
-        <button class="play-overlay" id="play-overlay" type="button" hidden>
-          <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
-          <span>Play demo</span>
-        </button>
-      </div>
-      <p class="caption">A real recording. Claude Code is told to say hi to Codex; the message appears in Codex's terminal, Codex replies, and the answer lands back in Claude's. It plays on a loop.</p>
+      <p class="section-lead">Two terminals, two different tools, one team. Ask Claude Code to say hi to Codex, and the message shows up in Codex's terminal.</p>
+
+      <figure class="shot">
+        <a class="shot-frame" href="assets/demo.png" target="_blank" rel="noopener">
+          <picture>
+            <source type="image/webp" srcset="assets/demo-900.webp 900w, assets/demo.webp 1774w" sizes="(min-width: 70rem) 1088px, calc(100vw - 2rem)">
+            <img src="assets/demo.png" width="1774" height="887" loading="lazy" decoding="async" alt="Two terminal windows side by side. On the left, Claude Code is told &quot;Say Hi to codex&quot; and reports &quot;Message sent to codex!&quot;. On the right, Codex shows &quot;New message from claude: Hi codex!&quot;. Opens the full-size image.">
+          </picture>
+          <span class="marker m1" aria-hidden="true">1</span>
+          <span class="marker m2" aria-hidden="true">2</span>
+          <span class="marker m3" aria-hidden="true">3</span>
+        </a>
+        <ol class="legend">
+          <li><span><strong>Ask</strong>Claude Code was started with <code>relay claude</code> and is told to say hi to Codex.</span></li>
+          <li><span><strong>Relay delivers</strong>Claude reports the message as sent. Nobody copied or pasted anything.</span></li>
+          <li><span><strong>It arrives</strong>Codex, started with <code>relay codex</code> in its own terminal, shows a new message from claude.</span></li>
+        </ol>
+        <figcaption class="caption">Select the image to open it full size.</figcaption>
+      </figure>
     </section>
 
     <section class="section wrap" id="install" aria-labelledby="install-h">

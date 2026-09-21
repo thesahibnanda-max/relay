@@ -101,47 +101,4 @@
     });
     select(0, false);
   });
-
-  // ---- demo video: plays on a loop, forever ----
-  var video = document.getElementById('demo-video');
-  var overlay = document.getElementById('play-overlay');
-  if (video) {
-    var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    var userPaused = reduceMotion;   // reduced motion: wait for the visitor to press play
-    var autoPaused = false;          // true while WE paused it (scrolled out of view)
-
-    var showOverlay = function (on) { if (overlay) overlay.hidden = !on; };
-    var tryPlay = function () {
-      var p = video.play();
-      if (p && typeof p.then === 'function') {
-        p.then(function () { showOverlay(false); }, function () { showOverlay(true); }); // autoplay blocked: offer a button
-      }
-    };
-
-    video.muted = true; // required for autoplay; the recording has no sound anyway
-    if (reduceMotion) { video.pause(); showOverlay(true); }
-
-    video.addEventListener('pause', function () {
-      if (!autoPaused && !video.ended) userPaused = true;
-      autoPaused = false;
-    });
-    video.addEventListener('play', function () { userPaused = false; showOverlay(false); });
-    // `loop` handles this; the listener is a safety net for browsers that ignore it.
-    video.addEventListener('ended', function () { video.currentTime = 0; tryPlay(); });
-    if (overlay) overlay.addEventListener('click', function () { userPaused = false; tryPlay(); });
-
-    // Save battery: pause while off screen, resume when it comes back (unless the visitor paused it).
-    if ('IntersectionObserver' in window) {
-      new IntersectionObserver(function (entries) {
-        entries.forEach(function (en) {
-          if (en.isIntersecting) {
-            if (!userPaused && video.paused) tryPlay();
-          } else if (!video.paused) {
-            autoPaused = true;
-            video.pause();
-          }
-        });
-      }, { threshold: 0.25 }).observe(video);
-    }
-  }
 })();
