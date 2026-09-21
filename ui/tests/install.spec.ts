@@ -37,13 +37,14 @@ test('the site does not serve its own source scripts', async ({ request }) => {
   }
 });
 
-test('root vercel.json points at real paths and serves install.sh as text', () => {
+test('vercel.json (used with Root Directory = ui) points at real paths and serves install.sh as text', () => {
   const repo = path.resolve(here, '../..');
+  const uiDir = path.join(repo, 'ui'); // Vercel runs the build from the Root Directory
   const cfg = JSON.parse(readFileSync(path.join(repo, 'vercel.json'), 'utf8'));
-  expect(existsSync(path.join(repo, cfg.outputDirectory, 'index.html'))).toBe(true);
+  expect(existsSync(path.join(uiDir, cfg.outputDirectory, 'index.html'))).toBe(true);
   const script = /^node (\S+)$/.exec(cfg.buildCommand);
   expect(script, 'buildCommand should be "node <script>"').not.toBeNull();
-  expect(existsSync(path.join(repo, script![1]))).toBe(true);
+  expect(existsSync(path.join(uiDir, script![1]))).toBe(true);
   const rule = cfg.headers.find((h: { source: string }) => h.source === '/install.sh');
   expect(rule.headers).toContainEqual({ key: 'Content-Type', value: 'text/plain; charset=utf-8' });
 });
