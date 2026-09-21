@@ -1,0 +1,148 @@
+# Relay
+
+Relay lets AI coding agents in separate terminals work as one team. Run Claude Code and Codex
+(or several of each) side by side, and one can hand work to another (*"tell codex to fix the failing
+test"*), ask what another has done, and answer back, while every terminal still looks and behaves
+exactly like the tool itself.
+
+```
+ terminal A                       terminal B
+ $ relay claude orchestrator      $ relay codex developer --session=<id>
+   --session=NEW                    
+ > tell coder to add tests        [relay | from lead (orchestrator) | task | normal | msg 01J...]
+                                  Add tests for parser.go ...
+                                  • Called relay.relay_send(... "12 tests added")
+ ● coder replied: 12 tests added
+```
+
+**Zero footprint.** Relay's powers exist only while a process runs under `relay`. It never writes to
+`~/.claude`, `~/.codex`, or your project (no `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, hooks or settings),
+and never runs `claude mcp add` / `codex mcp add`. Everything is passed for that one launch (flags,
+`-c` overrides, temp files in `~/.relay/run/<agent>/` that are deleted on exit). Run plain `claude` or
+`codex` afterwards, or after uninstalling Relay, and they behave exactly as before.
+`relay doctor` checks this, and an automated test enforces it.
+
+Linux, macOS and WSL only (native Windows is not supported: `relay` says so and exits). The code still compiles on every platform so editors and tools stay clean. One static binary, no cgo.
+
+**New to Relay?** [NOTICE.md](NOTICE.md) explains everything in plain language: what it does, where it works,
+and what its limits are.
+
+## Install
+
+```sh
+go install github.com/thesahibnanda-max/relay@latest     # or: make install
+# or download an archive from the releases page, or:  make build   ->  ./bin/relay
+relay doctor                                               # verify the installation
+```
+
+Relay wraps tools you already have (`claude`, `codex`) found on your `PATH`.
+
+## Quick start
+
+```sh
+relay claude orchestrator --session=NEW --name=lead     # prints the session id
+relay codex developer --session=<id> --name=coder       # in another terminal
+```
+
+Now just talk to Claude normally: *"ask coder to run the tests and tell me what fails."* Claude calls
+`relay_send`; the request appears in Codex's terminal as a prompt; Codex answers with `relay_send`; the
+answer appears in Claude's. You can also step in yourself: `relay send coder "stop, use the v2 API"`.
+
+Without `--session`, `relay claude` just runs Claude as a private, solo session (recorded, but with no messaging features added).
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `relay <claude\|codex> [role] [--session=NEW\|<id>] [--name=x] [--approve-inbound] [--record=raw\|events\|off] [-- tool args]` | Run a tool as an agent. Everything after `--` goes to the tool unchanged. |
+| `relay ls [--all] [--session=<id>]` | Sessions and their agents. |
+| `relay session new [--name=..]` / `relay session end <id>` | Create / close a session. |
+| `relay send <agent> <text> [--priority=low\|normal\|high\|interrupt] [--session=<id>]` | Message an agent yourself (`-` reads stdin). |
+| `relay messages [--session=..] [--agent=..] [--state=..]` | What agents said to each other, and where each message is. |
+| `relay approve [ls\|accept\|reject] [<id>\|all]` | Decide on messages held for `--approve-inbound` agents. |
+| `relay gc [--older-than=30d] [--compress] [--dry-run]` | Clean up crashed-agent leftovers; forget idle sessions; zstd-compress old logs. |
+| `relay doctor` | Health check: permissions, daemon, database, tools, and stray Relay files. |
+| `relay daemon [status\|stop]` | The background service (starts on demand). |
+
+**Roles** are `orchestrator`, `planner`, `developer`, `qa`, `reviewer`, or a path to your own `.md`
+(with optional frontmatter: `can_interrupt`, `can_broadcast`). A role is delivered to the model once,
+at launch, as part of its system prompt.
+
+**Shim mode.** Symlink `claude` or `codex` to `relay` earlier on your `PATH` and typing `claude` runs
+it under Relay, solo, with all arguments passed straight through.
+
+## What the agents get
+
+Each agent in a session gets these MCP tools (registered for that launch only):
+
+`relay_whoami` · `relay_list_agents` · `relay_send` · `relay_inbox` · `relay_ack` · `relay_wait` · `relay_get_context`
+
+`relay_get_context` reads another agent's recent conversation (last turns, its last answer, search)
+without interrupting it. Secrets in that text are masked before they cross to another agent.
+
+### How messages are delivered
+
+A message is never lost, only delayed, and it is never typed into a permission dialog or on top of
+text you are in the middle of writing.
+
+| Target is... | Interrupt | High | Normal | Low |
+|---|---|---|---|---|
+| idle at the prompt | typed now | typed now | typed now | typed if nothing else waits |
+| working (Claude) | Esc, then typed | at the next tool call, as hook context | as the turn ends (Stop-continue) | as the turn ends |
+| working (Codex) | Esc, then typed | after the turn | after the turn | after the turn |
+| showing a dialog / plan awaiting your decision | held | held | held | held |
+| you have unsent text in the input box | held | held | held | held |
+
+Priorities are `low`, `normal`, `high`, `interrupt`. Only roles with `can_interrupt` may interrupt
+(otherwise it is downgraded to `high`). Long-waiting messages age upward.
+
+### Safety valves
+
+* **`--approve-inbound`**: messages to that agent wait until *you* approve them (`relay approve`, or
+  press <kbd>Ctrl</kbd>+<kbd>\</kbd> then <kbd>a</kbd>/<kbd>r</kbd> in that agent's terminal). Agents cannot
+  approve their own mail.
+* **Loop guards**: a reply chain 8 deep is held for you (and again every 8); 20 messages/min per pair,
+  60/min per sender; identical messages are coalesced; messages expire after an hour; you can't
+  broadcast without `can_broadcast`.
+* **Untrusted by design**: text from other agents is attributed with a header the sender cannot forge and
+  the agent's briefing tells it to treat teammates' messages like any untrusted input.
+
+## Files and configuration
+
+Everything lives under `~/.relay` (override with `RELAY_HOME`), private to your user:
+
+```
+run/relayd.sock        the daemon's socket (0600)      data/relay.db     SQLite (sessions, messages, turns)
+run/<agent id>/        per-launch files, removed on exit   data/raw/       raw terminal logs (zstd-compressed once closed)
+log/relayd.log         daemon log                      sessions/         per-process local event logs
+```
+
+`--record=events` keeps structured events but no terminal bytes; `--record=off` keeps only presence.
+Terminal logs contain everything typed, including secrets you type: use `--record=off` for sensitive work.
+
+## Troubleshooting
+
+* `relay doctor`: start here. It explains anything wrong and what to run.
+* "daemon speaks a different protocol version": `relay daemon stop`, then retry.
+* An agent seems to ignore a message: `relay messages --state=held` (waiting for approval?) and
+  `relay ls` (is its state `dialog`?). Held messages are delivered when it is safe.
+* Leftover files after a crash: `relay gc`.
+
+## Development
+
+```sh
+make check        # gofmt + vet + tests under the race detector (what CI runs)
+make short        # quick tests only
+make fuzz         # every fuzz target for 10 s each
+make cross        # linux/darwin x amd64/arm64 builds into ./dist
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works and [docs/SECURITY.md](docs/SECURITY.md)
+for the threat model. The end-to-end tests drive the real `relay` binary against a scripted fake tool;
+opt-in checks against real Claude and Codex are described in the architecture notes.
+
+## License
+
+Relay is released under the [BSD 3-Clause License](LICENSE). The third-party modules linked into the
+binary, and their licences, are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+(regenerate with `make notices`).

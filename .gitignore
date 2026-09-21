@@ -1,0 +1,17 @@
+bin/
+dist/
+*.test
+
+# AI assistant notes and config: local only, never pushed
+MEMORY.md
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+GEMINI.md
+.claude/
+.codex/
+.cursor/
+.cursorrules
+.windsurfrules
+.aider*
+.github/copilot-instructions.md
