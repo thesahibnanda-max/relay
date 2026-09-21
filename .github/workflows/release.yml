@@ -3,7 +3,7 @@ name: release
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md", "docs/**", "ui/**"]   # docs and website changes don't release the CLI
+    paths-ignore: ["**.md", "docs/**", "ui/**", "vercel.json"]   # docs and website changes don't release the CLI
 
 permissions:
   contents: write
