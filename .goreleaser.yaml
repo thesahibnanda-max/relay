@@ -45,10 +45,10 @@ release:
     **macOS, Linux and WSL: one line** (picks the right build, checks it, adds it to your PATH):
 
     ```sh
-    curl -fsSL https://raw.githubusercontent.com/thesahibnanda-max/relay/main/install.sh | bash
+    curl -fsSL https://relay-sahib-nanda.vercel.app/install.sh | bash
     ```
 
-    To install exactly this version: `curl -fsSL https://raw.githubusercontent.com/thesahibnanda-max/relay/main/install.sh | RELAY_VERSION={{ .Tag }} bash`
+    To install exactly this version: `curl -fsSL https://relay-sahib-nanda.vercel.app/install.sh | RELAY_VERSION={{ .Tag }} bash`
 
     Then open a new terminal and run `relay doctor`.
 

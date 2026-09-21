@@ -1,7 +1,7 @@
 #!/bin/sh
 # Relay installer for macOS, Linux and WSL.
 #
-#   curl -fsSL https://raw.githubusercontent.com/thesahibnanda-max/relay/main/install.sh | bash
+#   curl -fsSL https://relay-sahib-nanda.vercel.app/install.sh | bash
 #
 # Downloads the latest release build for this machine, checks its checksum, installs
 # it to ~/.local/bin and adds that folder to your PATH (in your shell's startup file).

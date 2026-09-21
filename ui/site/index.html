@@ -55,7 +55,7 @@
         <p class="lead">Run Claude Code and Codex side by side, each in its own terminal. Relay lets them hand work to each other, ask questions and answer back, while every terminal still looks and behaves exactly like the tool itself.</p>
 
         <div class="cmd" data-cmd-box>
-          <code id="install-cmd" class="cmd-text" data-install-cmd>curl -fsSL /install.sh | bash</code>
+          <code id="install-cmd" class="cmd-text" data-install-cmd>curl -fsSL https://relay-sahib-nanda.vercel.app/install.sh | bash</code>
           <button class="btn btn-primary btn-copy" type="button" data-copy="#install-cmd">
             <svg class="i-copy" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             <svg class="i-check" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -63,7 +63,6 @@
           </button>
         </div>
         <p class="fine">Picks the right build for your machine, checks it, and adds it to your PATH. No sudo needed.</p>
-        <noscript><p class="fine">JavaScript is off, so the exact command can't be shown here. Use the manual download steps on the <a href="https://github.com/thesahibnanda-max/relay/releases/latest">latest release page</a>.</p></noscript>
 
         <div class="cta">
           <a class="btn btn-primary" href="#demo">See the demo</a>
@@ -152,10 +151,20 @@
       <p class="section-lead">Two terminals, two different tools, one team. Ask Claude Code to say hi to Codex, and the message shows up in Codex's terminal.</p>
 
       <figure class="shot">
-        <a class="shot-frame" href="assets/demo.png" target="_blank" rel="noopener">
+        <!-- Two versions of the screenshot; CSS shows the one that matches the active theme. -->
+        <a class="shot-frame shot-dark" href="assets/demo.png" target="_blank" rel="noopener">
           <picture>
             <source type="image/webp" srcset="assets/demo-900.webp 900w, assets/demo.webp 1774w" sizes="(min-width: 70rem) 1088px, calc(100vw - 2rem)">
             <img src="assets/demo.png" width="1774" height="887" loading="lazy" decoding="async" alt="Two terminal windows side by side, joined by a glowing line labelled &quot;relay&quot;. On the left, Claude Code is told &quot;Say Hi to codex&quot; and reports &quot;Message sent to codex!&quot;. The message travels through Relay to the terminal on the right, where Codex shows &quot;New message from claude: Hi codex!&quot;. Opens the full-size image.">
+          </picture>
+          <span class="marker m1" aria-hidden="true">1</span>
+          <span class="marker m2" aria-hidden="true">2</span>
+          <span class="marker m3" aria-hidden="true">3</span>
+        </a>
+        <a class="shot-frame shot-light" href="assets/lightdemo.png" target="_blank" rel="noopener">
+          <picture>
+            <source type="image/webp" srcset="assets/lightdemo-900.webp 900w, assets/lightdemo.webp 1774w" sizes="(min-width: 70rem) 1088px, calc(100vw - 2rem)">
+            <img src="assets/lightdemo.png" width="1774" height="887" loading="lazy" decoding="async" alt="Two terminal windows side by side, joined by a glowing line labelled &quot;relay&quot;. On the left, Claude Code is told &quot;Say Hi to codex&quot; and reports &quot;Message sent to codex!&quot;. The message travels through Relay to the terminal on the right, where Codex shows &quot;New message from claude: Hi codex!&quot;. Opens the full-size image.">
           </picture>
           <span class="marker m1" aria-hidden="true">1</span>
           <span class="marker m2" aria-hidden="true">2</span>
@@ -183,7 +192,7 @@
         </div>
 
         <div class="cmd" data-cmd-box>
-          <code id="install-cmd-2" class="cmd-text" data-install-cmd>curl -fsSL /install.sh | bash</code>
+          <code id="install-cmd-2" class="cmd-text" data-install-cmd>curl -fsSL https://relay-sahib-nanda.vercel.app/install.sh | bash</code>
           <button class="btn btn-primary btn-copy" type="button" data-copy="#install-cmd-2">
             <svg class="i-copy" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
             <svg class="i-check" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>

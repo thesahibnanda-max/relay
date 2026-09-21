@@ -109,31 +109,63 @@ test.describe('small screens', () => {
 });
 
 test.describe('demo screenshot', () => {
-  test('is served as a small WebP with a PNG fallback and a full-size link', async ({ page }) => {
+  for (const kind of ['dark', 'light'] as const) {
+    test(`${kind} version is a small WebP with a PNG fallback and a full-size link`, async ({ page }) => {
+      await page.goto('/');
+      const frame = page.locator(`#demo .shot-${kind}`);
+      const img = frame.locator('img');
+      const alt = await img.getAttribute('alt');
+      expect(alt!.length).toBeGreaterThan(40);
+      await expect(img).toHaveAttribute('width', '1774');
+      await expect(img).toHaveAttribute('height', '887');
+      await expect(img).toHaveAttribute('loading', 'lazy');
+      const srcset = await frame.locator('picture source').getAttribute('srcset');
+      for (const url of srcset!.split(',').map((x) => x.trim().split(' ')[0])) {
+        const res = await page.request.get(url);
+        expect(res.status(), url).toBe(200);
+        expect(res.headers()['content-type'], url).toBe('image/webp');
+        expect((await res.body()).length, `${url} should stay light`).toBeLessThan(150_000);
+      }
+      const full = await page.request.get((await frame.getAttribute('href'))!);
+      expect(full.status()).toBe(200);
+      expect(full.headers()['content-type']).toBe('image/png');
+      await expect(frame).toHaveAttribute('rel', /noopener/);
+    });
+  }
+
+  test('the dark image shows in dark mode and the light one in light mode', async ({ page }) => {
+    await page.emulateMedia({ colorScheme: 'dark' });
     await page.goto('/');
-    const img = page.locator('#demo img');
-    const alt = await img.getAttribute('alt');
-    expect(alt!.length).toBeGreaterThan(40);
-    await expect(img).toHaveAttribute('width', '1774');
-    await expect(img).toHaveAttribute('height', '887');
-    await expect(img).toHaveAttribute('loading', 'lazy');
-    const srcset = await page.locator('#demo picture source').getAttribute('srcset');
-    for (const url of srcset!.split(',').map((x) => x.trim().split(' ')[0])) {
-      const res = await page.request.get(url);
-      expect(res.status(), url).toBe(200);
-      expect(res.headers()['content-type'], url).toBe('image/webp');
-      expect((await res.body()).length, `${url} should stay light`).toBeLessThan(150_000);
-    }
-    const link = page.locator('#demo a.shot-frame');
-    const full = await page.request.get((await link.getAttribute('href'))!);
-    expect(full.status()).toBe(200);
-    expect(full.headers()['content-type']).toBe('image/png');
-    await expect(link).toHaveAttribute('rel', /noopener/);
+    await expect(page.locator('#demo .shot-dark')).toBeVisible();
+    await expect(page.locator('#demo .shot-light')).toBeHidden();
+    await page.emulateMedia({ colorScheme: 'light' });
+    await expect(page.locator('#demo .shot-light')).toBeVisible();
+    await expect(page.locator('#demo .shot-dark')).toBeHidden();
+  });
+
+  test('the theme toggle switches the image too, and only the visible one is downloaded', async ({ page }) => {
+    await page.emulateMedia({ colorScheme: 'dark' });
+    const loaded: string[] = [];
+    page.on('response', (r) => { if (/\/(light)?demo[^/]*\.(webp|png)$/.test(r.url())) loaded.push(r.url().split('/').pop()!); });
+    await page.goto('/');
+    const section = page.locator('#demo');
+    await section.scrollIntoViewIfNeeded();
+    await expect.poll(() => page.locator('#demo .shot-dark img').evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
+    expect(loaded.filter((f) => f.startsWith('lightdemo'))).toEqual([]);
+    await page.locator('#theme-btn').click(); // dark -> light
+    await expect(page.locator('#demo .shot-light')).toBeVisible();
+    await expect(page.locator('#demo .shot-dark')).toBeHidden();
+    const light = page.locator('#demo .shot-light img');
+    await light.scrollIntoViewIfNeeded();
+    await expect.poll(() => light.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
+    expect(await light.evaluate((el: HTMLImageElement) => el.currentSrc)).toMatch(/lightdemo[^/]*\.webp$/);
+    await page.locator('#theme-btn').click(); // back to dark
+    await expect(page.locator('#demo .shot-dark')).toBeVisible();
   });
 
   test('actually renders, sharp, without stretching', async ({ page }) => {
     await page.goto('/');
-    const img = page.locator('#demo img');
+    const img = page.locator('#demo .shot-frame:visible img');
     await img.scrollIntoViewIfNeeded();
     await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
     const m = await img.evaluate((el: HTMLImageElement) => ({ nw: el.naturalWidth, nh: el.naturalHeight, w: el.clientWidth, h: el.clientHeight, src: el.currentSrc }));
@@ -142,16 +174,20 @@ test.describe('demo screenshot', () => {
     expect(m.w / m.h).toBeCloseTo(2, 1);
   });
 
-  test('has three numbered markers on the image and a matching legend', async ({ page }) => {
-    await page.goto('/');
-    await expect(page.locator('#demo .marker')).toHaveCount(3);
-    await expect(page.locator('#demo .legend li')).toHaveCount(3);
-    const inside = await page.locator('#demo .marker').evaluateAll((els) => {
-      const frame = els[0].closest('.shot-frame')!.getBoundingClientRect();
-      return els.map((e) => { const r = e.getBoundingClientRect(); return r.left >= frame.left && r.right <= frame.right && r.top >= frame.top && r.bottom <= frame.bottom; });
+  for (const scheme of ['dark', 'light'] as const) {
+    test(`has three numbered markers on the ${scheme} image and a matching legend`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.goto('/');
+      const markers = page.locator('#demo .shot-frame:visible .marker');
+      await expect(markers).toHaveCount(3);
+      await expect(page.locator('#demo .legend li')).toHaveCount(3);
+      const inside = await markers.evaluateAll((els) => {
+        const frame = els[0].closest('.shot-frame')!.getBoundingClientRect();
+        return els.map((e) => { const r = e.getBoundingClientRect(); return r.left >= frame.left && r.right <= frame.right && r.top >= frame.top && r.bottom <= frame.bottom; });
+      });
+      expect(inside).toEqual([true, true, true]);
     });
-    expect(inside).toEqual([true, true, true]);
-  });
+  }
 
   test('there is no video left on the page', async ({ page }) => {
     await page.goto('/');
