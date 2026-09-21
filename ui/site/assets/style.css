@@ -260,9 +260,9 @@ code:not(pre code) {
   font: 700 clamp(.65rem, 1.3vw, .85rem) / 1 var(--font-mono);
   box-shadow: 0 0 0 3px rgb(0 0 0 / .35), 0 6px 16px rgb(0 0 0 / .45);
 }
-.m1 { left: 17.8%; top: 38.7%; }  /* the "Say Hi to codex" prompt */
-.m2 { left: 47%; top: 49%; }      /* "Message sent to codex!" */
-.m3 { left: 96.2%; top: 68%; }      /* corner of the "New message from claude" box */
+.m1 { left: 16.4%; top: 39.2%; }  /* the "Say Hi to codex" prompt */
+.m2 { left: 44.9%; top: 39.7%; }  /* the "relay" chip carrying the message across */
+.m3 { left: 96.3%; top: 63%; }    /* corner of the "New message from claude" box */
 
 .legend { list-style: none; counter-reset: leg; margin: 1.5rem 0 0; padding: 0; display: grid; gap: 1rem; }
 .legend li { counter-increment: leg; display: grid; grid-template-columns: auto 1fr; gap: .85rem; align-items: start; color: var(--muted); }
