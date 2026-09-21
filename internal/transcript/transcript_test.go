@@ -170,7 +170,12 @@ func TestTailerEntersLargeFilesNearTheEnd(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go tl.Run(ctx)
-	waitFor(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(got) > 10 })
+	// Lines arrive one at a time: wait for the last one, not just for "some".
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(got) > 10 && strings.HasPrefix(got[len(got)-1], "line-1999")
+	})
 	mu.Lock()
 	defer mu.Unlock()
 	if got[0] == "line-0000 padding padding padding padding" || !strings.HasPrefix(got[len(got)-1], "line-1999") {
