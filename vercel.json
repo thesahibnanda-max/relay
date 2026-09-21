@@ -2,8 +2,8 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
   "installCommand": "echo skip",
-  "buildCommand": "node ui/scripts/sync-install.mjs",
-  "outputDirectory": "ui/site",
+  "buildCommand": "node scripts/sync-install.mjs",
+  "outputDirectory": "site",
   "cleanUrls": true,
   "headers": [
     {

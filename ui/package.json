@@ -3,9 +3,6 @@
   "private": true,
   "type": "module",
   "description": "Landing page for Relay. Plain HTML/CSS/JS in site/; Node is only used for dev and tests.",
-  "engines": {
-    "node": ">=20"
-  },
   "scripts": {
     "sync": "node scripts/sync-install.mjs",
     "predev": "npm run sync",

@@ -20,8 +20,8 @@ try {
 } catch {
   fail(
     `cannot read ${src}\n` +
-      '  The build must run with the whole repository available. On Vercel, leave Root Directory at the ' +
-      'repository root (the root vercel.json points at ui/site).',
+      '  The build needs the whole repository. On Vercel, set Root Directory to "ui" (the root vercel.json ' +
+      'paths are relative to it); the repository is cloned in full, so ../install.sh is available.',
   );
 }
 if (data.length === 0) fail(`${src} is empty`);
