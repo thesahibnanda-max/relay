@@ -332,6 +332,25 @@ func (w *world) runRelay(args ...string) (string, string, int) {
 	return o.String(), e.String(), code
 }
 
+// waitForFileErr polls up to 10 s for path to exist and returns the last stat error.
+func waitForFileErr(path string) error {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		_, err := os.Stat(path)
+		if err == nil || time.Now().After(deadline) {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func waitForFile(t *testing.T, path string) {
+	t.Helper()
+	if err := waitForFileErr(path); err != nil {
+		t.Fatalf("run dir file %s: %v", filepath.Base(path), err)
+	}
+}
+
 func TestTwoAgentsCollaborateAndLeaveNoFootprint(t *testing.T) {
 	w := newWorld(t)
 	before := w.footprint()
@@ -346,14 +365,13 @@ func TestTwoAgentsCollaborateAndLeaveNoFootprint(t *testing.T) {
 
 	agents := w.agents(session)
 	aliceDir, bobDir := w.agentDir(agents["alice"].ID), w.agentDir(agents["bob"].ID)
+	// The identity line is printed before the run dir is populated, so wait for the files.
 	for _, d := range []string{aliceDir, bobDir} {
 		for _, f := range []string{"ctl.sock", "ctl.token", "agent.json"} {
-			if _, err := os.Stat(filepath.Join(d, f)); err != nil {
-				t.Fatalf("run dir file %s: %v", f, err)
-			}
+			waitForFile(t, filepath.Join(d, f))
 		}
 	}
-	if _, err := os.Stat(filepath.Join(aliceDir, "mcp.json")); err != nil {
+	if err := waitForFileErr(filepath.Join(aliceDir, "mcp.json")); err != nil {
 		t.Fatalf("claude gets an MCP config file: %v", err)
 	}
 

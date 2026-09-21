@@ -177,9 +177,10 @@ func TestSendDeliversAndReplyCompletesTheThread(t *testing.T) {
 	if m.ID != res.ID || m.From != "alice" || m.FromRole != "orchestrator" || m.Body != "add tests" || m.Priority != 1 || m.Kind != "task" {
 		t.Fatalf("delivered %+v", m)
 	}
+	// Delivery is at-least-once: a redelivery racing the send may make it two attempts.
 	waitFor(t, "message dispatched", func() bool {
 		got, _ := e.srv.st.GetMessage(bg, m.ID)
-		return got.State == store.MsgDispatched && got.Attempts == 1
+		return got.State == store.MsgDispatched && got.Attempts >= 1
 	})
 
 	if r := bob.rpc(proto.OpMsgState, proto.MsgStateArgs{ID: m.ID, State: "injected"}); !r.OK {
