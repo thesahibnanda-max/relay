@@ -1,8 +1,8 @@
 name: ci
 
+# Runs on pull requests only: main accepts nothing but PRs whose checks passed,
+# so the release workflow does not test again after the merge.
 on:
-  push:
-    branches: [main]
   pull_request:
 
 jobs:
