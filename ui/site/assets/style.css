@@ -263,6 +263,21 @@ code:not(pre code) {
 .m1 { left: 16.4%; top: 39.2%; }  /* the "Say Hi to codex" prompt */
 .m2 { left: 44.9%; top: 39.7%; }  /* the "relay" chip carrying the message across */
 .m3 { left: 96.3%; top: 63%; }    /* corner of the "New message from claude" box */
+/* the light screenshot lays its windows out slightly differently */
+.shot-light .m1 { left: 16.4%; top: 39.6%; }
+.shot-light .m2 { left: 45.2%; top: 42.3%; }
+.shot-light .m3 { left: 96.3%; top: 64.7%; }
+
+/* Dark screenshot in dark mode, light screenshot in light mode (same rules as the theme toggle). */
+.shot-light { display: none; }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .shot-dark { display: none; }
+  :root:not([data-theme="dark"]) .shot-light { display: block; }
+}
+:root[data-theme="light"] .shot-dark { display: none; }
+:root[data-theme="light"] .shot-light { display: block; }
+:root[data-theme="dark"] .shot-dark { display: block; }
+:root[data-theme="dark"] .shot-light { display: none; }
 
 .legend { list-style: none; counter-reset: leg; margin: 1.5rem 0 0; padding: 0; display: grid; gap: 1rem; }
 .legend li { counter-increment: leg; display: grid; grid-template-columns: auto 1fr; gap: .85rem; align-items: start; color: var(--muted); }

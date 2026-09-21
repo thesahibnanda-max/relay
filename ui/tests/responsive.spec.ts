@@ -25,21 +25,24 @@ for (const width of WIDTHS) {
       }
     });
 
-    test('demo screenshot fills the width, keeps its 2:1 shape and stays on screen', async ({ page }) => {
-      await page.goto('/');
-      const frame = page.locator('.shot-frame');
-      await frame.scrollIntoViewIfNeeded();
-      const box = (await frame.boundingBox())!;
-      expect(box.width / box.height).toBeCloseTo(2, 1);
-      expect(box.x).toBeGreaterThanOrEqual(0);
-      expect(box.x + box.width).toBeLessThanOrEqual(width);
-      // Markers scale with the image and never leave it.
-      const bad = await page.locator('.marker').evaluateAll((els) => {
-        const f = els[0].closest('.shot-frame')!.getBoundingClientRect();
-        return els.filter((e) => { const r = e.getBoundingClientRect(); return r.left < f.left || r.right > f.right || r.top < f.top || r.bottom > f.bottom; }).length;
+    for (const scheme of ['dark', 'light'] as const) {
+      test(`${scheme} demo screenshot fills the width, keeps its 2:1 shape and stays on screen`, async ({ page }) => {
+        await page.emulateMedia({ colorScheme: scheme });
+        await page.goto('/');
+        const frame = page.locator('.shot-frame:visible');
+        await frame.scrollIntoViewIfNeeded();
+        const box = (await frame.boundingBox())!;
+        expect(box.width / box.height).toBeCloseTo(2, 1);
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(width);
+        // Markers scale with the image and never leave it.
+        const bad = await frame.locator('.marker').evaluateAll((els) => {
+          const f = els[0].closest('.shot-frame')!.getBoundingClientRect();
+          return els.filter((e) => { const r = e.getBoundingClientRect(); return r.left < f.left || r.right > f.right || r.top < f.top || r.bottom > f.bottom; }).length;
+        });
+        expect(bad).toBe(0);
       });
-      expect(bad).toBe(0);
-    });
+    }
 
     test('header collapses into a menu below 768px only', async ({ page }) => {
       await page.goto('/');
