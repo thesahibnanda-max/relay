@@ -1,0 +1,22 @@
+{
+  "name": "relay-site",
+  "private": true,
+  "type": "module",
+  "description": "Landing page for Relay. Plain HTML/CSS/JS in site/; Node is only used for dev and tests.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "sync": "node scripts/sync-install.mjs",
+    "predev": "npm run sync",
+    "dev": "node scripts/serve.mjs",
+    "start": "npm run dev",
+    "build": "node scripts/sync-install.mjs",
+    "pretest": "npm run sync",
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
+    "@playwright/test": "^1.63.0"
+  }
+}

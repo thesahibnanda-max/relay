@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Relay: let your AI coding agents work as one team</title>
+  <meta name="description" content="Relay lets Claude Code and Codex agents in separate terminals hand work to each other, ask questions and answer back, while every terminal still behaves exactly like the tool itself. Free, open source, one command to install.">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self'; font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0a0b0d" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#fafaf7" media="(prefers-color-scheme: light)">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Relay: let your AI coding agents work as one team">
+  <meta property="og:description" content="Run Claude Code and Codex side by side. They hand work to each other; you stay in charge.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="assets/fonts/inter-latin-var.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="assets/fonts/jetbrains-mono-latin-var.woff2" as="font" type="font/woff2" crossorigin>
+  <script src="assets/theme.js"></script>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="wrap bar">
+      <a class="brand" href="#top" aria-label="Relay, back to top">
+        <svg class="brand-mark" viewBox="0 0 32 32" width="28" height="28" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor" opacity=".14"/><path d="M9 10l7 6-7 6M17 22h7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>Relay</span>
+      </a>
+      <button class="icon-btn menu-btn" id="menu-btn" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Menu">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <nav class="nav" id="site-nav" aria-label="Main">
+        <a href="#problem">Problem</a>
+        <a href="#solution">Solution</a>
+        <a href="#demo">Demo</a>
+        <a href="#install">Install</a>
+        <a class="btn btn-ghost btn-sm" href="https://github.com/thesahibnanda-max/relay" rel="noopener">
+          <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.5 7.5 0 0 1 4 0c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </nav>
+      <button class="icon-btn" id="theme-btn" type="button" aria-label="Switch color theme">
+        <svg class="i-sun" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <svg class="i-moon" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero wrap" id="top">
+      <div class="hero-copy">
+        <p class="eyebrow">Open source &middot; macOS, Linux &amp; WSL</p>
+        <h1>Your AI coding agents, working as <span class="accent">one team</span>.</h1>
+        <p class="lead">Run Claude Code and Codex side by side, each in its own terminal. Relay lets them hand work to each other, ask questions and answer back, while every terminal still looks and behaves exactly like the tool itself.</p>
+
+        <div class="cmd" data-cmd-box>
+          <code id="install-cmd" class="cmd-text" data-install-cmd>curl -fsSL /install.sh | bash</code>
+          <button class="btn btn-primary btn-copy" type="button" data-copy="#install-cmd">
+            <svg class="i-copy" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            <svg class="i-check" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span class="copy-label">Copy</span>
+          </button>
+        </div>
+        <p class="fine">Picks the right build for your machine, checks it, and adds it to your PATH. No sudo needed.</p>
+        <noscript><p class="fine">JavaScript is off, so the exact command can't be shown here. Use the manual download steps on the <a href="https://github.com/thesahibnanda-max/relay/releases/latest">latest release page</a>.</p></noscript>
+
+        <div class="cta">
+          <a class="btn btn-primary" href="#demo">Watch the demo</a>
+          <a class="btn btn-ghost" href="https://github.com/thesahibnanda-max/relay" rel="noopener">View on GitHub</a>
+        </div>
+      </div>
+
+      <figure class="term" role="img" aria-label="Example: the lead agent asks coder to add tests; coder does it and replies, and the answer shows up in the lead's terminal.">
+        <div class="term-bar" aria-hidden="true"><i></i><i></i><i></i><span>relay session</span></div>
+<pre class="term-body" aria-hidden="true"><span class="t-dim">lead &#10095;</span> tell coder to add tests for parser.go
+<span class="t-acc">  &#8627; relay_send</span> <span class="t-dim">&rarr; coder &middot; task &middot; normal</span>
+
+<span class="t-dim">coder &#10095;</span> <span class="t-dim">[from lead]</span> Add tests for parser.go
+<span class="t-acc">  &#8627; relay_send</span> <span class="t-dim">&rarr; lead</span> "12 tests added"
+
+<span class="t-dim">lead &#10095;</span> <span class="t-ok">&#9679;</span> coder replied: 12 tests added</pre>
+      </figure>
+    </section>
+
+    <section class="section wrap" id="problem" aria-labelledby="problem-h">
+      <p class="eyebrow eyebrow-warn">The problem</p>
+      <h2 id="problem-h">Terminal AI agents are islands.</h2>
+      <p class="section-lead">Real projects need more than one agent: one plans, one builds, one reviews. But every agent lives alone in its own window, and <em>you</em> are the glue.</p>
+      <div class="cards">
+        <article class="card card-warn">
+          <h3>Nobody knows anybody</h3>
+          <p>Claude Code in one terminal, Codex in another. Neither knows the other exists, so they can't hand off a task or ask each other a question.</p>
+        </article>
+        <article class="card card-warn">
+          <h3>You become the courier</h3>
+          <p>You copy answers between windows, re-explain the context every time, and lose the thread when the work gets big.</p>
+        </article>
+        <article class="card card-warn">
+          <h3>Busy agents can't be reached</h3>
+          <p>A message sent to an agent mid-task is lost, or barges in at the worst moment: on top of a permission prompt, or over the text you were typing.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section wrap" id="solution" aria-labelledby="solution-h">
+      <p class="eyebrow">The solution</p>
+      <h2 id="solution-h">Relay turns them into a team.</h2>
+      <p class="section-lead">Relay wraps the tools you already use. Agents join a shared session, get a name and a role, and talk through a small set of tools, delivered only when it is safe. Nothing about your setup changes.</p>
+
+      <ol class="steps">
+        <li>
+          <h3>Start a session</h3>
+          <p>Launch your first agent and give it a role.</p>
+          <pre class="code"><code>relay claude orchestrator --session=NEW --name=lead</code></pre>
+        </li>
+        <li>
+          <h3>Add teammates</h3>
+          <p>In another terminal, join with the session id it printed.</p>
+          <pre class="code"><code>relay codex developer --session=&lt;id&gt; --name=coder</code></pre>
+        </li>
+        <li>
+          <h3>Just talk</h3>
+          <p>Say what you want. The agents pass the work along and the answer lands back where you asked.</p>
+          <pre class="code"><code>"Ask coder to run the tests and tell me what fails."</code></pre>
+        </li>
+      </ol>
+
+      <div class="cards cards-4">
+        <article class="card">
+          <h3>Zero footprint</h3>
+          <p>Relay never edits your tools' settings or your project. Run plain <code>claude</code> or <code>codex</code> afterwards and they behave exactly as before.</p>
+        </article>
+        <article class="card">
+          <h3>Polite by design</h3>
+          <p>Messages are never typed into a permission dialog or over a half-written prompt. They wait, and arrive when it is safe.</p>
+        </article>
+        <article class="card">
+          <h3>You stay in charge</h3>
+          <p>Hold an agent's inbox for your approval, step in with <code>relay send</code>, and rely on loop and rate limits to stop runaway chatter.</p>
+        </article>
+        <article class="card">
+          <h3>Private and local</h3>
+          <p>No network listener, just a local socket. Everything is logged on your machine, and secrets are masked before one agent reads another's history.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section wrap" id="demo" aria-labelledby="demo-h">
+      <p class="eyebrow">See it work</p>
+      <h2 id="demo-h">Demo</h2>
+      <div class="video-frame">
+        <video id="demo-video" src="assets/demo.mp4" poster="assets/demo-poster.jpg" width="1024" height="576" autoplay muted loop playsinline controls preload="auto" aria-label="Screen recording: Claude Code is asked to say hi to Codex. The message appears in the Codex terminal, Codex replies, and the answer comes back to Claude Code. The recording plays on a loop."></video>
+        <button class="play-overlay" id="play-overlay" type="button" hidden>
+          <svg viewBox="0 0 24 24" width="34" height="34" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+          <span>Play demo</span>
+        </button>
+      </div>
+      <p class="caption">A real recording. Claude Code is told to say hi to Codex; the message appears in Codex's terminal, Codex replies, and the answer lands back in Claude's. It plays on a loop.</p>
+    </section>
+
+    <section class="section wrap" id="install" aria-labelledby="install-h">
+      <p class="eyebrow">Get started</p>
+      <h2 id="install-h">Install in one line.</h2>
+      <p class="section-lead">The same command works everywhere. Pick your system for the details.</p>
+
+      <div class="tabs" data-tabs>
+        <div class="tablist" role="tablist" aria-label="Operating system">
+          <button role="tab" type="button" id="tab-mac" aria-controls="panel-mac" aria-selected="true">macOS</button>
+          <button role="tab" type="button" id="tab-linux" aria-controls="panel-linux" aria-selected="false" tabindex="-1">Linux</button>
+          <button role="tab" type="button" id="tab-wsl" aria-controls="panel-wsl" aria-selected="false" tabindex="-1">WSL</button>
+        </div>
+
+        <div class="cmd" data-cmd-box>
+          <code id="install-cmd-2" class="cmd-text" data-install-cmd>curl -fsSL /install.sh | bash</code>
+          <button class="btn btn-primary btn-copy" type="button" data-copy="#install-cmd-2">
+            <svg class="i-copy" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+            <svg class="i-check" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <span class="copy-label">Copy</span>
+          </button>
+        </div>
+
+        <div class="tabpanel" role="tabpanel" id="panel-mac" aria-labelledby="tab-mac" tabindex="0">
+          <p>Open <strong>Terminal</strong> and paste the command. It works on Apple Silicon and Intel Macs, and detects which one you have. Installing with <code>curl</code> also avoids the "unidentified developer" warning you get from browser downloads.</p>
+        </div>
+        <div class="tabpanel" role="tabpanel" id="panel-linux" aria-labelledby="tab-linux" tabindex="0">
+          <p>Paste it into any terminal. It installs to <code>~/.local/bin</code> without sudo, for Intel/AMD and ARM machines, and adds that folder to your PATH.</p>
+        </div>
+        <div class="tabpanel" role="tabpanel" id="panel-wsl" aria-labelledby="tab-wsl" tabindex="0">
+          <p>Run it inside your WSL terminal (Ubuntu and friends), not in PowerShell. WSL is Linux, so you get the Linux build. Native Windows isn't supported.</p>
+        </div>
+      </div>
+
+      <p class="after">Then open a new terminal and run <code>relay doctor</code> to check everything is in order.</p>
+
+      <div class="cards cards-3">
+        <article class="card">
+          <h3>Upgrade</h3>
+          <p>Run the same command again. It fetches the latest release and replaces the old one.</p>
+        </article>
+        <article class="card">
+          <h3>Pin a version</h3>
+          <p>Put <code>RELAY_VERSION=v0.0.2</code> in front of <code>bash</code> to install exactly that release.</p>
+        </article>
+        <article class="card">
+          <h3>Remove</h3>
+          <p>Delete <code>~/.local/bin/relay</code> and the <code># added by relay installer</code> line in your shell startup file.</p>
+        </article>
+      </div>
+      <p class="after">Prefer to download by hand? Every build has a checksum on the <a href="https://github.com/thesahibnanda-max/relay/releases/latest" rel="noopener">latest release</a> page.</p>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap foot">
+      <div>
+        <a class="brand" href="#top" aria-label="Relay, back to top">
+          <svg class="brand-mark" viewBox="0 0 32 32" width="24" height="24" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor" opacity=".14"/><path d="M9 10l7 6-7 6M17 22h7" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span>Relay</span>
+        </a>
+        <p class="fine">Built by Sahib Nanda. Released under the BSD 3-Clause licence.</p>
+        <p class="fine">Inspired by <a href="https://www.iris-tl.dev/" rel="noopener">Iris</a>, made by <a href="https://github.com/psrth" rel="noopener">psrth</a>.</p>
+      </div>
+      <ul class="foot-links">
+        <li><a href="https://github.com/thesahibnanda-max/relay" rel="noopener">GitHub</a></li>
+        <li><a href="https://github.com/thesahibnanda-max/relay/releases" rel="noopener">Releases</a></li>
+        <li><a href="https://github.com/thesahibnanda-max/relay/blob/main/docs/SECURITY.md" rel="noopener">Security</a></li>
+        <li><a href="https://github.com/thesahibnanda-max/relay/blob/main/LICENSE" rel="noopener">License</a></li>
+      </ul>
+    </div>
+  </footer>
+
+  <script src="assets/app.js" defer></script>
+</body>
+</html>
