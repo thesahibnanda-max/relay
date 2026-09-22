@@ -124,11 +124,13 @@ func FuzzMeshEnvelope(f *testing.F) {
 		var welcome MeshWelcome
 		var handoff MeshMsgHandoff
 		var receipt MeshMsgReceipt
+		var ack MeshMsgAck
 		var agent MeshAgentInfo
 		_ = json.Unmarshal(env.Payload, &hello)
 		_ = json.Unmarshal(env.Payload, &welcome)
 		_ = json.Unmarshal(env.Payload, &handoff)
 		_ = json.Unmarshal(env.Payload, &receipt)
+		_ = json.Unmarshal(env.Payload, &ack)
 		_ = json.Unmarshal(env.Payload, &agent)
 		if b, err := MeshMarshal(env.Type, env.Payload); err == nil && len(b) == 0 {
 			t.Fatal("empty marshal")

@@ -188,3 +188,12 @@ type MeshMsgReceipt struct {
 	Detail string `json:"detail,omitempty"`
 	Rev    uint64 `json:"rev"`
 }
+
+// MeshMsgAck is a lightweight, no-content acknowledgement that a
+// MeshMsgReceipt frame was received and applied - purely a diagnostic
+// nicety over the short-lived connection that carried it, never required
+// for correctness: Hub.Resync's per-peer resend of PendingReceipts already
+// guarantees eventual delivery even if this reply is lost or never read.
+type MeshMsgAck struct {
+	ID string `json:"id"`
+}

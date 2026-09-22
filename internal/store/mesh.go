@@ -278,6 +278,21 @@ func (s *Store) GetMeshAgent(ctx context.Context, agentID string) (MeshAgent, er
 	return a, err
 }
 
+// FindMeshAgentByName returns a non-tombstoned gossiped agent by exact
+// (case-insensitive) name in a session - the remote-target fallback
+// routeSend uses once a local name lookup has already failed (see
+// internal/daemon's resolveTargets, M-mesh-4).
+func (s *Store) FindMeshAgentByName(ctx context.Context, sessionID, name string) (MeshAgent, error) {
+	row := s.r.QueryRowContext(ctx, `
+		SELECT agent_id, session_id, owner_peer, name, tool, role, status, can_interrupt, can_broadcast, last_seen_at, version, tombstoned
+		FROM mesh_agents WHERE session_id=? AND name=? COLLATE NOCASE AND tombstoned=0`, ids.Normalize(sessionID), name)
+	a, err := scanMeshAgent(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return MeshAgent{}, ErrNotFound
+	}
+	return a, err
+}
+
 func scanMeshAgent(sc interface{ Scan(...any) error }) (MeshAgent, error) {
 	var a MeshAgent
 	var appr, bcast, tomb int
