@@ -99,6 +99,29 @@ func (s *Store) GetMeshSession(ctx context.Context, sessionID string) (MeshSessi
 	return x, nil
 }
 
+// ListMeshSessionIDs returns every session this daemon participates in as a
+// mesh member - used by the periodic resync sweep (see daemon.Server.sweep,
+// M-mesh-5) to heal a partition without needing a local agent event to
+// happen to trigger it. Cheap and empty for the overwhelming majority of
+// daemons that have never used a mesh feature: mesh_sessions only ever gets
+// a row via Invite or Join.
+func (s *Store) ListMeshSessionIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.r.QueryContext(ctx, `SELECT session_id FROM mesh_sessions`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // UpsertMeshPeer records or refreshes what this daemon knows about a peer.
 // The first call for a (sessionID, peerID) pair sets addr and first_seen;
 // later calls only move addr/last_seen/status forward for that same peerID -
@@ -115,6 +138,32 @@ func (s *Store) UpsertMeshPeer(ctx context.Context, p MeshPeer) error {
 		INSERT INTO mesh_peers(session_id, peer_id, addr, first_seen, last_seen, status)
 		VALUES(?,?,?,?,?,?)
 		ON CONFLICT(session_id, peer_id) DO UPDATE SET addr=excluded.addr, last_seen=excluded.last_seen, status=excluded.status`,
+		ids.Normalize(p.SessionID), p.PeerID, p.Addr, now, now, status)
+	return err
+}
+
+// UpsertMeshPeerIfNew records a peer this daemon has only heard about
+// secondhand, from another peer's Welcome - creating it as unreachable if
+// this is the first time it's been seen, but leaving an existing row
+// completely untouched otherwise. A secondhand mention is never
+// authoritative over this daemon's own more direct knowledge of that same
+// peer: two Welcomes received concurrently during one Resync fan-out round
+// (see M-mesh-5) can each separately mention a THIRD peer that a sibling
+// goroutine, in the very same round, just finished linking to directly -
+// using plain UpsertMeshPeer here would let whichever Welcome is processed
+// last silently downgrade that peer back to unreachable, discarding the
+// direct, correct answer. Only a direct handshake with a peer (UpsertMeshPeer)
+// or a direct dial failure (SetMeshPeerStatus) may ever move its status.
+func (s *Store) UpsertMeshPeerIfNew(ctx context.Context, p MeshPeer) error {
+	now := ms(time.Now())
+	status := p.Status
+	if status == "" {
+		status = MeshPeerUnreachable
+	}
+	_, err := s.w.ExecContext(ctx, `
+		INSERT INTO mesh_peers(session_id, peer_id, addr, first_seen, last_seen, status)
+		VALUES(?,?,?,?,?,?)
+		ON CONFLICT(session_id, peer_id) DO NOTHING`,
 		ids.Normalize(p.SessionID), p.PeerID, p.Addr, now, now, status)
 	return err
 }
