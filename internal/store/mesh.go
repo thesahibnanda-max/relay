@@ -172,3 +172,122 @@ func (s *Store) ListMeshPeers(ctx context.Context, sessionID string) ([]MeshPeer
 	}
 	return out, rows.Err()
 }
+
+// MeshAgent is one agent owned by another daemon, as last gossiped to this
+// one. Version is a monotonic counter (the owning daemon's own choice of
+// scale - internal/federation uses that daemon's agents.last_seen_at in
+// milliseconds, but this table only ever compares versions, never
+// interprets them): applying a gossiped update only takes effect if its
+// Version is strictly greater than what is already stored, which is what
+// makes "keep the higher version" correct without needing to merge anything
+// - there is exactly one daemon that can ever produce a given (AgentID,
+// Version) pair.
+type MeshAgent struct {
+	AgentID      string
+	SessionID    string
+	OwnerPeer    string
+	Name         string
+	Tool         string
+	Role         string
+	Status       string
+	CanInterrupt bool
+	CanBroadcast bool
+	LastSeenAt   time.Time
+	Version      uint64
+	Tombstoned   bool
+}
+
+// UpsertMeshAgentIfNewer applies a gossiped agent update, but only if it is
+// newer than whatever this daemon already has for that agent id (or the
+// agent is new to it). Returns applied=false if the update was stale and
+// therefore ignored - the caller (internal/federation) uses this to decide
+// whether a collision check and re-gossip are even necessary.
+func (s *Store) UpsertMeshAgentIfNewer(ctx context.Context, a MeshAgent) (applied bool, err error) {
+	tx, err := s.w.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var existingVersion int64
+	err = tx.QueryRowContext(ctx, `SELECT version FROM mesh_agents WHERE agent_id=?`, a.AgentID).Scan(&existingVersion)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if err == nil && uint64(existingVersion) >= a.Version {
+		return false, tx.Commit() // stale or duplicate; nothing to apply
+	}
+
+	tomb := 0
+	if a.Tombstoned {
+		tomb = 1
+	}
+	appr, bcast := 0, 0
+	if a.CanInterrupt {
+		appr = 1
+	}
+	if a.CanBroadcast {
+		bcast = 1
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO mesh_agents(agent_id, session_id, owner_peer, name, tool, role, status, can_interrupt, can_broadcast, last_seen_at, version, tombstoned)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(agent_id) DO UPDATE SET
+			owner_peer=excluded.owner_peer, name=excluded.name, tool=excluded.tool, role=excluded.role,
+			status=excluded.status, can_interrupt=excluded.can_interrupt, can_broadcast=excluded.can_broadcast,
+			last_seen_at=excluded.last_seen_at, version=excluded.version, tombstoned=excluded.tombstoned`,
+		a.AgentID, ids.Normalize(a.SessionID), a.OwnerPeer, a.Name, a.Tool, a.Role, a.Status, appr, bcast, ms(a.LastSeenAt), a.Version, tomb,
+	); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+// ListMeshAgents returns every non-tombstoned agent this daemon has learned
+// about for a session, owned by any peer.
+func (s *Store) ListMeshAgents(ctx context.Context, sessionID string) ([]MeshAgent, error) {
+	rows, err := s.r.QueryContext(ctx, `
+		SELECT agent_id, session_id, owner_peer, name, tool, role, status, can_interrupt, can_broadcast, last_seen_at, version, tombstoned
+		FROM mesh_agents WHERE session_id=? AND tombstoned=0 ORDER BY name COLLATE NOCASE`, ids.Normalize(sessionID))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []MeshAgent
+	for rows.Next() {
+		a, err := scanMeshAgent(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// GetMeshAgent returns what this daemon has recorded for one gossiped
+// agent id, including a tombstoned one (callers that need to tell
+// tombstoned from unknown use this rather than ListMeshAgents).
+func (s *Store) GetMeshAgent(ctx context.Context, agentID string) (MeshAgent, error) {
+	row := s.r.QueryRowContext(ctx, `
+		SELECT agent_id, session_id, owner_peer, name, tool, role, status, can_interrupt, can_broadcast, last_seen_at, version, tombstoned
+		FROM mesh_agents WHERE agent_id=?`, agentID)
+	a, err := scanMeshAgent(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return MeshAgent{}, ErrNotFound
+	}
+	return a, err
+}
+
+func scanMeshAgent(sc interface{ Scan(...any) error }) (MeshAgent, error) {
+	var a MeshAgent
+	var appr, bcast, tomb int
+	var ls int64
+	var version int64
+	if err := sc.Scan(&a.AgentID, &a.SessionID, &a.OwnerPeer, &a.Name, &a.Tool, &a.Role, &a.Status, &appr, &bcast, &ls, &version, &tomb); err != nil {
+		return MeshAgent{}, err
+	}
+	a.CanInterrupt, a.CanBroadcast, a.Tombstoned = appr != 0, bcast != 0, tomb != 0
+	a.LastSeenAt = fromMS(ls)
+	a.Version = uint64(version)
+	return a, nil
+}

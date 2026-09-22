@@ -329,6 +329,7 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	me := s.newConn(agent.ID, agent.Name, agent.Role, hello, sess.ID, ws)
 	s.conns[agent.ID] = me
 	s.mu.Unlock()
+	s.gossipRoster(sess.ID)
 
 	exited := false
 	defer func() {
@@ -341,6 +342,7 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 		if current && !exited {
 			_ = s.st.SetAgentStatus(context.Background(), agent.ID, "disconnected", nil)
 			log.Info("agent disconnected")
+			s.gossipRoster(sess.ID)
 		}
 		ws.CloseNow()
 	}()
@@ -461,6 +463,7 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 				_ = s.st.EndSession(context.Background(), sess.ID)
 			}
 			log.Info("agent exited", "code", bye.ExitCode)
+			s.gossipRoster(sess.ID)
 			ws.Close(websocket.StatusNormalClosure, "bye")
 			return
 		default:
@@ -604,6 +607,25 @@ func (s *Server) sessionInfo(ctx context.Context, sess store.Session, withExited
 		info.Agents = append(info.Agents, proto.AgentInfo{
 			ID: a.ID, Name: a.Name, Tool: a.Tool, Role: a.Role, Status: a.Status, Connected: s.connected(a.ID),
 			ApproveInbound: a.ApproveInbound, PID: a.PID, Cwd: a.Cwd, JoinedAt: a.CreatedAt, LastSeen: a.LastSeenAt, ExitCode: a.ExitCode,
+		})
+	}
+	// Agents gossiped in from another daemon (see MEMORY.md section 15).
+	// This is a plain read of what's already in this daemon's own store -
+	// it must never construct a Hub or touch the network just because
+	// someone ran `relay ls`; mesh_agents is empty for any session that has
+	// never used mesh features, so this is a cheap no-op for almost everyone.
+	mesh, err := s.st.ListMeshAgents(ctx, sess.ID)
+	if err != nil {
+		return proto.SessionInfo{}, err
+	}
+	for _, a := range mesh {
+		if !withExited && a.Status == "exited" {
+			continue
+		}
+		info.Agents = append(info.Agents, proto.AgentInfo{
+			ID: a.AgentID, Name: a.Name, Tool: a.Tool, Role: a.Role, Status: a.Status,
+			Connected: a.Status == "connected", JoinedAt: a.LastSeenAt, LastSeen: a.LastSeenAt,
+			Remote: true, Peer: a.OwnerPeer,
 		})
 	}
 	return info, nil

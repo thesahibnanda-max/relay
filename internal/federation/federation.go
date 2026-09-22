@@ -2,10 +2,12 @@
 // accepting inbound links from other daemons (via a lazily-started
 // meshnet.Server, never opened unless this daemon is actually invited into
 // or joins a session) and dialing out to join others. It reads and writes
-// only the mesh_sessions/mesh_peers tables in internal/store - never the
-// local agents/messages tables directly, which stay daemon.Server's own
-// job (reached through a router interface in later mesh milestones, once
-// gossip and message hand-off exist).
+// only the mesh_sessions/mesh_peers/mesh_agents tables in internal/store -
+// never the local agents/messages tables directly. The one exception is
+// LocalRouter: a small callback interface that lets a Hub ask about, and
+// rename, this daemon's own agents, which is the only thing outside
+// internal/store's mesh_* tables that gossip and name-collision resolution
+// ever need to touch.
 //
 // See MEMORY.md section 15 for the full design and the milestone list this
 // package is being built across.
@@ -20,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +31,24 @@ import (
 	"github.com/thesahibnanda-max/relay/internal/proto"
 	"github.com/thesahibnanda-max/relay/internal/store"
 )
+
+// LocalRouter is how a Hub reaches this daemon's own agents. A daemon that
+// never uses mesh features never has either method called.
+type LocalRouter interface {
+	// LocalAgents returns this daemon's own current agents in sessionID,
+	// shaped for gossip (OwnerPeer and Version are filled in by the Hub
+	// itself, not the caller - see rosterFor - so implementations only need
+	// to report Name/Tool/Role/Status/capabilities and a LastSeenAt the Hub
+	// can turn into a monotonic version).
+	LocalAgents(ctx context.Context, sessionID string) ([]proto.MeshAgentInfo, error)
+
+	// RenameLocalAgent is called only when this daemon's own agent has lost
+	// a name collision to one created earlier elsewhere (a smaller ULID -
+	// see applyGossipedAgent). It renames the agent, tells its terminal why,
+	// and returns the name actually applied (implementations may need to
+	// retry proposedName on a further local collision).
+	RenameLocalAgent(ctx context.Context, agentID, proposedName string) (string, error)
+}
 
 // helloTimeout bounds both the handshake's network I/O and, absent a
 // caller-supplied deadline, how long Join waits overall.
@@ -43,6 +64,11 @@ type Options struct {
 	Store     *store.Store
 	Log       *slog.Logger
 	Build     string // this daemon's version, informational (MeshHello.DaemonBuild)
+
+	// Router lets the Hub see and rename this daemon's own agents (see
+	// LocalRouter). Nil is valid: Hello/Welcome round-trip with an empty
+	// local roster, which is all tests that don't care about it need.
+	Router LocalRouter
 }
 
 // Hub owns one daemon's mesh state. The zero value is not usable; construct
@@ -53,6 +79,8 @@ type Hub struct {
 	mu       sync.Mutex
 	listener meshnet.Listener
 	addr     meshnet.Addr
+	closing  bool
+	wg       sync.WaitGroup // background work spawned by this Hub (e.g. a post-collision Resync); Close waits for it
 }
 
 func New(opt Options) *Hub {
@@ -80,18 +108,42 @@ func (h *Hub) ensureListening(ctx context.Context) (meshnet.Addr, error) {
 	return addr, nil
 }
 
-// Close stops accepting new mesh links. It does not touch mesh_sessions or
-// mesh_peers: what this daemon has recorded about a session survives, so a
-// later Invite/Join on the same session resumes from it.
+// Close stops accepting new mesh links and waits for any background work
+// this Hub spawned (see spawn) to finish or hit its own timeout. It does not
+// touch mesh_sessions or mesh_peers: what this daemon has recorded about a
+// session survives, so a later Invite/Join on the same session resumes
+// from it.
 func (h *Hub) Close() error {
 	h.mu.Lock()
+	h.closing = true
 	ln := h.listener
 	h.listener = nil
 	h.mu.Unlock()
-	if ln == nil {
-		return nil
+	var err error
+	if ln != nil {
+		err = ln.Close()
 	}
-	return ln.Close()
+	h.wg.Wait()
+	return err
+}
+
+// spawn runs fn in the background, tracked so Close can wait for it rather
+// than leave it to touch a store that may be closed out from under it
+// (e.g. applyGossipedAgent's post-collision Resync). Returns false, running
+// nothing, once Close has already been called.
+func (h *Hub) spawn(fn func()) bool {
+	h.mu.Lock()
+	if h.closing {
+		h.mu.Unlock()
+		return false
+	}
+	h.wg.Add(1)
+	h.mu.Unlock()
+	go func() {
+		defer h.wg.Done()
+		fn()
+	}()
+	return true
 }
 
 func (h *Hub) acceptLoop(ln meshnet.Listener) {
@@ -100,7 +152,9 @@ func (h *Hub) acceptLoop(ln meshnet.Listener) {
 		if err != nil {
 			return // listener closed
 		}
-		go h.handleInbound(conn, verifiedPeerID)
+		if !h.spawn(func() { h.handleInbound(conn, verifiedPeerID) }) {
+			conn.Close() // Close raced us: don't process a handshake nobody will wait for
+		}
 	}
 }
 
@@ -160,17 +214,26 @@ func (h *Hub) handleInbound(conn net.Conn, verifiedPeerID string) {
 		log.Error("mesh: recording peer", "err", err)
 		return
 	}
+	for _, a := range hello.Agents {
+		if err := h.applyGossipedAgent(ctx, hello.Session, a); err != nil {
+			log.Warn("mesh: applying gossiped agent", "agent", a.AgentID, "err", err)
+		}
+	}
 
 	peers, err := h.opt.Store.ListMeshPeers(ctx, hello.Session)
 	if err != nil {
 		log.Error("mesh: listing peers", "err", err)
 		return
 	}
+	agents, err := h.rosterFor(ctx, hello.Session)
+	if err != nil {
+		log.Warn("mesh: gathering roster for welcome", "err", err)
+	}
 	welcome := proto.MeshWelcome{
 		PeerID: sess.SelfPeerID,
 		Addr:   string(h.addr),
 		Peers:  toMeshPeerInfos(peers),
-		// Agents is intentionally left empty: roster gossip is M-mesh-3.
+		Agents: agents,
 	}
 	b, err := proto.MeshMarshal(proto.MeshTypeWelcome, welcome)
 	if err != nil {
@@ -203,10 +266,11 @@ func (h *Hub) Invite(ctx context.Context, sessionID string) (proto.JoinBlob, err
 }
 
 // Join dials blob.PeerAddr, performs the MeshHello/MeshWelcome handshake
-// using blob.Secret, and records the resulting peer plus every peer the
-// welcome's resync mentioned (marked unreachable until this daemon actually
-// dials them itself - fanning out to reach them directly is M-mesh-5; for
-// now a human can inspect what was learned via `relay session peers`).
+// using blob.Secret, and records the resulting peer plus every peer and
+// agent the welcome mentioned (other peers are marked unreachable until
+// this daemon actually dials them itself - fanning out to reach them
+// directly is M-mesh-5; for now a human can inspect what was learned via
+// `relay session peers`).
 //
 // Join also brings up this daemon's own listener, so whoever it just joined
 // (and, later, everyone in the resync) can dial back in: a mesh member is
@@ -220,10 +284,67 @@ func (h *Hub) Join(ctx context.Context, blob proto.JoinBlob) error {
 	if _, err := h.opt.Store.EnsureMeshSession(ctx, blob.Session, blob.Secret, ourPeerID); err != nil {
 		return fmt.Errorf("federation: recording mesh session: %w", err)
 	}
-
-	conn, err := h.opt.Transport.Dial(ctx, h.opt.Identity, meshnet.Addr(blob.PeerAddr))
+	w, err := h.handshake(ctx, blob.Session, blob.Secret, ourAddr, blob.PeerAddr)
 	if err != nil {
-		return fmt.Errorf("federation: dialing %s: %w", blob.PeerAddr, err)
+		return fmt.Errorf("federation: %w", err)
+	}
+	if err := h.applyWelcome(ctx, blob.Session, ourPeerID, w); err != nil {
+		return fmt.Errorf("federation: %w", err)
+	}
+	return nil
+}
+
+// Resync re-runs the handshake with every peer this daemon currently knows
+// about for a session, propagating a local roster change (an agent
+// registered, was renamed, or changed status) and picking up anything a
+// peer has learned since the last time they spoke. Best-effort and
+// concurrent: a peer that can't be reached right now is marked unreachable
+// and picked up again on the next Resync or the next fresh dial to it (see
+// the mesh plan's walkthrough (a)) - one unreachable peer never stops the
+// rest of the sync, and Resync itself never returns an error for the same
+// reason callers use it fire-and-forget.
+func (h *Hub) Resync(ctx context.Context, sessionID string) {
+	sess, err := h.opt.Store.GetMeshSession(ctx, sessionID)
+	if err != nil {
+		return // not a mesh session, or this daemon isn't a member: nothing to do
+	}
+	ourAddr, err := h.ensureListening(ctx)
+	if err != nil {
+		h.opt.Log.Warn("mesh: resync: listening", "err", err)
+		return
+	}
+	peers, err := h.opt.Store.ListMeshPeers(ctx, sessionID)
+	if err != nil {
+		h.opt.Log.Warn("mesh: resync: listing peers", "err", err)
+		return
+	}
+	var wg sync.WaitGroup
+	for _, p := range peers {
+		wg.Add(1)
+		go func(p store.MeshPeer) {
+			defer wg.Done()
+			w, err := h.handshake(ctx, sessionID, sess.JoinSecret, ourAddr, p.Addr)
+			if err != nil {
+				h.opt.Log.Warn("mesh: resync with peer failed", "peer", p.PeerID, "err", err)
+				_ = h.opt.Store.SetMeshPeerStatus(ctx, sessionID, p.PeerID, store.MeshPeerUnreachable)
+				return
+			}
+			if err := h.applyWelcome(ctx, sessionID, sess.SelfPeerID, w); err != nil {
+				h.opt.Log.Warn("mesh: resync: applying welcome", "peer", p.PeerID, "err", err)
+			}
+		}(p)
+	}
+	wg.Wait()
+}
+
+// handshake dials peerAddr, sends our current MeshHello (roster included),
+// and returns the parsed MeshWelcome - shared by Join (first contact) and
+// Resync (an already-known peer), so both stay byte-for-byte consistent in
+// how they speak the protocol.
+func (h *Hub) handshake(ctx context.Context, sessionID, secret string, ourAddr meshnet.Addr, peerAddr string) (proto.MeshWelcome, error) {
+	conn, err := h.opt.Transport.Dial(ctx, h.opt.Identity, meshnet.Addr(peerAddr))
+	if err != nil {
+		return proto.MeshWelcome{}, fmt.Errorf("dialing %s: %w", peerAddr, err)
 	}
 	defer conn.Close()
 	deadline, ok := ctx.Deadline()
@@ -232,64 +353,188 @@ func (h *Hub) Join(ctx context.Context, blob proto.JoinBlob) error {
 	}
 	conn.SetDeadline(deadline)
 
+	agents, err := h.rosterFor(ctx, sessionID)
+	if err != nil {
+		h.opt.Log.Warn("mesh: gathering local roster for hello", "err", err)
+	}
 	hello := proto.MeshHello{
-		MeshVersion: proto.MeshVersion, Session: blob.Session, Secret: blob.Secret,
-		PeerID: ourPeerID, Addr: string(ourAddr), DaemonBuild: h.opt.Build,
+		MeshVersion: proto.MeshVersion, Session: sessionID, Secret: secret,
+		PeerID: h.opt.Identity.PeerID(), Addr: string(ourAddr), DaemonBuild: h.opt.Build, Agents: agents,
 	}
 	helloBytes, err := proto.MeshMarshal(proto.MeshTypeHello, hello)
 	if err != nil {
-		return fmt.Errorf("federation: encoding hello: %w", err)
+		return proto.MeshWelcome{}, fmt.Errorf("encoding hello: %w", err)
 	}
 	if err := writeFrame(conn, helloBytes); err != nil {
-		return fmt.Errorf("federation: sending hello: %w", err)
+		return proto.MeshWelcome{}, fmt.Errorf("sending hello: %w", err)
 	}
 
 	frame, err := readFrame(conn)
 	if err != nil {
-		return fmt.Errorf("federation: reading %s's reply: %w", blob.PeerAddr, err)
+		return proto.MeshWelcome{}, fmt.Errorf("reading %s's reply: %w", peerAddr, err)
 	}
 	env, err := proto.MeshUnmarshal(frame)
 	if err != nil {
-		return fmt.Errorf("federation: malformed reply from %s: %w", blob.PeerAddr, err)
+		return proto.MeshWelcome{}, fmt.Errorf("malformed reply from %s: %w", peerAddr, err)
 	}
 	switch env.Type {
 	case proto.MeshTypeError:
 		var e struct{ Code, Message string }
 		_ = json.Unmarshal(env.Payload, &e)
-		return fmt.Errorf("federation: %s refused the join (%s): %s", blob.PeerAddr, e.Code, e.Message)
+		return proto.MeshWelcome{}, fmt.Errorf("%s refused (%s): %s", peerAddr, e.Code, e.Message)
 	case proto.MeshTypeWelcome:
 		var w proto.MeshWelcome
 		if err := json.Unmarshal(env.Payload, &w); err != nil {
-			return fmt.Errorf("federation: malformed welcome from %s: %w", blob.PeerAddr, err)
+			return proto.MeshWelcome{}, fmt.Errorf("malformed welcome from %s: %w", peerAddr, err)
 		}
 		// Unlike the accepting side, there is no separate verified-identity
-		// value to compare w.PeerID against here: dialing blob.PeerAddr at
-		// all only succeeds if the far end holds the private key that
-		// address's own embedded public key names, so the tunnel itself
-		// already authenticated exactly which daemon we're talking to
-		// before we ever sent a byte.
+		// value to compare w.PeerID against here: dialing peerAddr at all
+		// only succeeds if the far end holds the private key that address's
+		// own embedded public key names, so the tunnel itself already
+		// authenticated exactly which daemon we're talking to before we
+		// ever sent a byte.
 		if w.PeerID == "" {
-			return fmt.Errorf("federation: %s's welcome did not name itself", blob.PeerAddr)
+			return proto.MeshWelcome{}, fmt.Errorf("%s's welcome did not name itself", peerAddr)
+		}
+		return w, nil
+	default:
+		return proto.MeshWelcome{}, fmt.Errorf("unexpected reply type %q from %s", env.Type, peerAddr)
+	}
+}
+
+// applyWelcome records everything a MeshWelcome told us: the peer we just
+// linked to directly, every other peer it already knew about (marked
+// unreachable until this daemon dials them itself), and its agent roster.
+func (h *Hub) applyWelcome(ctx context.Context, sessionID, ourPeerID string, w proto.MeshWelcome) error {
+	if err := h.opt.Store.UpsertMeshPeer(ctx, store.MeshPeer{
+		SessionID: sessionID, PeerID: w.PeerID, Addr: w.Addr, Status: store.MeshPeerLinked,
+	}); err != nil {
+		return fmt.Errorf("recording %s: %w", w.PeerID, err)
+	}
+	for _, p := range w.Peers {
+		if p.PeerID == ourPeerID || p.PeerID == w.PeerID {
+			continue // that's us, or the peer we just linked to directly
 		}
 		if err := h.opt.Store.UpsertMeshPeer(ctx, store.MeshPeer{
-			SessionID: blob.Session, PeerID: w.PeerID, Addr: w.Addr, Status: store.MeshPeerLinked,
+			SessionID: sessionID, PeerID: p.PeerID, Addr: p.Addr, Status: store.MeshPeerUnreachable,
 		}); err != nil {
-			return fmt.Errorf("federation: recording %s: %w", blob.PeerAddr, err)
+			return fmt.Errorf("recording %s: %w", p.PeerID, err)
 		}
-		for _, p := range w.Peers {
-			if p.PeerID == ourPeerID || p.PeerID == w.PeerID {
-				continue // that's us, or the peer we just linked to directly
-			}
-			if err := h.opt.Store.UpsertMeshPeer(ctx, store.MeshPeer{
-				SessionID: blob.Session, PeerID: p.PeerID, Addr: p.Addr, Status: store.MeshPeerUnreachable,
-			}); err != nil {
-				return fmt.Errorf("federation: recording %s: %w", p.PeerID, err)
-			}
-		}
-		return nil
-	default:
-		return fmt.Errorf("federation: unexpected reply type %q from %s", env.Type, blob.PeerAddr)
 	}
+	for _, a := range w.Agents {
+		if err := h.applyGossipedAgent(ctx, sessionID, a); err != nil {
+			h.opt.Log.Warn("mesh: applying gossiped agent", "agent", a.AgentID, "err", err)
+		}
+	}
+	return nil
+}
+
+// rosterFor returns everything this daemon would tell a peer about a
+// session's agents: its own current ones (via Router, with OwnerPeer
+// stamped as this daemon's own identity - LocalRouter implementations don't
+// need to know or guess their own PeerID) plus every other peer's agent
+// already cached in mesh_agents. Gossip propagates transitively this way,
+// without every daemon needing to dial every other one directly.
+func (h *Hub) rosterFor(ctx context.Context, sessionID string) ([]proto.MeshAgentInfo, error) {
+	var out []proto.MeshAgentInfo
+	if h.opt.Router != nil {
+		own, err := h.opt.Router.LocalAgents(ctx, sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("local agents: %w", err)
+		}
+		selfID := h.opt.Identity.PeerID()
+		for _, a := range own {
+			a.OwnerPeer = selfID
+			out = append(out, a)
+		}
+	}
+	known, err := h.opt.Store.ListMeshAgents(ctx, sessionID)
+	if err != nil {
+		return out, fmt.Errorf("known mesh agents: %w", err)
+	}
+	for _, a := range known {
+		out = append(out, proto.MeshAgentInfo{
+			AgentID: a.AgentID, OwnerPeer: a.OwnerPeer, Name: a.Name, Tool: a.Tool, Role: a.Role,
+			Status: a.Status, CanInterrupt: a.CanInterrupt, CanBroadcast: a.CanBroadcast,
+			LastSeenAt: a.LastSeenAt, Version: a.Version,
+		})
+	}
+	return out, nil
+}
+
+// applyGossipedAgent records what a peer told us about one of its agents,
+// then - if that update was actually new information, and this daemon has
+// a Router - checks it against our own local agents for a name collision.
+//
+// Only OUR OWN agent is ever renamed here. If a remote agent's name
+// collides with a local one, comparing agent_id (a ULID: lexicographically
+// smaller was created first) tells us who loses; if it's ours, we rename it
+// and re-gossip immediately so the correction propagates. If it's theirs,
+// we do nothing - that daemon will independently reach the identical
+// conclusion once gossip reaches it too, and rename its own agent itself.
+// This is what keeps collision resolution deterministic without any
+// daemon ever needing permission to touch another's agent.
+func (h *Hub) applyGossipedAgent(ctx context.Context, sessionID string, info proto.MeshAgentInfo) error {
+	if info.AgentID == "" || info.OwnerPeer == "" {
+		return nil // malformed/empty entry: ignore rather than fail the whole handshake
+	}
+	if h.opt.Router != nil {
+		// A peer should never gossip an agent_id we minted ourselves, but a
+		// Hub must not blindly trust that either - defence in depth against
+		// a buggy or malicious peer trying to shadow one of our own agents.
+		own, err := h.opt.Router.LocalAgents(ctx, sessionID)
+		if err == nil {
+			for _, a := range own {
+				if a.AgentID == info.AgentID {
+					return nil
+				}
+			}
+		}
+	}
+	applied, err := h.opt.Store.UpsertMeshAgentIfNewer(ctx, store.MeshAgent{
+		AgentID: info.AgentID, SessionID: sessionID, OwnerPeer: info.OwnerPeer,
+		Name: info.Name, Tool: info.Tool, Role: info.Role, Status: info.Status,
+		CanInterrupt: info.CanInterrupt, CanBroadcast: info.CanBroadcast,
+		LastSeenAt: info.LastSeenAt, Version: info.Version, Tombstoned: info.Tombstoned,
+	})
+	if err != nil || !applied || h.opt.Router == nil {
+		return err
+	}
+	ours, err := h.opt.Router.LocalAgents(ctx, sessionID)
+	if err != nil {
+		return nil // best-effort: the gossip itself was already applied successfully above
+	}
+	for _, local := range ours {
+		if local.AgentID == info.AgentID || !strings.EqualFold(local.Name, info.Name) {
+			continue
+		}
+		if local.AgentID <= info.AgentID {
+			break // the remote agent loses; its own daemon renames it, not us
+		}
+		suffix := local.AgentID
+		if len(suffix) > 4 {
+			suffix = suffix[len(suffix)-4:]
+		}
+		newName, err := h.opt.Router.RenameLocalAgent(ctx, local.AgentID, local.Name+"-"+strings.ToLower(suffix))
+		if err != nil {
+			h.opt.Log.Warn("mesh: renaming a locally colliding agent", "agent", local.AgentID, "err", err)
+			break
+		}
+		h.opt.Log.Info("mesh: renamed a local agent after a name collision",
+			"agent", local.AgentID, "old_name", local.Name, "new_name", newName, "lost_to", info.AgentID)
+		// Propagate the correction promptly rather than waiting for whatever
+		// unrelated event next triggers a Resync. Detached from ctx/this
+		// call stack (Resync -> handshake -> applyWelcome -> here would
+		// otherwise recurse) with its own bounded timeout, and tracked so
+		// Close waits for it instead of leaving it to touch a closed store.
+		h.spawn(func() {
+			rctx, cancel := context.WithTimeout(context.Background(), 2*helloTimeout)
+			defer cancel()
+			h.Resync(rctx, sessionID)
+		})
+		break
+	}
+	return nil
 }
 
 // Peers returns everything this daemon has recorded about a session's mesh

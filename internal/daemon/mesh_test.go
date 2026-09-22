@@ -109,13 +109,14 @@ func TestMeshPeersRequiresAnExistingSession(t *testing.T) {
 	}
 }
 
-// TestJoinedSessionRegistersRealAgentsButRosterGossipIsNotYetImplemented
-// exercises the exact end state the M-mesh-2 plan calls for: a --join
-// simply teaches the local daemon a session exists, so an agent registers
-// into it exactly like any local session - but sending to a name that only
-// exists on the *other* daemon fails with unknown_agent, since nothing
-// gossips the roster between daemons until M-mesh-3.
-func TestJoinedSessionRegistersRealAgentsButRosterGossipIsNotYetImplemented(t *testing.T) {
+// TestJoinedSessionGossipsVisibilityButNotMessageRouting is the M-mesh-3
+// update of the M-mesh-2 boundary test: a real agent on each daemon is now
+// gossiped to the other (visible via the admin session endpoint, i.e. what
+// `relay ls` shows), but `relay_send` still can't reach a name that only
+// exists on the *other* daemon - mesh_agents is a read-only cache for
+// display, routeSend still only ever resolves against the local agents
+// table. Cross-daemon message hand-off is M-mesh-4, not this one.
+func TestJoinedSessionGossipsVisibilityButNotMessageRouting(t *testing.T) {
 	fakeNet := meshnet.NewFakeNetwork()
 	a := startServer(t, withMeshTransport(fakeNet))
 	b := startServer(t, withMeshTransport(fakeNet))
@@ -133,9 +134,36 @@ func TestJoinedSessionRegistersRealAgentsButRosterGossipIsNotYetImplemented(t *t
 	bob := b.joinPeer(sid, proto.Hello{Name: "bob", Role: "developer"})
 	defer bob.ws.CloseNow()
 
-	// alice can't reach bob: bob is a real agent, but only in b's local
-	// agents table, never gossiped to a. This is the expected, documented
-	// M-mesh-2 boundary, not a bug.
+	// a's own admin view (what `relay ls` on a's machine shows) must now
+	// include bob, marked remote, once gossip has caught up.
+	waitForAgent(t, a, sid, "bob", func(ai proto.AgentInfo) bool { return ai.Remote })
+	view := a.session(sid)
+	var bobInA *proto.AgentInfo
+	for i, ai := range view.Agents {
+		if ai.Name == "bob" {
+			bobInA = &view.Agents[i]
+		}
+	}
+	if bobInA == nil {
+		t.Fatalf("bob not in a's session view: %+v", view.Agents)
+	}
+	if !bobInA.Remote || bobInA.Peer == "" {
+		t.Fatalf("bob should be marked remote with a peer id: %+v", bobInA)
+	}
+	if bobInA.Status != "connected" || !bobInA.Connected {
+		t.Fatalf("bob should show as connected: %+v", bobInA)
+	}
+	// a's own local agent must never be marked remote.
+	for _, ai := range view.Agents {
+		if ai.Name == "alice" && ai.Remote {
+			t.Fatalf("alice must not be marked remote on her own daemon: %+v", ai)
+		}
+	}
+
+	// alice still can't reach bob by sending to him: bob is visible now, but
+	// mesh_agents is a display-only cache - routeSend still only resolves
+	// against a's own local agents table. This is the expected, documented
+	// M-mesh-3 boundary, not a bug.
 	if r := alice.rpc(proto.OpSend, proto.SendArgs{To: "bob", Body: "hi"}); r.Error == nil || r.Error.Code != proto.CodeUnknownAgent {
 		t.Fatalf("alice -> bob: %+v, want %s", r.Error, proto.CodeUnknownAgent)
 	}
@@ -146,6 +174,27 @@ func TestJoinedSessionRegistersRealAgentsButRosterGossipIsNotYetImplemented(t *t
 	defer carol.ws.CloseNow()
 	if r := alice.mustSend(proto.SendArgs{To: "carol", Body: "hi"}); r.State != store.MsgQueued {
 		t.Fatalf("alice -> carol (same daemon): %+v", r)
+	}
+}
+
+// waitForAgent polls a session's admin view until an agent named `name`
+// satisfies pred, or fails the test - gossip lands via a background
+// goroutine (handleInbound/Resync), so it can't be assumed synchronous with
+// whatever triggered it.
+func waitForAgent(t *testing.T, e *env, sessionID, name string, pred func(proto.AgentInfo) bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		view := e.session(sessionID)
+		for _, ai := range view.Agents {
+			if ai.Name == name && pred(ai) {
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for agent %q: %+v", name, view.Agents)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
