@@ -89,8 +89,35 @@ func TestFlagForms(t *testing.T) {
 	}
 }
 
+func TestJoinFlag(t *testing.T) {
+	id := ids.New()
+	blob := proto.JoinBlob{V: proto.JoinBlobVersion, Session: id, PeerAddr: "tcXXXXXXXXX", PeerName: "laptop", Secret: "s3cr3t"}
+	encoded := proto.EncodeJoinBlob(blob)
+
+	p, err := parse("codex", "--join="+encoded, "--name=coder")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Session != "" {
+		t.Errorf("--join must not set Session at parse time (that happens after the mesh join succeeds), got %q", p.Session)
+	}
+	if p.Join == nil || *p.Join != blob {
+		t.Fatalf("Join = %+v, want %+v", p.Join, blob)
+	}
+	if p.Name != "coder" {
+		t.Errorf("--name after --join was rejected: %+v", p)
+	}
+
+	// --approve-inbound also only makes sense with a session, and --join
+	// counts as one even though p.Session is still empty at parse time.
+	if _, err := parse("codex", "--join="+encoded, "--approve-inbound"); err != nil {
+		t.Errorf("--approve-inbound with --join: %v", err)
+	}
+}
+
 func TestUsageErrors(t *testing.T) {
 	id := ids.New()
+	validBlob := proto.EncodeJoinBlob(proto.JoinBlob{Session: id, PeerAddr: "tcX", Secret: "s"})
 	cases := map[string][]string{
 		"unknown tool":            {"gemini"},
 		"unknown relay flag":      {"claude", "--model", "haiku"},
@@ -106,6 +133,11 @@ func TestUsageErrors(t *testing.T) {
 		"two positionals":         {"claude", "qa", "developer"},
 		"role twice":              {"claude", "qa", "--role=developer"},
 		"approve bad value":       {"claude", "--session=NEW", "--approve-inbound=maybe"},
+		"join needs value":        {"claude", "--join"},
+		"join then session":       {"claude", "--join=" + validBlob, "--session=NEW"},
+		"session then join":       {"claude", "--session=NEW", "--join=" + validBlob},
+		"join twice":              {"claude", "--join=" + validBlob, "--join=" + validBlob},
+		"join not a blob at all":  {"claude", "--join=garbage"},
 	}
 	for name, args := range cases {
 		_, err := parse(args...)
@@ -136,7 +168,11 @@ func TestSubcommands(t *testing.T) {
 	check([]string{"session", "ls", "-a"}, Parsed{Kind: KindLs, All: true})
 	check([]string{"session", "new"}, Parsed{Kind: KindSessionNew})
 	check([]string{"session", "new", "--name=demo"}, Parsed{Kind: KindSessionNew, SessionNm: "demo"})
+	check([]string{"session", "new", "--host"}, Parsed{Kind: KindSessionNew, Host: true})
+	check([]string{"session", "new", "--name=demo", "--host"}, Parsed{Kind: KindSessionNew, SessionNm: "demo", Host: true})
 	check([]string{"session", "end", id}, Parsed{Kind: KindSessionEnd, Target: id})
+	check([]string{"session", "invite", id}, Parsed{Kind: KindSessionInvite, Target: id})
+	check([]string{"session", "peers", id}, Parsed{Kind: KindSessionPeers, Target: id})
 	check([]string{"daemon"}, Parsed{Kind: KindDaemon})
 	check([]string{"daemon", "stop"}, Parsed{Kind: KindDaemonStop})
 	check([]string{"daemon", "status"}, Parsed{Kind: KindDaemonStatus})
@@ -145,7 +181,12 @@ func TestSubcommands(t *testing.T) {
 	check([]string{"help"}, Parsed{Kind: KindHelp})
 	check([]string{}, Parsed{Kind: KindHelp})
 
-	for _, bad := range [][]string{{"session"}, {"session", "wat"}, {"session", "end"}, {"session", "end", "nope"}, {"ls", "--bogus"}, {"ls", "--session=x"}, {"daemon", "restart"}} {
+	for _, bad := range [][]string{
+		{"session"}, {"session", "wat"}, {"session", "end"}, {"session", "end", "nope"},
+		{"session", "new", "--bogus"}, {"session", "invite"}, {"session", "invite", "nope"},
+		{"session", "peers"}, {"session", "peers", "nope"},
+		{"ls", "--bogus"}, {"ls", "--session=x"}, {"daemon", "restart"},
+	} {
 		if _, err := parse(bad...); err == nil {
 			t.Errorf("%v accepted", bad)
 		}

@@ -21,6 +21,8 @@ const (
 	KindLs
 	KindSessionNew
 	KindSessionEnd
+	KindSessionInvite // relay session invite <id>: mint a --join blob for an existing session
+	KindSessionPeers  // relay session peers <id>: list what this daemon knows about a mesh session's peers
 	KindDaemon
 	KindDaemonStop
 	KindDaemonStatus
@@ -49,9 +51,10 @@ type Parsed struct {
 
 	// KindAgent
 	Tool           string
-	Shim           bool   // invoked as a symlink named after the tool: no relay flags
-	Role           string // spec: builtin name or file path ("" = none)
-	Session        string // "" (solo), proto.SessionNew, or a normalised ULID
+	Shim           bool            // invoked as a symlink named after the tool: no relay flags
+	Role           string          // spec: builtin name or file path ("" = none)
+	Session        string          // "" (solo), proto.SessionNew, or a normalised ULID
+	Join           *proto.JoinBlob // set by --join; mutually exclusive with --session
 	Name           string
 	ApproveInbound bool
 	Record         Record
@@ -59,8 +62,9 @@ type Parsed struct {
 
 	// admin
 	All        bool   // ls --all
-	Target     string // ls --session / session end <id>
+	Target     string // ls --session / session end|invite|peers <id>
 	SessionNm  string // session new --name
+	Host       bool   // session new --host: also mint a --join invite
 	Foreground bool   // daemon --foreground
 
 	// messaging commands
@@ -132,7 +136,7 @@ func Parse(argv []string, f *adaptor.AdaptorFactory) (Parsed, error) {
 
 func parseAgent(tool string, args []string) (Parsed, error) {
 	p := Parsed{Kind: KindAgent, Tool: strings.ToLower(tool), Record: RecordRaw}
-	var haveRole, haveSession, haveName bool
+	var haveRole, haveSession, haveName, haveJoin bool
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--" {
@@ -167,6 +171,9 @@ func parseAgent(tool string, args []string) (Parsed, error) {
 			if haveSession {
 				return p, usagef("--session given twice")
 			}
+			if haveJoin {
+				return p, usagef("--session and --join are mutually exclusive: --join already names a session")
+			}
 			haveSession = true
 			switch {
 			case strings.EqualFold(v, proto.SessionNew):
@@ -176,6 +183,23 @@ func parseAgent(tool string, args []string) (Parsed, error) {
 			default:
 				return p, usagef("--session must be NEW or a session ID (a 26-character ULID), got %q", v)
 			}
+		case "join":
+			v, err := need()
+			if err != nil {
+				return p, err
+			}
+			if haveJoin {
+				return p, usagef("--join given twice")
+			}
+			if haveSession {
+				return p, usagef("--session and --join are mutually exclusive: --join already names a session")
+			}
+			haveJoin = true
+			blob, err := proto.ParseJoinBlob(v)
+			if err != nil {
+				return p, usagef("--join: %v", err)
+			}
+			p.Join = &blob
 		case "name":
 			v, err := need()
 			if err != nil {
@@ -226,11 +250,11 @@ func parseAgent(tool string, args []string) (Parsed, error) {
 			return p, usagef("unknown option %q: relay options go before --, tool options after it (relay %s ... -- %s)", a, tool, a)
 		}
 	}
-	if p.ApproveInbound && p.Session == "" {
-		return p, usagef("--approve-inbound only makes sense with --session (there is no one to receive messages from)")
+	if p.ApproveInbound && p.Session == "" && p.Join == nil {
+		return p, usagef("--approve-inbound only makes sense with --session or --join (there is no one to receive messages from)")
 	}
-	if p.Name != "" && p.Session == "" {
-		return p, usagef("--name only makes sense with --session")
+	if p.Name != "" && p.Session == "" && p.Join == nil {
+		return p, usagef("--name only makes sense with --session or --join")
 	}
 	return p, nil
 }
@@ -263,7 +287,7 @@ func parseLs(args []string) (Parsed, error) {
 
 func parseSession(args []string) (Parsed, error) {
 	if len(args) == 0 {
-		return Parsed{}, usagef("usage: relay session new [--name=<label>] | ls | end <id>")
+		return Parsed{}, usagef("usage: relay session new [--name=<label>] [--host] | ls | end <id> | invite <id> | peers <id>")
 	}
 	switch args[0] {
 	case "ls", "list":
@@ -272,17 +296,21 @@ func parseSession(args []string) (Parsed, error) {
 		p := Parsed{Kind: KindSessionNew}
 		for i := 1; i < len(args); i++ {
 			name, val, hasVal := strings.Cut(strings.TrimLeft(args[i], "-"), "=")
-			if name != "name" {
-				return p, usagef("unknown option %q for session new (try --name=<label>)", args[i])
-			}
-			if !hasVal {
-				if i+1 >= len(args) {
-					return p, usagef("--name needs a value")
+			switch name {
+			case "name":
+				if !hasVal {
+					if i+1 >= len(args) {
+						return p, usagef("--name needs a value")
+					}
+					i++
+					val = args[i]
 				}
-				i++
-				val = args[i]
+				p.SessionNm = val
+			case "host":
+				p.Host = true
+			default:
+				return p, usagef("unknown option %q for session new (try --name=<label> or --host)", args[i])
 			}
-			p.SessionNm = val
 		}
 		return p, nil
 	case "end":
@@ -290,8 +318,18 @@ func parseSession(args []string) (Parsed, error) {
 			return Parsed{}, usagef("usage: relay session end <session-id>")
 		}
 		return Parsed{Kind: KindSessionEnd, Target: ids.Normalize(args[1])}, nil
+	case "invite":
+		if len(args) != 2 || !ids.Valid(args[1]) {
+			return Parsed{}, usagef("usage: relay session invite <session-id>")
+		}
+		return Parsed{Kind: KindSessionInvite, Target: ids.Normalize(args[1])}, nil
+	case "peers":
+		if len(args) != 2 || !ids.Valid(args[1]) {
+			return Parsed{}, usagef("usage: relay session peers <session-id>")
+		}
+		return Parsed{Kind: KindSessionPeers, Target: ids.Normalize(args[1])}, nil
 	}
-	return Parsed{}, usagef("unknown session command %q (new, ls, end)", args[0])
+	return Parsed{}, usagef("unknown session command %q (new, ls, end, invite, peers)", args[0])
 }
 
 func parseDaemon(args []string) (Parsed, error) {

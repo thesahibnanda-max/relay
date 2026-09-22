@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 
 	"github.com/tailscale/tailcat"
 )
@@ -37,7 +38,7 @@ func (t RealTransport) logf() func(string, ...any) {
 // Listen brings up a tailcat server using id's persisted key and pre-shared
 // key (so its address survives a daemon restart), and returns a listener for
 // the fixed mesh port plus the address peers dial to reach it.
-func (t RealTransport) Listen(ctx context.Context, id *Identity) (net.Listener, Addr, error) {
+func (t RealTransport) Listen(ctx context.Context, id *Identity) (Listener, Addr, error) {
 	srv := &tailcat.Server{
 		Key:          id.NodeKey,
 		PresharedKey: id.PSK,
@@ -48,19 +49,40 @@ func (t RealTransport) Listen(ctx context.Context, id *Identity) (net.Listener, 
 	if err != nil {
 		return nil, "", fmt.Errorf("meshnet: tailcat listen: %w", err)
 	}
-	return &closeServerListener{Listener: ln, srv: srv}, Addr(srv.TailcatAddr()), nil
+	return &realListener{ln: ln, srv: srv}, Addr(srv.TailcatAddr()), nil
 }
 
-// closeServerListener closes the underlying tailcat.Server (tearing down its
-// WireGuard engine and DERP connection) when the listener is closed, since
-// tailcat.Server.Listen does not itself take ownership of that lifetime.
-type closeServerListener struct {
-	net.Listener
+// realListener pairs a tailcat listener with the server that owns it, so
+// Accept can ask the server (via PeerEnv) for the cryptographically verified
+// identity of each connection's peer, and Close can tear down the server's
+// WireGuard engine and DERP connection alongside the listener - tailcat's
+// own Server.Listen does not take ownership of that lifetime itself.
+type realListener struct {
+	ln  net.Listener
 	srv *tailcat.Server
 }
 
-func (l *closeServerListener) Close() error {
-	lerr := l.Listener.Close()
+func (l *realListener) Accept() (net.Conn, string, error) {
+	c, err := l.ln.Accept()
+	if err != nil {
+		return nil, "", err
+	}
+	peerID := ""
+	for _, kv := range l.srv.PeerEnv(c.LocalAddr(), c.RemoteAddr()) {
+		if v, ok := strings.CutPrefix(kv, "TAILCAT_PEER_KEY="); ok {
+			peerID = v
+			break
+		}
+	}
+	if peerID == "" {
+		c.Close()
+		return nil, "", fmt.Errorf("meshnet: could not verify the peer's identity for this connection")
+	}
+	return c, peerID, nil
+}
+
+func (l *realListener) Close() error {
+	lerr := l.ln.Close()
 	serr := l.srv.Close()
 	if lerr != nil {
 		return lerr

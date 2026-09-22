@@ -49,6 +49,11 @@ func (p Paths) SpawnLockPath() string {
 func (p Paths) PidPath() string   { return filepath.Join(p.RunDir(), "relayd.pid") }
 func (p Paths) DaemonLog() string { return filepath.Join(p.LogDir(), "relayd.log") }
 
+// MeshIdentityPath is this daemon's persisted tailcat identity (node key +
+// pre-shared key), created only the first time a mesh command is actually
+// used - see internal/federation.Hub, which loads it lazily.
+func (p Paths) MeshIdentityPath() string { return filepath.Join(p.DataDir(), "mesh", "identity.key") }
+
 // SocketPath is run/relayd.sock, unless that would exceed the OS limit on
 // unix socket paths; then it is a short, stable path under the temp dir
 // derived from the root (so every process computes the same one).

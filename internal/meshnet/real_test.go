@@ -40,12 +40,15 @@ func TestRealTailcatLoopback(t *testing.T) {
 
 	accepted := make(chan error, 1)
 	go func() {
-		c, err := ln.Accept()
+		c, verifiedPeerID, err := ln.Accept()
 		if err != nil {
 			accepted <- err
 			return
 		}
 		defer c.Close()
+		if verifiedPeerID != clientID.PeerID() {
+			t.Errorf("Accept reported peer %q, want the real dialer's identity %q", verifiedPeerID, clientID.PeerID())
+		}
 		line, err := bufio.NewReader(c).ReadString('\n')
 		if err != nil {
 			accepted <- err

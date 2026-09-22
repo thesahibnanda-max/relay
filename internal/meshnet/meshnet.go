@@ -27,14 +27,23 @@ func (a Addr) String() string { return string(a) }
 // and CI never dials real tailcat/DERP.
 type Transport interface {
 	// Listen brings up a listener identified by id, returning the address
-	// peers should Dial to reach it. The listener accepts one net.Conn per
-	// inbound mesh link; the caller is responsible for running a protocol
-	// (see internal/proto's Mesh* types) over each accepted connection.
-	Listen(ctx context.Context, id *Identity) (net.Listener, Addr, error)
+	// peers should Dial to reach it.
+	Listen(ctx context.Context, id *Identity) (Listener, Addr, error)
 
 	// Dial opens one stream to peer, authenticated by the tunnel layer as
 	// the identity in id (see Identity.PeerID). It does not itself prove
 	// anything about which *session* the dialer may join — that is an
 	// application-level check performed over the returned net.Conn.
 	Dial(ctx context.Context, id *Identity, peer Addr) (net.Conn, error)
+}
+
+// Listener accepts inbound mesh links. Accept returns each connection paired
+// with the PeerID the *transport itself* cryptographically verified for that
+// connection - never a value taken from anything the peer merely said. This
+// is what makes TOFU pinning in internal/federation meaningful: a MeshHello
+// payload's own PeerID field is just a claim, but the value Accept returns
+// here cannot be forged without the matching private key.
+type Listener interface {
+	Accept() (conn net.Conn, verifiedPeerID string, err error)
+	Close() error
 }

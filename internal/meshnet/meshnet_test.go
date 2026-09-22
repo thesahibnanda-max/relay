@@ -111,12 +111,16 @@ func TestTwoNodesExchangeBytesOverTheFakeTransport(t *testing.T) {
 
 	accepted := make(chan error, 1)
 	go func() {
-		c, err := ln.Accept()
+		c, verifiedPeerID, err := ln.Accept()
 		if err != nil {
 			accepted <- err
 			return
 		}
 		defer c.Close()
+		if verifiedPeerID != clientID.PeerID() {
+			accepted <- fmt.Errorf("Accept reported peer %q, want the dialer's real identity %q", verifiedPeerID, clientID.PeerID())
+			return
+		}
 		line, err := bufio.NewReader(c).ReadString('\n')
 		if err != nil {
 			accepted <- err

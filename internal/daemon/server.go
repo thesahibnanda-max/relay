@@ -19,6 +19,8 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/thesahibnanda-max/relay/internal/federation"
+	"github.com/thesahibnanda-max/relay/internal/meshnet"
 	"github.com/thesahibnanda-max/relay/internal/naming"
 	"github.com/thesahibnanda-max/relay/internal/peercred"
 	"github.com/thesahibnanda-max/relay/internal/proto"
@@ -51,6 +53,16 @@ type Options struct {
 	DisconnectGrace     time.Duration // an agent gone this long is treated as exited (default 15 min)
 	PairLimit           int           // messages per sender->target pair per minute (default 20)
 	SenderLimit         int           // messages per sender per minute (default 60)
+
+	// MeshTransport, if set, backs this daemon's multi-machine mesh (see
+	// internal/federation). Nil means meshnet.RealTransport{DERPMapURL:
+	// MeshDERPMapURL} - the production default. Tests override this with an
+	// in-memory meshnet.FakeTransport so they never touch real tailcat/DERP.
+	// Either way it stays completely unused, and this daemon opens no mesh
+	// listener and creates no identity file, unless a mesh command is
+	// actually invoked - see (*Server).hub.
+	MeshTransport  meshnet.Transport
+	MeshDERPMapURL string // "" = tailcat's own default; see docs/SECURITY.md
 }
 
 type Server struct {
@@ -69,6 +81,9 @@ type Server struct {
 	pairs, senders, rpcs slidingWindow
 	compress             bgCompress
 	stop                 context.CancelFunc
+
+	meshMu sync.Mutex
+	mesh   *federation.Hub // nil until the first mesh admin call; see hub()
 }
 
 type agentConn struct {
@@ -157,6 +172,9 @@ func New(opt Options) (*Server, error) {
 	mux.HandleFunc("GET /v1/admin/sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("POST /v1/admin/sessions/{id}/end", s.handleEndSession)
 	mux.HandleFunc("POST /v1/admin/gc", s.handleGC)
+	mux.HandleFunc("POST /v1/admin/mesh/invite", s.handleMeshInvite)
+	mux.HandleFunc("POST /v1/admin/mesh/join", s.handleMeshJoin)
+	mux.HandleFunc("GET /v1/admin/mesh/peers/{id}", s.handleMeshPeers)
 	s.routeAdminMessages(mux)
 	s.http = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
@@ -178,6 +196,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.closing = true
 	s.mu.Unlock()
 	s.stop()
+	s.meshMu.Lock()
+	if s.mesh != nil {
+		s.mesh.Close()
+	}
+	s.meshMu.Unlock()
 	err := s.http.Shutdown(ctx)
 	s.mu.Lock()
 	for _, c := range s.conns {

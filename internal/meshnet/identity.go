@@ -81,11 +81,18 @@ func (id *Identity) save(path string) error {
 	return nil
 }
 
-// PeerID is the hex-encoded public key derived from NodeKey: Relay's stable,
-// unforgeable identifier for this daemon in mesh protocol messages and the
-// mesh_peers table. Two daemons can never share a PeerID without sharing a
-// private key, and a daemon that regenerates its identity file becomes a new
-// PeerID (a stale-but-visible roster entry), never a silently-trusted one.
+// PeerID is Relay's stable identifier for this daemon: its node public key
+// in tailcat's own "nodekey:<hex>" text form. Using tailcat's own format
+// (rather than a bare hex string) means it compares equal, byte for byte, to
+// the verified identity a Listener.Accept hands back for an inbound
+// connection (see RealTransport, which derives that from the tunnel itself,
+// not from anything the peer merely claims) - PeerID is never used to
+// authenticate a connection *to*; it is compared *against* an
+// independently-verified value.
+//
+// Two daemons can never share a PeerID without sharing a private key, and a
+// daemon that regenerates its identity file becomes a new PeerID (a
+// stale-but-visible roster entry), never a silently-trusted one.
 func (id *Identity) PeerID() string {
-	return id.NodeKey.Public().UntypedHexString()
+	return id.NodeKey.Public().String()
 }
