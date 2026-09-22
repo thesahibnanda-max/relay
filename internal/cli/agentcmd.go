@@ -124,6 +124,10 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, errw io.Writer) int {
 }
 
 // connect makes sure a daemon is running and registers this agent with it.
+// If p.Join is set, it first teaches the local daemon about the remote
+// session (see meshJoin) and continues with p.Session set from the blob -
+// nothing past this point, including RegisterAgent/link.Connect below, ever
+// needs to know whether the session came from --session or --join.
 func connect(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.Adaptor, col *collab.Session) (*link.Client, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -133,6 +137,12 @@ func connect(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.Adaptor
 	defer cancel()
 	if _, err := daemon.Ensure(ctx, paths, exe); err != nil {
 		return nil, err
+	}
+	if p.Join != nil {
+		if err := meshJoin(paths, *p.Join); err != nil {
+			return nil, err
+		}
+		p.Session = p.Join.Session
 	}
 	cwd, _ := os.Getwd()
 	return link.Connect(ctx, link.Options{

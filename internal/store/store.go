@@ -638,6 +638,8 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 		`DELETE FROM messages WHERE session_id=?1`,
 		`DELETE FROM events WHERE agent_id IN (SELECT id FROM agents WHERE session_id=?1)`,
 		`DELETE FROM agents WHERE session_id=?1`,
+		`DELETE FROM mesh_peers WHERE session_id=?1`,
+		`DELETE FROM mesh_sessions WHERE session_id=?1`,
 		`DELETE FROM sessions WHERE id=?1`,
 	} {
 		if _, err := tx.ExecContext(ctx, q, id); err != nil {

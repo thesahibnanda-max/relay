@@ -12,11 +12,12 @@ import (
 const usageText = `relay: a transparent layer between you and your AI coding agents.
 
 Run an agent (it looks and behaves exactly like the tool itself):
-  relay <claude|codex> [role] [--session=NEW|<id>] [--name=<name>] [--approve-inbound]
-                       [--record=raw|events|off] [-- <tool arguments>]
+  relay <claude|codex> [role] [--session=NEW|<id> | --join=<blob>] [--name=<name>]
+                       [--approve-inbound] [--record=raw|events|off] [-- <tool arguments>]
 
   relay claude orchestrator --session=NEW -- --model sonnet   start a new session
   relay codex qa --session=<id> --name=checker                join it as another agent
+  relay codex qa --join=<blob> --name=checker                 join from another machine
   relay claude                                                 just log this one, alone
 
   role     orchestrator, planner, developer, qa, reviewer, or a path to a .md file
@@ -24,8 +25,12 @@ Run an agent (it looks and behaves exactly like the tool itself):
 
 Inspect and manage:
   relay ls [--all] [--session=<id>]      sessions and their agents
-  relay session new [--name=<label>]     create a session and print its id
+  relay session new [--name=<label>] [--host]
+                                         create a session and print its id; --host also
+                                         prints a --join=<blob> for other machines
   relay session end <id>                 stop new agents joining a session
+  relay session invite <id>              print a fresh --join=<blob> for an existing session
+  relay session peers <id>               list other machines this session's daemon knows about
   relay daemon [status|stop]             the background service (starts on demand)
   relay send <agent> <text> [--session=<id>] [--priority=low|normal|high|interrupt]
                                          message an agent yourself (text "-" reads stdin)

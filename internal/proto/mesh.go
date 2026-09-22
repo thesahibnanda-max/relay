@@ -158,6 +158,22 @@ type MeshMsgHandoff struct {
 // reconnects can redeliver frames out of their original order relative to
 // each other): a receiver drops any receipt whose Rev is not greater than
 // what it already has for ID.
+// InviteMeshSessionRequest is the body of POST /v1/admin/mesh/invite.
+type InviteMeshSessionRequest struct {
+	SessionID string `json:"session_id"`
+}
+
+// MeshPeerView is what the admin API reports for one of a session's mesh
+// peers ("relay session peers"), independent of internal/store's own
+// MeshPeer type so internal/cli never needs to import internal/store.
+type MeshPeerView struct {
+	PeerID    string    `json:"peer_id"`
+	Addr      string    `json:"addr"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+	Status    string    `json:"status"`
+}
+
 type MeshMsgReceipt struct {
 	ID     string `json:"id"`
 	State  string `json:"state"`

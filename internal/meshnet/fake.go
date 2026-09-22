@@ -28,7 +28,7 @@ type FakeTransport struct {
 	Net *FakeNetwork
 }
 
-func (t FakeTransport) Listen(ctx context.Context, id *Identity) (net.Listener, Addr, error) {
+func (t FakeTransport) Listen(ctx context.Context, id *Identity) (Listener, Addr, error) {
 	n := t.Net
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -36,11 +36,19 @@ func (t FakeTransport) Listen(ctx context.Context, id *Identity) (net.Listener, 
 	if _, exists := n.listeners[peerID]; exists {
 		return nil, "", fmt.Errorf("meshnet: fake network already has a listener for %s", peerID)
 	}
-	ln := &fakeListener{net: n, peerID: peerID, conns: make(chan net.Conn), closed: make(chan struct{})}
+	ln := &fakeListener{net: n, peerID: peerID, incoming: make(chan pendingConn), closed: make(chan struct{})}
 	n.listeners[peerID] = ln
 	return ln, Addr("fake:" + peerID), nil
 }
 
+// Dial connects to peer as id. Because a fake network's ends are ordinary
+// net.Pipe conns (no real cryptography), the dialer's verified identity is
+// handed to the accept side out of band, as a plain value alongside the
+// conn, rather than encoded onto the wire the way RealTransport derives it
+// from the actual tunnel - the two transports differ here in mechanism
+// only, not in the guarantee callers see: Listener.Accept's returned
+// identity always reflects who actually dialed, never a self-reported claim
+// on the wire.
 func (t FakeTransport) Dial(ctx context.Context, id *Identity, peer Addr) (net.Conn, error) {
 	peerID, ok := strings.CutPrefix(string(peer), "fake:")
 	if !ok {
@@ -55,7 +63,7 @@ func (t FakeTransport) Dial(ctx context.Context, id *Identity, peer Addr) (net.C
 	}
 	a, b := net.Pipe()
 	select {
-	case ln.conns <- a:
+	case ln.incoming <- pendingConn{conn: a, peerID: id.PeerID()}:
 		return b, nil
 	case <-ln.closed:
 		a.Close()
@@ -68,20 +76,25 @@ func (t FakeTransport) Dial(ctx context.Context, id *Identity, peer Addr) (net.C
 	}
 }
 
-type fakeListener struct {
-	net    *FakeNetwork
+type pendingConn struct {
+	conn   net.Conn
 	peerID string
-	conns  chan net.Conn
-	once   sync.Once
-	closed chan struct{}
 }
 
-func (l *fakeListener) Accept() (net.Conn, error) {
+type fakeListener struct {
+	net      *FakeNetwork
+	peerID   string
+	incoming chan pendingConn
+	once     sync.Once
+	closed   chan struct{}
+}
+
+func (l *fakeListener) Accept() (net.Conn, string, error) {
 	select {
-	case c := <-l.conns:
-		return c, nil
+	case pc := <-l.incoming:
+		return pc.conn, pc.peerID, nil
 	case <-l.closed:
-		return nil, fmt.Errorf("meshnet: listener closed")
+		return nil, "", fmt.Errorf("meshnet: listener closed")
 	}
 }
 
@@ -96,10 +109,3 @@ func (l *fakeListener) Close() error {
 	})
 	return nil
 }
-
-func (l *fakeListener) Addr() net.Addr { return fakeAddr(l.peerID) }
-
-type fakeAddr string
-
-func (a fakeAddr) Network() string { return "fake" }
-func (a fakeAddr) String() string  { return "fake:" + string(a) }
