@@ -653,6 +653,7 @@ func (s *Server) reapGone(ctx context.Context) {
 		s.log.Info("agent never came back; marking it exited", "agent", a.Name, "agent_id", a.ID)
 		_ = s.st.SetAgentStatus(ctx, a.ID, "exited", nil)
 		s.failFor(ctx, a.ID)
+		s.gossipRoster(a.SessionID)
 		if sess, err := s.st.GetSession(ctx, a.SessionID); err == nil && sess.Kind == "solo" {
 			_ = s.st.EndSession(ctx, sess.ID)
 		}

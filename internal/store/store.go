@@ -388,6 +388,47 @@ func (s *Store) getSessionTx(ctx context.Context, tx *sql.Tx, id string) (Sessio
 	return x, err
 }
 
+// RenameAgent changes a local agent's name, retrying with the namer's next
+// candidate if newName collides with another agent already in the session
+// (mirrors RegisterAgent's own collision-retry loop). Used only by mesh
+// name-collision resolution (internal/federation): a mesh peer's agent was
+// created first (smaller ULID), so this agent - created later - loses the
+// name and is renamed, never the other way around. Also bumps last_seen_at:
+// gossip uses it as the agent's version number, and a rename must look
+// strictly newer than whatever a peer already cached under the old name, or
+// the correction would never override it.
+func (s *Store) RenameAgent(ctx context.Context, agentID, newName string, namer *naming.Namer) (string, error) {
+	if namer == nil {
+		namer = naming.New()
+	}
+	a, err := s.GetAgent(ctx, agentID)
+	if err != nil {
+		return "", err
+	}
+	const maxAttempts = 60
+	for attempt := 0; ; attempt++ {
+		name := newName
+		if attempt > 0 {
+			name = namer.Candidate(attempt)
+		}
+		res, err := s.w.ExecContext(ctx, `UPDATE agents SET name=?, last_seen_at=? WHERE id=? AND session_id=?`,
+			name, ms(time.Now()), agentID, a.SessionID)
+		if err == nil {
+			if n, _ := res.RowsAffected(); n == 0 {
+				return "", ErrNotFound
+			}
+			return name, nil
+		}
+		if !isUnique(err) {
+			return "", err
+		}
+		if attempt >= maxAttempts {
+			return "", ErrNameGenExhaust
+		}
+		// generated name collided too: loop with the next candidate
+	}
+}
+
 func (s *Store) SetAgentStatus(ctx context.Context, agentID, status string, exitCode *int) error {
 	var ec any
 	if exitCode != nil {
@@ -638,6 +679,7 @@ func (s *Store) DeleteSession(ctx context.Context, id string) error {
 		`DELETE FROM messages WHERE session_id=?1`,
 		`DELETE FROM events WHERE agent_id IN (SELECT id FROM agents WHERE session_id=?1)`,
 		`DELETE FROM agents WHERE session_id=?1`,
+		`DELETE FROM mesh_agents WHERE session_id=?1`,
 		`DELETE FROM mesh_peers WHERE session_id=?1`,
 		`DELETE FROM mesh_sessions WHERE session_id=?1`,
 		`DELETE FROM sessions WHERE id=?1`,

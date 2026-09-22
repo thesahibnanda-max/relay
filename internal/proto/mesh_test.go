@@ -2,6 +2,7 @@ package proto
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -14,6 +15,7 @@ func TestMeshMarshalRoundTrips(t *testing.T) {
 		PeerID:      "abc123",
 		Addr:        "tcXXXXXXXXX",
 		DaemonBuild: "dev",
+		Agents:      []MeshAgentInfo{{AgentID: "01AG", Name: "coder", Version: 1}},
 	}
 	data, err := MeshMarshal(MeshTypeHello, hello)
 	if err != nil {
@@ -30,7 +32,7 @@ func TestMeshMarshalRoundTrips(t *testing.T) {
 	if err := json.Unmarshal(env.Payload, &got); err != nil {
 		t.Fatal(err)
 	}
-	if got != hello {
+	if !reflect.DeepEqual(got, hello) {
 		t.Fatalf("round trip changed the payload: %+v vs %+v", got, hello)
 	}
 }

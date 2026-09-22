@@ -75,20 +75,28 @@ func MeshUnmarshal(data []byte) (MeshEnvelope, error) {
 // MeshHello is the first frame on every new mesh link (not just the first
 // ever join: every reconnect re-presents Secret, since transport-level
 // tailcat auth alone only proves "this is PeerID's private key," not
-// "PeerID is still allowed into this session").
+// "PeerID is still allowed into this session"). Agents carries the
+// dialer's own current roster, so a single handshake exchanges rosters in
+// both directions in one round trip - the acceptor learns the dialer's
+// agents from Hello, the dialer learns the acceptor's (plus everyone else
+// the acceptor already knew about) from Welcome.
 type MeshHello struct {
-	MeshVersion int    `json:"mesh_version"`
-	Session     string `json:"session"`
-	Secret      string `json:"secret"`       // mesh_sessions.join_secret for Session
-	PeerID      string `json:"peer_id"`      // hex(dialer's node public key) - see meshnet.Identity.PeerID
-	Addr        string `json:"addr"`         // dialer's own redialable meshnet.Addr
-	DaemonBuild string `json:"daemon_build"` // informational, like Hello.Client
+	MeshVersion int             `json:"mesh_version"`
+	Session     string          `json:"session"`
+	Secret      string          `json:"secret"`       // mesh_sessions.join_secret for Session
+	PeerID      string          `json:"peer_id"`      // hex(dialer's node public key) - see meshnet.Identity.PeerID
+	Addr        string          `json:"addr"`         // dialer's own redialable meshnet.Addr
+	DaemonBuild string          `json:"daemon_build"` // informational, like Hello.Client
+	Agents      []MeshAgentInfo `json:"agents,omitempty"`
 }
 
 // MeshWelcome answers a valid MeshHello with a full resync: everything the
 // new link's peer needs to reach every *other* peer directly (the seed for
 // one join is a one-time bootstrap aid, never an ongoing dependency - see
-// the mesh plan's walkthrough (c)).
+// the mesh plan's walkthrough (c)). Agents is the acceptor's own roster plus
+// every other peer's agents it already knows about (not just its own) -
+// gossip propagates transitively this way, without needing every daemon to
+// dial every other daemon just to learn who's in a session.
 type MeshWelcome struct {
 	PeerID string          `json:"peer_id"`
 	Addr   string          `json:"addr"`

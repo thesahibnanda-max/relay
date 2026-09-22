@@ -102,10 +102,23 @@ func RenderSessions(w io.Writer, sessions []proto.SessionInfo, now time.Time) {
 			if a.ApproveInbound {
 				state += " [approve-inbound]"
 			}
+			if a.Remote {
+				state += " [remote: " + shortPeerID(a.Peer) + "]"
+			}
 			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", a.Name, a.Tool, a.Role, state, ago(now, a.JoinedAt))
 		}
 		tw.Flush()
 	}
+}
+
+// shortPeerID renders a mesh peer id ("nodekey:<64 hex chars>") compactly
+// for a table cell; the full id is always available via `relay session peers`.
+func shortPeerID(id string) string {
+	s := strings.TrimPrefix(id, "nodekey:")
+	if len(s) > 8 {
+		s = s[:8]
+	}
+	return s
 }
 
 func ago(now, t time.Time) string {
