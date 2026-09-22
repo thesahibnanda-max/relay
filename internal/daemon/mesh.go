@@ -44,6 +44,34 @@ func (s *Server) hub() (*federation.Hub, error) {
 	return s.mesh, nil
 }
 
+// resumeMeshOnStartup brings this daemon's mesh listener back up if its
+// store already has mesh_sessions rows from a previous process - a machine
+// restarting must be reachable again at its persisted identity's address
+// without a human re-running `relay session invite`/`--join`, or the
+// "resilience" half of the mesh's hard requirements would only hold for a
+// network blip, not an actual daemon restart. A no-op, never touching
+// ~/.relay/mesh or constructing a Hub, for the overwhelming majority of
+// daemons that have never used a mesh feature: mesh_sessions is empty until
+// Invite or Join creates a row.
+func (s *Server) resumeMeshOnStartup(ctx context.Context) {
+	sessions, err := s.st.ListMeshSessionIDs(ctx)
+	if err != nil || len(sessions) == 0 {
+		return
+	}
+	h, err := s.hub()
+	if err != nil {
+		s.log.Warn("mesh: resuming on startup", "err", err)
+		return
+	}
+	for _, sid := range sessions {
+		s.spawn(func() {
+			rctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			h.Resync(rctx, sid)
+		})
+	}
+}
+
 // LocalAgents implements federation.LocalRouter. Version is this agent's
 // last_seen_at in milliseconds: every state change already bumps it
 // (Touch, SetAgentStatus, RenameAgent), so gossip's version-gate gets a
@@ -300,6 +328,40 @@ func (s *Server) gossipRoster(sessionID string) {
 		defer cancel()
 		h.Resync(ctx, sessionID)
 	})
+}
+
+// resyncAllMeshSessions is the periodic safety net for healing a mesh
+// partition: gossipRoster only fires off a local agent connecting,
+// disconnecting or exiting, so a daemon sitting idle after a peer becomes
+// reachable again (or after this daemon itself was offline) would otherwise
+// never notice until some unrelated event happened to trigger a Resync.
+// Called from sweep(), reusing the existing expiry ticker rather than a
+// dedicated one; each session's resync is spawned in the background
+// (bounded, like gossipRoster's) so a slow or unreachable mesh peer can
+// never delay sweep()'s other duties (reapGone, message expiry) for
+// everyone else. A no-op, and never even reading ~/.relay/mesh, for the
+// overwhelming majority of daemons that have never used a mesh feature:
+// mesh_sessions is empty until Invite or Join creates a row, and s.mesh
+// stays nil until hub() has actually been called.
+func (s *Server) resyncAllMeshSessions(ctx context.Context) {
+	s.meshMu.Lock()
+	h := s.mesh
+	s.meshMu.Unlock()
+	if h == nil {
+		return
+	}
+	sessions, err := s.st.ListMeshSessionIDs(ctx)
+	if err != nil {
+		s.log.Warn("mesh: listing mesh sessions for periodic resync", "err", err)
+		return
+	}
+	for _, sid := range sessions {
+		s.spawn(func() {
+			rctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			h.Resync(rctx, sid)
+		})
+	}
 }
 
 func (s *Server) handleMeshInvite(w http.ResponseWriter, r *http.Request) {

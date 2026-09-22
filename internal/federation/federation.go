@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -122,9 +123,20 @@ func New(opt Options) *Hub {
 // ensureListening lazily brings up this daemon's mesh listener. A daemon
 // that never calls Invite or Join never opens one: mesh capability is
 // completely inert until used. Safe to call concurrently; idempotent.
+//
+// Refuses once Close has begun (h.closing), the same guard spawn already
+// applies to background work: a Resync goroutine that Close's own wg.Wait
+// is currently waiting on could otherwise call this right after Close just
+// removed the listener, re-creating a "ghost" one nothing will ever close
+// again - starving out any later Hub value constructed for the same
+// identity (e.g. a restarted daemon reopening the same mesh session, see
+// M-mesh-5) with a permanent "already has a listener" error.
 func (h *Hub) ensureListening(ctx context.Context) (meshnet.Addr, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.closing {
+		return "", errClosing
+	}
 	if h.listener != nil {
 		return h.addr, nil
 	}
@@ -136,6 +148,8 @@ func (h *Hub) ensureListening(ctx context.Context) (meshnet.Addr, error) {
 	go h.acceptLoop(ln)
 	return addr, nil
 }
+
+var errClosing = errors.New("federation: hub is closing")
 
 // Close stops accepting new mesh links and waits for any background work
 // this Hub spawned (see spawn) to finish or hit its own timeout. It does not
@@ -421,18 +435,45 @@ func (h *Hub) Join(ctx context.Context, blob proto.JoinBlob) error {
 	if err := h.applyWelcome(ctx, blob.Session, ourPeerID, w); err != nil {
 		return fmt.Errorf("federation: %w", err)
 	}
+	// Fan out to every other peer the seed's Welcome just told us about,
+	// right away rather than waiting for some unrelated later trigger (an
+	// agent connecting, the periodic sweep) to get around to it - a session
+	// is a true N×N mesh from the moment of joining, not hub-and-spoke until
+	// something else happens to notice. Detached from ctx (a request-scoped
+	// deadline that ends once this HTTP call returns) and tracked via spawn
+	// so Close waits for it instead of leaving it to touch a closing store.
+	h.spawn(func() {
+		rctx, cancel := context.WithTimeout(context.Background(), fanOutTimeout)
+		defer cancel()
+		h.Resync(rctx, blob.Session)
+	})
 	return nil
 }
 
-// Resync re-runs the handshake with every peer this daemon currently knows
-// about for a session, propagating a local roster change (an agent
-// registered, was renamed, or changed status) and picking up anything a
-// peer has learned since the last time they spoke. Best-effort and
-// concurrent: a peer that can't be reached right now is marked unreachable
-// and picked up again on the next Resync or the next fresh dial to it (see
-// the mesh plan's walkthrough (a)) - one unreachable peer never stops the
-// rest of the sync, and Resync itself never returns an error for the same
-// reason callers use it fire-and-forget.
+// fanOutTimeout bounds the background full-mesh resync Join kicks off -
+// generous relative to helloTimeout since it may need several sequential
+// rounds to reach a peer only discovered transitively (see Resync).
+const fanOutTimeout = 30 * time.Second
+
+// Resync brings this daemon's view of a session's mesh into full N×N
+// convergence: it dials every peer it currently knows about, and - because
+// each successful handshake's Welcome may itself name a peer this daemon
+// has never heard of before (e.g. a peer C only known to B, discovered by
+// dialing B) - repeats until a full round dials nothing new. A session's
+// mesh is fully connected after this returns as long as the set of peers is
+// reachable at all, however many hops of secondhand introduction it took to
+// learn about all of them; the seed a daemon joined through is only ever
+// needed for that first hop (see the mesh plan's walkthrough (c) - a seed
+// that vanishes right after handing over one Welcome is never missed).
+//
+// Also propagates any local roster change (an agent registered, was
+// renamed, or changed status) and flushes any outstanding message
+// hand-off/receipt to each peer reached (see flushPending). Best-effort and
+// concurrent within each round: a peer that can't be reached right now is
+// marked unreachable and retried on the next Resync (the periodic sweep -
+// see daemon.Server - or the next local event that triggers one); one
+// unreachable peer never stops the rest, and Resync itself never returns an
+// error for the same reason callers use it fire-and-forget.
 func (h *Hub) Resync(ctx context.Context, sessionID string) {
 	sess, err := h.opt.Store.GetMeshSession(ctx, sessionID)
 	if err != nil {
@@ -443,29 +484,47 @@ func (h *Hub) Resync(ctx context.Context, sessionID string) {
 		h.opt.Log.Warn("mesh: resync: listening", "err", err)
 		return
 	}
-	peers, err := h.opt.Store.ListMeshPeers(ctx, sessionID)
-	if err != nil {
-		h.opt.Log.Warn("mesh: resync: listing peers", "err", err)
-		return
-	}
-	var wg sync.WaitGroup
-	for _, p := range peers {
-		wg.Add(1)
-		go func(p store.MeshPeer) {
-			defer wg.Done()
-			w, err := h.handshake(ctx, sessionID, sess.JoinSecret, ourAddr, p.Addr)
-			if err != nil {
-				h.opt.Log.Warn("mesh: resync with peer failed", "peer", p.PeerID, "err", err)
-				_ = h.opt.Store.SetMeshPeerStatus(ctx, sessionID, p.PeerID, store.MeshPeerUnreachable)
-				return
+	dialed := map[string]bool{}
+	for {
+		peers, err := h.opt.Store.ListMeshPeers(ctx, sessionID)
+		if err != nil {
+			h.opt.Log.Warn("mesh: resync: listing peers", "err", err)
+			return
+		}
+		var round []store.MeshPeer
+		for _, p := range peers {
+			if !dialed[p.PeerID] {
+				round = append(round, p)
 			}
-			if err := h.applyWelcome(ctx, sessionID, sess.SelfPeerID, w); err != nil {
-				h.opt.Log.Warn("mesh: resync: applying welcome", "peer", p.PeerID, "err", err)
-			}
-			h.flushPending(ctx, sessionID, p.PeerID)
-		}(p)
+		}
+		if len(round) == 0 {
+			return // fixed point: every peer we know about has been dialed this call
+		}
+		var wg sync.WaitGroup
+		for _, p := range round {
+			dialed[p.PeerID] = true
+			wg.Add(1)
+			go func(p store.MeshPeer) {
+				defer wg.Done()
+				w, err := h.handshake(ctx, sessionID, sess.JoinSecret, ourAddr, p.Addr)
+				if err != nil {
+					h.opt.Log.Warn("mesh: resync with peer failed", "peer", p.PeerID, "err", err)
+					_ = h.opt.Store.SetMeshPeerStatus(ctx, sessionID, p.PeerID, store.MeshPeerUnreachable)
+					return
+				}
+				// applyWelcome may record a peer neither in round nor
+				// previously known - it gets picked up next round.
+				if err := h.applyWelcome(ctx, sessionID, sess.SelfPeerID, w); err != nil {
+					h.opt.Log.Warn("mesh: resync: applying welcome", "peer", p.PeerID, "err", err)
+				}
+				h.flushPending(ctx, sessionID, p.PeerID)
+			}(p)
+		}
+		wg.Wait()
+		if ctx.Err() != nil {
+			return // out of time: whatever converged so far stands; retried next Resync
+		}
 	}
-	wg.Wait()
 }
 
 // flushPending resends anything still outstanding for peerID right after a
@@ -678,7 +737,10 @@ func (h *Hub) applyWelcome(ctx context.Context, sessionID, ourPeerID string, w p
 		if p.PeerID == ourPeerID || p.PeerID == w.PeerID {
 			continue // that's us, or the peer we just linked to directly
 		}
-		if err := h.opt.Store.UpsertMeshPeer(ctx, store.MeshPeer{
+		// A secondhand mention only ever creates a new row (as unreachable,
+		// until we dial it ourselves); it must never downgrade a peer we
+		// already have more direct knowledge of - see UpsertMeshPeerIfNew.
+		if err := h.opt.Store.UpsertMeshPeerIfNew(ctx, store.MeshPeer{
 			SessionID: sessionID, PeerID: p.PeerID, Addr: p.Addr, Status: store.MeshPeerUnreachable,
 		}); err != nil {
 			return fmt.Errorf("recording %s: %w", p.PeerID, err)

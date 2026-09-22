@@ -665,6 +665,7 @@ func (s *Server) expireLoop(ctx context.Context) {
 
 func (s *Server) sweep(ctx context.Context) {
 	s.reapGone(ctx)
+	s.resyncAllMeshSessions(ctx)
 	expired, err := s.st.ExpireDue(ctx, time.Now())
 	if err != nil {
 		s.log.Error("expire messages", "err", err)

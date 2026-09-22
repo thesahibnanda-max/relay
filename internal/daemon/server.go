@@ -163,6 +163,7 @@ func New(opt Options) (*Server, error) {
 	s.stop = stop
 	s.wg.Add(1)
 	go func() { defer s.wg.Done(); s.expireLoop(bg) }()
+	s.resumeMeshOnStartup(bg)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/agent", s.handleAgent)
