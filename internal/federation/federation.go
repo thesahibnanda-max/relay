@@ -18,7 +18,6 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -48,6 +47,36 @@ type LocalRouter interface {
 	// and returns the name actually applied (implementations may need to
 	// retry proposedName on a further local collision).
 	RenameLocalAgent(ctx context.Context, agentID, proposedName string) (string, error)
+
+	// DeliverInbound creates (or, on a resend, finds) this daemon's
+	// authoritative message row for a handoff addressed to one of its own
+	// agents, applying whatever hold policy an ordinary local send would
+	// (hop limit, approve-inbound) - the owning daemon is the only place
+	// that can correctly decide this, since only it knows its own agent's
+	// live approve-inbound flag. Returns the row's current state as the
+	// handoff's synchronous reply.
+	DeliverInbound(ctx context.Context, sessionID string, h proto.MeshMsgHandoff) (proto.MeshMsgReceipt, error)
+
+	// ApplyReceipt updates this daemon's mirror row for a message from an
+	// asynchronous receipt sent by fromPeer, the tunnel-verified identity of
+	// whoever actually sent it (checked against the mirror row's own owner
+	// so one peer can never spoof a receipt for a message it was never
+	// handed off to).
+	ApplyReceipt(ctx context.Context, fromPeer string, r proto.MeshMsgReceipt) error
+
+	// PendingHandoffs returns this daemon's messages addressed to an agent
+	// owned by peerID that have never had a receipt applied - i.e. may not
+	// have reached peerID yet. Used to resend on reconnect.
+	PendingHandoffs(ctx context.Context, sessionID, peerID string) ([]proto.MeshMsgHandoff, error)
+
+	// PendingReceipts returns this daemon's authoritative messages sent by
+	// an agent owned by peerID whose current state peerID might not have:
+	// still live, or finished recently enough that a receipt could have
+	// been missed across a disconnect. Used to resend on reconnect,
+	// mirroring the "resend full current truth" idiom mesh_agents gossip
+	// already uses for the roster, rather than tracking per-peer
+	// acknowledgement state.
+	PendingReceipts(ctx context.Context, sessionID, peerID string) ([]proto.MeshMsgReceipt, error)
 }
 
 // helloTimeout bounds both the handshake's network I/O and, absent a
@@ -158,15 +187,18 @@ func (h *Hub) acceptLoop(ln meshnet.Listener) {
 	}
 }
 
-// handleInbound answers one mesh link's opening handshake: read MeshHello,
-// verify the session's join secret, record the peer, reply MeshWelcome.
+// handleInbound answers one mesh link's opening frame. Every kind of mesh
+// link this daemon ever accepts - a join/resync handshake, a message
+// handoff, or an asynchronous receipt - is exactly one short-lived
+// connection carrying one request frame and one reply frame (see the
+// package doc's "no persistent connection architecture" note), so the only
+// thing that differs between them is which frame type arrives first.
 //
-// verifiedPeerID is not the Hello payload's own PeerID field (that is only
-// ever a claim the peer makes about itself) - it is what the transport
-// itself cryptographically proved for this exact connection (see
-// meshnet.Listener). Requiring the two to agree is what makes recording a
-// peer under a given identity trustworthy rather than a matter of taking a
-// stranger's word for who they are.
+// verifiedPeerID is not any frame's own self-reported peer/from-peer field
+// (that is only ever a claim the peer makes about itself) - it is what the
+// transport itself cryptographically proved for this exact connection (see
+// meshnet.Listener). Every handler below requires its frame's own claimed
+// identity to agree with this before trusting it for anything.
 func (h *Hub) handleInbound(conn net.Conn, verifiedPeerID string) {
 	defer conn.Close()
 	log := h.opt.Log.With("peer", verifiedPeerID)
@@ -174,9 +206,38 @@ func (h *Hub) handleInbound(conn net.Conn, verifiedPeerID string) {
 	defer cancel()
 	conn.SetDeadline(time.Now().Add(helloTimeout))
 
-	hello, err := readHello(conn)
+	frame, err := readFrame(conn)
 	if err != nil {
-		log.Warn("mesh: bad inbound hello", "err", err)
+		log.Warn("mesh: reading inbound frame", "err", err)
+		return
+	}
+	env, err := proto.MeshUnmarshal(frame)
+	if err != nil {
+		log.Warn("mesh: malformed inbound frame", "err", err)
+		return
+	}
+	switch env.Type {
+	case proto.MeshTypeHello:
+		h.handleHello(ctx, conn, verifiedPeerID, env, log)
+	case proto.MeshTypeMsgHandoff:
+		h.handleHandoff(ctx, conn, verifiedPeerID, env, log)
+	case proto.MeshTypeMsgReceipt:
+		h.handleReceipt(ctx, conn, verifiedPeerID, env, log)
+	default:
+		log.Warn("mesh: unexpected inbound frame type", "type", env.Type)
+	}
+}
+
+// handleHello answers a join/resync handshake: verify the session's join
+// secret, record the peer, apply its roster, reply MeshWelcome.
+func (h *Hub) handleHello(ctx context.Context, conn net.Conn, verifiedPeerID string, env proto.MeshEnvelope, log *slog.Logger) {
+	var hello proto.MeshHello
+	if err := json.Unmarshal(env.Payload, &hello); err != nil {
+		log.Warn("mesh: malformed inbound hello", "err", err)
+		return
+	}
+	if hello.Session == "" || hello.Secret == "" {
+		log.Warn("mesh: inbound hello missing session or secret")
 		return
 	}
 	if hello.MeshVersion != proto.MeshVersion {
@@ -243,6 +304,75 @@ func (h *Hub) handleInbound(conn net.Conn, verifiedPeerID string) {
 	if err := writeFrame(conn, b); err != nil {
 		log.Warn("mesh: sending welcome", "err", err)
 	}
+}
+
+// handleHandoff answers an inbound MeshMsgHandoff: a message addressed to
+// one of THIS daemon's own agents, handed off by the daemon that accepted
+// it from its sender. Unlike Hello, a handoff carries no join secret of its
+// own - it is only ever accepted from a peer already recorded linked for
+// this session (a real join secret was already checked on that peer's very
+// first Hello), so a stranger who never joined the session at all cannot
+// inject one just by guessing an agent id.
+func (h *Hub) handleHandoff(ctx context.Context, conn net.Conn, verifiedPeerID string, env proto.MeshEnvelope, log *slog.Logger) {
+	var hs proto.MeshMsgHandoff
+	if err := json.Unmarshal(env.Payload, &hs); err != nil || hs.ID == "" || hs.SessionID == "" || hs.ToAgent == "" {
+		log.Warn("mesh: malformed inbound handoff")
+		return
+	}
+	if _, err := h.opt.Store.GetMeshPeer(ctx, hs.SessionID, verifiedPeerID); err != nil {
+		log.Warn("mesh: handoff from a peer never linked to this session", "session", hs.SessionID)
+		writeMeshError(conn, proto.MeshCodeUnknownSession, "this daemon does not know you as a member of that session")
+		return
+	}
+	if hs.FromPeer != verifiedPeerID {
+		log.Warn("mesh: handoff claimed a different from_peer than the tunnel verified", "claimed", hs.FromPeer)
+		writeMeshError(conn, proto.MeshCodeKeyChanged, "identity mismatch")
+		return
+	}
+	if h.opt.Router == nil {
+		log.Warn("mesh: no local router configured; cannot deliver")
+		return
+	}
+	receipt, err := h.opt.Router.DeliverInbound(ctx, hs.SessionID, hs)
+	if err != nil {
+		log.Warn("mesh: delivering inbound handoff", "id", hs.ID, "err", err)
+		writeMeshError(conn, proto.MeshCodeUnknownSession, "could not deliver")
+		return
+	}
+	b, err := proto.MeshMarshal(proto.MeshTypeMsgReceipt, receipt)
+	if err != nil {
+		log.Error("mesh: encoding receipt", "err", err)
+		return
+	}
+	if err := writeFrame(conn, b); err != nil {
+		log.Warn("mesh: sending receipt reply", "err", err)
+	}
+}
+
+// handleReceipt answers an inbound MeshMsgReceipt: an asynchronous update
+// from the daemon that owns a message this one holds the mirror row for.
+// verifiedPeerID stands in for the sender the same way it does everywhere
+// else in this file; LocalRouter.ApplyReceipt is what actually checks it
+// against the mirror row's own recorded owner before applying anything.
+func (h *Hub) handleReceipt(ctx context.Context, conn net.Conn, verifiedPeerID string, env proto.MeshEnvelope, log *slog.Logger) {
+	var r proto.MeshMsgReceipt
+	if err := json.Unmarshal(env.Payload, &r); err != nil || r.ID == "" {
+		log.Warn("mesh: malformed inbound receipt")
+		return
+	}
+	if h.opt.Router == nil {
+		log.Warn("mesh: no local router configured; cannot apply receipt")
+		return
+	}
+	if err := h.opt.Router.ApplyReceipt(ctx, verifiedPeerID, r); err != nil {
+		log.Warn("mesh: applying inbound receipt", "id", r.ID, "err", err)
+		return
+	}
+	b, err := proto.MeshMarshal(proto.MeshTypeMsgAck, proto.MeshMsgAck{ID: r.ID})
+	if err != nil {
+		return
+	}
+	_ = writeFrame(conn, b)
 }
 
 // Invite makes this daemon reachable (starting its listener on first use,
@@ -332,9 +462,142 @@ func (h *Hub) Resync(ctx context.Context, sessionID string) {
 			if err := h.applyWelcome(ctx, sessionID, sess.SelfPeerID, w); err != nil {
 				h.opt.Log.Warn("mesh: resync: applying welcome", "peer", p.PeerID, "err", err)
 			}
+			h.flushPending(ctx, sessionID, p.PeerID)
 		}(p)
 	}
 	wg.Wait()
+}
+
+// flushPending resends anything still outstanding for peerID right after a
+// successful reconnect with it - the at-least-once guarantee for both
+// directions of message hand-off. Best-effort like the rest of Resync: a
+// failure here logs and moves on, picked up again on the next Resync.
+func (h *Hub) flushPending(ctx context.Context, sessionID, peerID string) {
+	if h.opt.Router == nil {
+		return
+	}
+	handoffs, err := h.opt.Router.PendingHandoffs(ctx, sessionID, peerID)
+	if err != nil {
+		h.opt.Log.Warn("mesh: listing pending handoffs", "peer", peerID, "err", err)
+	}
+	for _, hs := range handoffs {
+		hs.Resend = true
+		if _, err := h.SendMessage(ctx, sessionID, peerID, hs); err != nil {
+			h.opt.Log.Warn("mesh: resending handoff", "id", hs.ID, "peer", peerID, "err", err)
+		}
+	}
+	receipts, err := h.opt.Router.PendingReceipts(ctx, sessionID, peerID)
+	if err != nil {
+		h.opt.Log.Warn("mesh: listing pending receipts", "peer", peerID, "err", err)
+	}
+	for _, r := range receipts {
+		if err := h.SendReceipt(ctx, sessionID, peerID, r); err != nil {
+			h.opt.Log.Warn("mesh: resending receipt", "id", r.ID, "peer", peerID, "err", err)
+		}
+	}
+}
+
+// SendMessage hands msg off to its recipient's owning daemon: dials toPeer
+// directly (its address must already be known from mesh_peers - a prior
+// Join/Resync recorded it), sends a MeshMsgHandoff frame, and applies the
+// MeshMsgReceipt it gets back as the immediate reply, the same way any
+// other receipt is applied. Used right after routeSend creates a mirror row
+// (an immediate best-effort attempt) and again, for anything that never got
+// a first receipt, on every subsequent Resync with that peer (see
+// flushPending / store.PendingMirrorMessages).
+//
+// FromPeer on hs is always overwritten with this daemon's own identity
+// before sending - never trusted from the caller - the same way rosterFor
+// stamps OwnerPeer itself rather than trusting a LocalRouter to know its
+// own mesh identity.
+func (h *Hub) SendMessage(ctx context.Context, sessionID, toPeer string, hs proto.MeshMsgHandoff) (proto.MeshMsgReceipt, error) {
+	hs.FromPeer = h.opt.Identity.PeerID()
+	peer, err := h.opt.Store.GetMeshPeer(ctx, sessionID, toPeer)
+	if err != nil {
+		return proto.MeshMsgReceipt{}, fmt.Errorf("unknown peer %s: %w", toPeer, err)
+	}
+	conn, err := h.dial(ctx, sessionID, toPeer, peer.Addr)
+	if err != nil {
+		return proto.MeshMsgReceipt{}, err
+	}
+	defer conn.Close()
+	b, err := proto.MeshMarshal(proto.MeshTypeMsgHandoff, hs)
+	if err != nil {
+		return proto.MeshMsgReceipt{}, err
+	}
+	if err := writeFrame(conn, b); err != nil {
+		return proto.MeshMsgReceipt{}, fmt.Errorf("sending handoff to %s: %w", toPeer, err)
+	}
+	frame, err := readFrame(conn)
+	if err != nil {
+		return proto.MeshMsgReceipt{}, fmt.Errorf("reading %s's receipt: %w", toPeer, err)
+	}
+	env, err := proto.MeshUnmarshal(frame)
+	if err != nil {
+		return proto.MeshMsgReceipt{}, fmt.Errorf("malformed reply from %s: %w", toPeer, err)
+	}
+	switch env.Type {
+	case proto.MeshTypeError:
+		var e struct{ Code, Message string }
+		_ = json.Unmarshal(env.Payload, &e)
+		return proto.MeshMsgReceipt{}, fmt.Errorf("%s refused (%s): %s", toPeer, e.Code, e.Message)
+	case proto.MeshTypeMsgReceipt:
+		var r proto.MeshMsgReceipt
+		if err := json.Unmarshal(env.Payload, &r); err != nil {
+			return proto.MeshMsgReceipt{}, err
+		}
+		if h.opt.Router != nil {
+			if err := h.opt.Router.ApplyReceipt(ctx, toPeer, r); err != nil {
+				h.opt.Log.Warn("mesh: applying receipt from handoff reply", "id", r.ID, "err", err)
+			}
+		}
+		return r, nil
+	default:
+		return proto.MeshMsgReceipt{}, fmt.Errorf("unexpected reply type %q from %s", env.Type, toPeer)
+	}
+}
+
+// SendReceipt tells toPeer this daemon's current state for a message it
+// holds the mirror row for - the asynchronous half of the exchange, fired
+// whenever a message this daemon is authoritative for changes state (see
+// daemon.Server.pushMeshReceipt), and again on Resync for anything that
+// might have been missed across a disconnect (see PendingReceipts).
+func (h *Hub) SendReceipt(ctx context.Context, sessionID, toPeer string, r proto.MeshMsgReceipt) error {
+	peer, err := h.opt.Store.GetMeshPeer(ctx, sessionID, toPeer)
+	if err != nil {
+		return fmt.Errorf("unknown peer %s: %w", toPeer, err)
+	}
+	conn, err := h.dial(ctx, sessionID, toPeer, peer.Addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	b, err := proto.MeshMarshal(proto.MeshTypeMsgReceipt, r)
+	if err != nil {
+		return err
+	}
+	if err := writeFrame(conn, b); err != nil {
+		return fmt.Errorf("sending receipt to %s: %w", toPeer, err)
+	}
+	_, _ = readFrame(conn) // best-effort ack; correctness never depends on reading it (see MeshMsgAck's doc comment)
+	return nil
+}
+
+// dial opens a short-lived connection to a known peer, marking it
+// unreachable in mesh_peers on failure so the next Resync (rather than an
+// immediate retry loop here) picks it back up once it's reachable again.
+func (h *Hub) dial(ctx context.Context, sessionID, peerID, addr string) (net.Conn, error) {
+	conn, err := h.opt.Transport.Dial(ctx, h.opt.Identity, meshnet.Addr(addr))
+	if err != nil {
+		_ = h.opt.Store.SetMeshPeerStatus(ctx, sessionID, peerID, store.MeshPeerUnreachable)
+		return nil, fmt.Errorf("dialing %s: %w", peerID, err)
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(helloTimeout)
+	}
+	conn.SetDeadline(deadline)
+	return conn, nil
 }
 
 // handshake dials peerAddr, sends our current MeshHello (roster included),
@@ -549,28 +812,6 @@ func toMeshPeerInfos(peers []store.MeshPeer) []proto.MeshPeerInfo {
 		out[i] = proto.MeshPeerInfo{PeerID: p.PeerID, Addr: p.Addr, LastSeen: p.LastSeen}
 	}
 	return out
-}
-
-func readHello(conn net.Conn) (proto.MeshHello, error) {
-	frame, err := readFrame(conn)
-	if err != nil {
-		return proto.MeshHello{}, err
-	}
-	env, err := proto.MeshUnmarshal(frame)
-	if err != nil {
-		return proto.MeshHello{}, err
-	}
-	if env.Type != proto.MeshTypeHello {
-		return proto.MeshHello{}, fmt.Errorf("expected %s, got %q", proto.MeshTypeHello, env.Type)
-	}
-	var hello proto.MeshHello
-	if err := json.Unmarshal(env.Payload, &hello); err != nil {
-		return proto.MeshHello{}, fmt.Errorf("malformed hello: %w", err)
-	}
-	if hello.Session == "" || hello.Secret == "" {
-		return proto.MeshHello{}, errors.New("hello missing session or secret")
-	}
-	return hello, nil
 }
 
 func writeMeshError(conn net.Conn, code, msg string) {

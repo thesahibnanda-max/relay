@@ -230,3 +230,31 @@ func TestRenameAgentNotFound(t *testing.T) {
 		t.Fatalf("got %v, want ErrNotFound", err)
 	}
 }
+
+func TestFindMeshAgentByNameIsCaseInsensitiveAndExcludesTombstoned(t *testing.T) {
+	s := open(t)
+	sess := newSession(t, s)
+	if _, err := s.EnsureMeshSession(bg, sess.ID, "secret", "self"); err != nil {
+		t.Fatal(err)
+	}
+	a := meshAgentFixture(sess.ID)
+	if _, err := s.UpsertMeshAgentIfNewer(bg, a); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.FindMeshAgentByName(bg, sess.ID, "CODER")
+	if err != nil || got.AgentID != a.AgentID {
+		t.Fatalf("got %+v, err=%v", got, err)
+	}
+	if _, err := s.FindMeshAgentByName(bg, sess.ID, "nobody"); err != ErrNotFound {
+		t.Fatalf("unknown name: %v", err)
+	}
+
+	tomb := a
+	tomb.Version, tomb.Tombstoned = a.Version+1, true
+	if _, err := s.UpsertMeshAgentIfNewer(bg, tomb); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.FindMeshAgentByName(bg, sess.ID, "coder"); err != ErrNotFound {
+		t.Fatalf("a tombstoned agent must not be findable by name: %v", err)
+	}
+}
