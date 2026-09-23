@@ -380,6 +380,51 @@ func TestResumeFromNewProcessContinuesSeq(t *testing.T) {
 	}
 }
 
+// TestReconnectAfterResumeUsesTheOriginalToken guards against a real bug:
+// adopt() only updates c.token when a Welcome carries one, and a resume's
+// Welcome never does (Token is only set on first registration - see
+// proto.Welcome). A fresh Client whose very first Hello was itself a
+// resume (Options.Hello.Token set, as here) must still remember that same
+// token for its OWN later automatic reconnects (a network blip, or the
+// daemon bouncing), or the second reconnect attempt goes out with an empty
+// token, which the daemon reads as a brand new registration attempt -
+// colliding on the still-occupied name and failing for good.
+func TestReconnectAfterResumeUsesTheOriginalToken(t *testing.T) {
+	d := newTestDaemon(t)
+	c1, err := Connect(bg, d.opts(proto.Hello{Session: proto.SessionNew, Name: "phoenix"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := c1.Identity()
+	c1.cancel() // simulate the process being killed: no bye
+	<-c1.done
+	d.waitFor("disconnected", func() bool { return d.session(id.Session.ID).Agents[0].Status == "disconnected" })
+
+	c2, err := Connect(bg, d.opts(proto.Hello{Session: id.Session.ID, Name: "phoenix", Token: id.Token}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c2.Identity().Resumed {
+		t.Fatal("expected a resumed welcome")
+	}
+
+	// Force a SECOND reconnect within c2's own lifetime.
+	d.stop()
+	d.waitFor("c2 offline", func() bool { return !c2.Online() })
+	d.start()
+	d.waitFor("c2 back online", func() bool { return c2.Online() })
+	if err := c2.Err(); err != nil {
+		t.Fatalf("c2 gave up reconnecting: %v", err)
+	}
+	if !c2.Identity().Resumed {
+		t.Error("the second reconnect should also come back as resumed, not a fresh registration")
+	}
+	if c2.Identity().Agent.ID != id.Agent.ID {
+		t.Error("agent identity changed across the second reconnect")
+	}
+	c2.Close(0)
+}
+
 func TestFromEventlog(t *testing.T) {
 	code := 7
 	cases := []struct {

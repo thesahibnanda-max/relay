@@ -8,6 +8,7 @@
 //	  data/raw/<session>/<agent>/...   raw terminal stream segments
 //	  log/relayd.log
 //	  sessions/          agent-side local event logs (the offline spool)
+//	  identities/        agent-side saved resume tokens, one file per (session, name)
 package relayhome
 
 import (
@@ -41,8 +42,14 @@ func (p Paths) DataDir() string     { return filepath.Join(p.Root, "data") }
 func (p Paths) RawDir() string      { return filepath.Join(p.Root, "data", "raw") }
 func (p Paths) LogDir() string      { return filepath.Join(p.Root, "log") }
 func (p Paths) SessionsDir() string { return filepath.Join(p.Root, "sessions") }
-func (p Paths) DBPath() string      { return filepath.Join(p.DataDir(), "relay.db") }
-func (p Paths) LockPath() string    { return filepath.Join(p.RunDir(), "relayd.lock") }
+
+// IdentitiesDir holds one saved-resume-identity file per (session, agent
+// name) this machine has registered - see internal/cli's connect, which
+// writes and reads them so a fresh `relay <tool>` process can resume as the
+// same agent after a crash instead of colliding on its still-occupied name.
+func (p Paths) IdentitiesDir() string { return filepath.Join(p.Root, "identities") }
+func (p Paths) DBPath() string        { return filepath.Join(p.DataDir(), "relay.db") }
+func (p Paths) LockPath() string      { return filepath.Join(p.RunDir(), "relayd.lock") }
 func (p Paths) SpawnLockPath() string {
 	return filepath.Join(p.RunDir(), "spawn.lock")
 }
@@ -70,7 +77,7 @@ func (p Paths) SocketPath() string {
 
 // Ensure creates the directory tree with private permissions.
 func (p Paths) Ensure() error {
-	for _, d := range []string{p.Root, p.RunDir(), p.DataDir(), p.RawDir(), p.LogDir(), p.SessionsDir(), filepath.Dir(p.SocketPath())} {
+	for _, d := range []string{p.Root, p.RunDir(), p.DataDir(), p.RawDir(), p.LogDir(), p.SessionsDir(), p.IdentitiesDir(), filepath.Dir(p.SocketPath())} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return err
 		}

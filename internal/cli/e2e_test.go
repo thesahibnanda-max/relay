@@ -239,15 +239,19 @@ func (a *relayProc) waitSubmit(contains string) string {
 	return ""
 }
 
-var sessionLine = regexp.MustCompile(`relay: session ([0-9A-Z]{26}) · you are (\S+) \((\S+)\)`)
+var sessionLine = regexp.MustCompile(`relay: session ([0-9A-Z]{26}) · (?:you are|welcome back,) (\S+) \((\S+)\)`)
 
 func (a *relayProc) identity() (session, name string) {
-	o := a.waitOutput("you are ")
-	m := sessionLine.FindStringSubmatch(o)
-	if m == nil {
-		a.t.Fatalf("no identity line in %q", o)
+	a.t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if m := sessionLine.FindStringSubmatch(a.output()); m != nil {
+			return m[1], m[2]
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	return m[1], m[2]
+	a.t.Fatalf("no identity line in %q", a.output())
+	return "", ""
 }
 
 // shim drives `relay mcp` the way a model's MCP client does.
@@ -590,6 +594,70 @@ func TestKilledAgentLeavesOnlyCollectableLeftovers(t *testing.T) {
 	}
 	if out, _, _ := w.runRelay("gc"); !strings.Contains(out, "Nothing to clean up") {
 		t.Errorf("second gc: %q", out)
+	}
+}
+
+// TestKilledAgentResumesAutomaticallyOnRelaunch is the real end-to-end proof
+// of M-mesh-6: relaunching the exact same `relay <tool> --session=<id>
+// --name=<x>` after a crash picks the same agent identity back up, using a
+// resume token this CLI process never saw directly - it was saved to
+// ~/.relay/identities by the killed process and read back automatically,
+// with no new flag needed for the common case.
+func TestKilledAgentResumesAutomaticallyOnRelaunch(t *testing.T) {
+	w := newWorld(t)
+	alice := w.start("claude", "--session=NEW", "--name=alice")
+	session, _ := alice.identity()
+	aliceID := w.agents(session)["alice"].ID
+
+	alice.cmd.Process.Kill() // kill -9: no bye, no cleanup, no chance to hand off a token by hand
+	<-alice.done
+	alice.cmd.Wait()
+	waitFor(t, "alice marked disconnected", func() bool {
+		a, ok := w.agents(session)["alice"]
+		return ok && !a.Connected
+	})
+
+	alice2 := w.start("claude", "--session="+session, "--name=alice")
+	out := alice2.waitOutput("welcome back")
+	if !strings.Contains(out, "welcome back, alice") {
+		t.Fatalf("expected a resumed welcome, got:\n%s", out)
+	}
+	if got := w.agents(session)["alice"].ID; got != aliceID {
+		t.Fatalf("resumed as a different agent: got %s, want %s", got, aliceID)
+	}
+}
+
+// TestFreshIgnoresASavedIdentityAndResumeFailsLoudlyWithoutOne exercises
+// both new flags: --fresh always registers a new agent even though a saved
+// identity for that exact name exists (colliding on the name, since the old
+// one is still "occupied" from the daemon's point of view), and --resume
+// refuses to silently fall back to fresh registration when nothing is saved.
+func TestFreshIgnoresASavedIdentityAndResumeFailsLoudlyWithoutOne(t *testing.T) {
+	w := newWorld(t)
+	alice := w.start("claude", "--session=NEW", "--name=alice")
+	session, _ := alice.identity()
+
+	alice.cmd.Process.Kill()
+	<-alice.done
+	alice.cmd.Wait()
+	waitFor(t, "alice marked disconnected", func() bool {
+		a, ok := w.agents(session)["alice"]
+		return ok && !a.Connected
+	})
+
+	// --fresh: a saved identity exists, but must be ignored - the name is
+	// still occupied by the not-yet-reaped old registration, so this fails
+	// exactly like it would have before M-mesh-6 ever existed.
+	_, errOut, code := w.runRelay("claude", "--session="+session, "--name=alice", "--fresh")
+	if code == 0 || !strings.Contains(errOut, "already used") {
+		t.Fatalf("--fresh should collide on the occupied name: code=%d stderr=%q", code, errOut)
+	}
+
+	// --resume against a name with no saved identity at all: fails loudly
+	// rather than silently registering "bob" fresh.
+	_, errOut2, code2 := w.runRelay("claude", "--session="+session, "--name=bob", "--resume")
+	if code2 == 0 || !strings.Contains(errOut2, "no saved identity") {
+		t.Fatalf("--resume without a saved identity should fail loudly: code=%d stderr=%q", code2, errOut2)
 	}
 }
 

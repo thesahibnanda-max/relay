@@ -56,6 +56,8 @@ type Parsed struct {
 	Session        string          // "" (solo), proto.SessionNew, or a normalised ULID
 	Join           *proto.JoinBlob // set by --join; mutually exclusive with --session
 	Name           string
+	Resume         bool // --resume: fail loudly instead of silently registering fresh if no saved identity resumes
+	Fresh          bool // --fresh: ignore any saved identity and register brand new on purpose
 	ApproveInbound bool
 	Record         Record
 	ToolArgs       []string
@@ -222,6 +224,10 @@ func parseAgent(tool string, args []string) (Parsed, error) {
 				return p, usagef("role given twice (positional and --role)")
 			}
 			p.Role, haveRole = v, true
+		case "resume":
+			p.Resume = true
+		case "fresh":
+			p.Fresh = true
 		case "approve-inbound":
 			p.ApproveInbound = true
 			if hasVal {
@@ -255,6 +261,12 @@ func parseAgent(tool string, args []string) (Parsed, error) {
 	}
 	if p.Name != "" && p.Session == "" && p.Join == nil {
 		return p, usagef("--name only makes sense with --session or --join")
+	}
+	if p.Resume && p.Fresh {
+		return p, usagef("--resume and --fresh are mutually exclusive")
+	}
+	if (p.Resume || p.Fresh) && p.Name == "" {
+		return p, usagef("--resume and --fresh only make sense with --name (there is no saved identity to act on without one)")
 	}
 	return p, nil
 }

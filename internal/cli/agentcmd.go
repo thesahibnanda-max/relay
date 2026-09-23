@@ -69,8 +69,12 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, errw io.Writer) int {
 	}
 
 	if id := lk.Identity(); lk != nil && id.Session.Kind == "shared" {
-		fmt.Fprintf(errw, "relay: session %s · you are %s (%s)\nrelay: others join with: relay <claude|codex> [role] --session=%s\n",
-			id.Session.ID, id.Agent.Name, id.Agent.Role, id.Session.ID)
+		who := fmt.Sprintf("you are %s (%s)", id.Agent.Name, id.Agent.Role)
+		if id.Resumed {
+			who = fmt.Sprintf("welcome back, %s (%s) — resumed", id.Agent.Name, id.Agent.Role)
+		}
+		fmt.Fprintf(errw, "relay: session %s · %s\nrelay: others join with: relay <claude|codex> [role] --session=%s\n",
+			id.Session.ID, who, id.Session.ID)
 	}
 
 	var lg *eventlog.Logger
@@ -128,6 +132,11 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, errw io.Writer) int {
 // session (see meshJoin) and continues with p.Session set from the blob -
 // nothing past this point, including RegisterAgent/link.Connect below, ever
 // needs to know whether the session came from --session or --join.
+//
+// Whenever --session=<id> --name=<x> names a specific, previously-used
+// identity, connect looks for a saved resume token first (see identity.go)
+// and tries that before ever falling back to an ordinary fresh
+// registration - see connectWithResume for the exact fallback rules.
 func connect(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.Adaptor, col *collab.Session) (*link.Client, error) {
 	exe, err := os.Executable()
 	if err != nil {
@@ -145,7 +154,7 @@ func connect(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.Adaptor
 		p.Session = p.Join.Session
 	}
 	cwd, _ := os.Getwd()
-	return link.Connect(ctx, link.Options{
+	opt := link.Options{
 		Paths: paths,
 		Hello: proto.Hello{
 			Session: p.Session, Name: p.Name, Tool: a.Name(), Role: role.Name, RoleSource: role.Source,
@@ -155,7 +164,98 @@ func connect(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.Adaptor
 		OnDeliver:    col.Deliver,
 		OnNotice:     col.Notice,
 		EnsureDaemon: func(ctx context.Context) error { _, err := daemon.Ensure(ctx, paths, exe); return err },
-	})
+	}
+
+	lk, err := connectWithResume(ctx, paths, p, opt)
+	if err != nil {
+		return nil, err
+	}
+	if p.Name != "" {
+		id := lk.Identity()
+		saveIdentity(paths, id.Session.ID, id.Agent.Name, id.Token, a.Name())
+	}
+	return lk, nil
+}
+
+// connectWithResume is connect's core decision: whenever a saved identity
+// for (p.Session, p.Name) exists and --fresh wasn't requested, it presents
+// that token first, since the whole point of resume is picking the exact
+// same agent identity back up (same messages, same reply chains) rather
+// than registering a fresh one under a name that already looks occupied.
+//
+// Fallback rules (all orthogonal to what --resume/--fresh change, see
+// below): a stale token (rejected, or the session it named is simply gone)
+// deletes the saved identity and falls back to an ordinary fresh
+// registration under the same name - safe, since the existing name-uniqueness
+// check still rejects a name someone else legitimately holds now. The old
+// process's connection not having visibly dropped yet (CodeAgentLive) is
+// retried a few times with a short backoff before giving up, since that is
+// often transient rather than a real conflict.
+//
+// --resume changes only the failure behavior: no saved identity, or the
+// resume attempt failing for any reason, is a loud, immediate error instead
+// of a silent fallback to fresh registration - for a caller that specifically
+// wants "resume this or tell me why not," not "get me an agent somehow."
+// --fresh skips the lookup entirely and always registers new, on purpose.
+func connectWithResume(ctx context.Context, paths relayhome.Paths, p Parsed, opt link.Options) (*link.Client, error) {
+	canResume := p.Name != "" && p.Session != "" && p.Session != proto.SessionNew && !p.Fresh
+	if !canResume {
+		if p.Resume {
+			return nil, fmt.Errorf("--resume needs --session=<id> --name=<x> naming a specific, already-registered agent")
+		}
+		return link.Connect(ctx, opt)
+	}
+	saved, ok := loadIdentity(paths, p.Session, p.Name)
+	if !ok {
+		if p.Resume {
+			return nil, fmt.Errorf("no saved identity for %q in session %s (drop --resume to register fresh automatically, or add --fresh to do that on purpose)", p.Name, p.Session)
+		}
+		return link.Connect(ctx, opt)
+	}
+
+	resumeOpt := opt
+	resumeOpt.Hello.Token = saved.Token
+	lk, err := connectRetryingAgentLive(ctx, resumeOpt)
+	if err == nil {
+		return lk, nil
+	}
+	var pe *proto.Error
+	if errors.As(err, &pe) {
+		switch pe.Code {
+		case proto.CodeBadToken, proto.CodeSessionNotFound, proto.CodeSessionEnded:
+			deleteIdentity(paths, p.Session, p.Name)
+			if p.Resume {
+				return nil, err
+			}
+			return link.Connect(ctx, opt)
+		}
+	}
+	return nil, err
+}
+
+// connectRetryingAgentLive retries a resume attempt a few times when the
+// daemon reports the old identity as still connected - its process may
+// have crashed only moments ago and the daemon hasn't yet noticed the
+// connection is gone (it can take up to its own flush-on-close window), a
+// transient condition worth a short wait for rather than an immediate,
+// confusing failure.
+func connectRetryingAgentLive(ctx context.Context, opt link.Options) (*link.Client, error) {
+	delays := []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second}
+	for attempt := 0; ; attempt++ {
+		lk, err := link.Connect(ctx, opt)
+		if err == nil {
+			return lk, nil
+		}
+		var pe *proto.Error
+		if !errors.As(err, &pe) || pe.Code != proto.CodeAgentLive || attempt >= len(delays) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(delays[attempt]):
+		}
+	}
 }
 
 // friendly turns connection failures into something a user can act on.
@@ -171,6 +271,10 @@ func friendly(err error, p Parsed) string {
 			return pe.Message + " (start another session with --session=NEW)"
 		case proto.CodeNameTaken:
 			return fmt.Sprintf("the name %q is already used in that session (choose another with --name, or omit it to get one automatically)", p.Name)
+		case proto.CodeAgentLive:
+			return fmt.Sprintf("%q is still connected elsewhere in that session (wait a moment and try again, or use --fresh to register as a new agent)", p.Name)
+		case proto.CodeBadToken:
+			return fmt.Sprintf("could not resume %q: its saved identity was rejected (drop --resume to register fresh automatically, or use --fresh)", p.Name)
 		}
 		return pe.Message
 	}

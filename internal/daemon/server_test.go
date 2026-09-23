@@ -446,6 +446,36 @@ func TestByeMarksExitedAndEndsSoloSession(t *testing.T) {
 	}
 }
 
+// TestResumeAnExitedAgentIsAllowed settles the hardening item M-mesh-6's
+// plan flagged explicitly: an agent that said Bye (a clean exit, not just a
+// dropped connection) can still resume with its original token, matching
+// the whole point of resume - relaunching the exact same `relay <tool>
+// --session=X --name=Y` after a crash or a deliberate quit should pick the
+// same identity back up rather than forcing a fresh name.
+func TestResumeAnExitedAgentIsAllowed(t *testing.T) {
+	e := startServer(t)
+	c := e.dial()
+	w, _ := c.join(proto.Hello{Session: proto.SessionNew, Name: "phoenix"})
+	c.send(proto.TypeBye, proto.Bye{ExitCode: 1})
+	a := e.waitAgent(w.Session.ID, "phoenix", func(a proto.AgentInfo) bool { return a.Status == "exited" }, "exited")
+	if a.ExitCode == nil || *a.ExitCode != 1 {
+		t.Fatalf("%+v", a)
+	}
+
+	back := e.dial()
+	w2, perr := back.join(proto.Hello{Session: w.Session.ID, Name: "phoenix", Token: w.Token})
+	if perr != nil {
+		t.Fatalf("resuming an exited agent: %+v", perr)
+	}
+	if !w2.Resumed || w2.Agent.ID != w.Agent.ID {
+		t.Fatalf("resume welcome: %+v", w2)
+	}
+	a2 := e.waitAgent(w.Session.ID, "phoenix", func(a proto.AgentInfo) bool { return a.Status == "connected" }, "connected again")
+	if a2.ExitCode != nil {
+		t.Errorf("exit code should be cleared on resume, got %v", *a2.ExitCode)
+	}
+}
+
 func TestDroppedConnectionMarksDisconnected(t *testing.T) {
 	e := startServer(t)
 	c := e.dial()
