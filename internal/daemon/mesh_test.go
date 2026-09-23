@@ -166,6 +166,59 @@ func TestJoinedSessionGossipsRosterVisibility(t *testing.T) {
 	}
 }
 
+// TestListAgentsRPCIncludesMeshAgents is the regression test for issue #18's
+// Symptom 1: relay_list_agents (OpListAgents, what the MCP tool calls) used
+// to only ever see this daemon's own local agents, silently disagreeing with
+// `relay ls` (sessionInfo, tested above) the moment a real agent joined from
+// another machine. peers() now shares sessionInfo's own meshAgents() helper,
+// so the two can no longer drift apart on which remote agents are visible.
+func TestListAgentsRPCIncludesMeshAgents(t *testing.T) {
+	a, b, sid := joinTwoMeshDaemons(t)
+
+	alice := a.joinPeer(sid, proto.Hello{Name: "alice", Role: "orchestrator"})
+	bob := b.joinPeer(sid, proto.Hello{Name: "bob", Role: "developer"})
+	defer bob.ws.CloseNow()
+
+	// Wait for gossip via sessionInfo first, so the RPC assertion below isn't
+	// racing the same propagation delay - it's peers()'s own mesh-awareness
+	// being tested, not gossip timing (already covered above).
+	a.waitAgent(sid, "bob", func(ai proto.AgentInfo) bool { return ai.Remote }, "gossiped in")
+
+	r := alice.rpc(proto.OpListAgents, nil)
+	if !r.OK {
+		t.Fatalf("relay_list_agents: %+v", r.Error)
+	}
+	var l proto.ListAgentsResult
+	if err := json.Unmarshal(r.Result, &l); err != nil {
+		t.Fatal(err)
+	}
+
+	var foundBob, foundAlice bool
+	for _, p := range l.Agents {
+		switch p.Name {
+		case "bob":
+			foundBob = true
+			if !p.Remote || p.Peer == "" {
+				t.Fatalf("bob should be listed as remote with a peer id: %+v", p)
+			}
+			if p.Self {
+				t.Fatalf("bob must never be marked self on alice's daemon: %+v", p)
+			}
+		case "alice":
+			foundAlice = true
+			if p.Remote || !p.Self {
+				t.Fatalf("alice must not be marked remote on her own daemon: %+v", p)
+			}
+		}
+	}
+	if !foundBob {
+		t.Fatalf("relay_list_agents never showed the remote agent: %+v", l.Agents)
+	}
+	if !foundAlice {
+		t.Fatalf("relay_list_agents lost the local agent: %+v", l.Agents)
+	}
+}
+
 // TestMeshSendReachesARemoteAgentAndRepliesRoundTrip is the M-mesh-4
 // completion of the boundary M-mesh-2/M-mesh-3 deliberately left open:
 // alice (on daemon a) can now send to bob (a real agent that only exists on

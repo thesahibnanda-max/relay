@@ -598,6 +598,24 @@ func (s *Server) connected(agentID string) bool {
 	return ok
 }
 
+// meshAgents returns this session's gossiped mesh agents, skipping exited
+// ones unless withExited - shared by sessionInfo (relay ls) and peers
+// (relay_list_agents and message-routing error listings) so they can't
+// disagree about which remote agents are visible (see issue #18).
+func (s *Server) meshAgents(ctx context.Context, sessionID string, withExited bool) ([]store.MeshAgent, error) {
+	mesh, err := s.st.ListMeshAgents(ctx, sessionID)
+	if err != nil || withExited {
+		return mesh, err
+	}
+	out := make([]store.MeshAgent, 0, len(mesh))
+	for _, a := range mesh {
+		if a.Status != "exited" {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
 func (s *Server) sessionInfo(ctx context.Context, sess store.Session, withExited bool) (proto.SessionInfo, error) {
 	agents, err := s.st.ListAgents(ctx, sess.ID, withExited)
 	if err != nil {
@@ -615,14 +633,11 @@ func (s *Server) sessionInfo(ctx context.Context, sess store.Session, withExited
 	// it must never construct a Hub or touch the network just because
 	// someone ran `relay ls`; mesh_agents is empty for any session that has
 	// never used mesh features, so this is a cheap no-op for almost everyone.
-	mesh, err := s.st.ListMeshAgents(ctx, sess.ID)
+	mesh, err := s.meshAgents(ctx, sess.ID, withExited)
 	if err != nil {
 		return proto.SessionInfo{}, err
 	}
 	for _, a := range mesh {
-		if !withExited && a.Status == "exited" {
-			continue
-		}
 		info.Agents = append(info.Agents, proto.AgentInfo{
 			ID: a.AgentID, Name: a.Name, Tool: a.Tool, Role: a.Role, Status: a.Status,
 			Connected: a.Status == "connected", JoinedAt: a.LastSeenAt, LastSeen: a.LastSeenAt,
