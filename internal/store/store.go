@@ -724,3 +724,27 @@ func StoredSchemaVersion(path string) (int, error) {
 	err = db.QueryRow(`PRAGMA user_version`).Scan(&v)
 	return v, err
 }
+
+// MeshSummary reports what a database on disk knows about mesh membership,
+// for `relay doctor` - opened read-only and outside a full Store (no
+// migration to run), so it is always safe to call alongside a live daemon.
+// unreachablePeers counts peers not currently marked linked (see
+// federation.Hub.Resync, which is the only thing that ever moves that
+// status either way).
+func MeshSummary(path string) (sessions, peers, unreachablePeers int, err error) {
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(3000)")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer db.Close()
+	if err := db.QueryRow(`SELECT COUNT(*) FROM mesh_sessions`).Scan(&sessions); err != nil {
+		return 0, 0, 0, err
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM mesh_peers`).Scan(&peers); err != nil {
+		return 0, 0, 0, err
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM mesh_peers WHERE status != 'linked'`).Scan(&unreachablePeers); err != nil {
+		return 0, 0, 0, err
+	}
+	return sessions, peers, unreachablePeers, nil
+}

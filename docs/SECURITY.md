@@ -14,10 +14,13 @@ It does not defend against another process running as *your own user* (which cou
 
 ## Boundaries and protections
 
-* **No network listener.** The daemon listens only on a unix socket in a 0700 directory (socket 0600).
-  Connections are checked with `SO_PEERCRED`/`LOCAL_PEERCRED` on the server, and clients verify the daemon
-  is their own uid (a socket path in a shared temp dir could otherwise be squatted). Any `Origin` header is
-  refused, so a web page cannot use it. The admin API and the agent WebSocket share that socket.
+* **No network listener, unless you opt into a mesh.** The daemon listens only on a unix socket in a 0700
+  directory (socket 0600). Connections are checked with `SO_PEERCRED`/`LOCAL_PEERCRED` on the server, and
+  clients verify the daemon is their own uid (a socket path in a shared temp dir could otherwise be
+  squatted). Any `Origin` header is refused, so a web page cannot use it. The admin API and the agent
+  WebSocket share that socket. A daemon that never runs `relay session invite`, `session new --host` or
+  `--join` never opens any other listener, full stop - see "Multi-machine mesh" below for exactly what
+  changes once you do.
 * **Private files.** `~/.relay` is 0700; database, logs and raw terminal logs are 0600. Per-launch
   directories are created and verified (owned by you, not a symlink, mode 0700) before use.
 * **Agents act only as themselves.** Identity comes from the connection, not from message fields. A
@@ -39,6 +42,38 @@ It does not defend against another process running as *your own user* (which cou
   a guarantee.
 * **Zero footprint.** Relay never writes tool config or project files (see README); `relay doctor` scans
   for stray Relay registrations, and an automated test hashes the config dirs around a full session.
+
+## Multi-machine mesh
+
+Joining a session across machines (`internal/federation`, `internal/meshnet`) relaxes some of the boundaries
+above; each change is deliberate and scoped to exactly the machines and sessions actually opted in.
+
+* **Opt-in, per-session network exposure.** The first time this daemon runs `relay session invite`, `session
+  new --host` or `--join`, it opens a listener reachable from the internet (via WireGuard, using
+  `github.com/tailscale/tailcat` - no Tailscale account, no control plane). Nothing else ever triggers this;
+  a daemon used only locally is exactly as closed as described above.
+* **`--join=<blob>` is a bearer credential.** It embeds a session's peer address and its join secret - anyone
+  who has it can join that session as a full participant. Treat it exactly like you would a session-invite
+  link or a password: don't paste it into a public channel, and mint a fresh one (`relay session invite`)
+  rather than reusing an old one if you're unsure who has seen it.
+* **Peer identity is TOFU-pinned, not certificate-verified.** The first cryptographic identity seen for a
+  peer in a session is recorded and never silently replaced; a machine that regenerates its identity key (or
+  a genuine impersonation attempt) shows up as a distinct, visible new peer in `relay session peers` rather
+  than being trusted as "the same machine." There is no out-of-band verification of who holds a given
+  identity beyond that pinning - the join secret is what actually authorizes membership.
+* **The join secret is stored in the clear locally** (unlike a resume token, which is only ever hashed): a
+  peer needs to re-embed it in fresh invites it mints later, which a hash can't give back. It is protected by
+  the same filesystem permissions as the rest of `~/.relay`, not by cryptography at rest.
+* **DERP fallback is a real third-party dependency.** When two machines can't reach each other directly (most
+  NATs), tailcat falls back to a public relay server it does not operate (`tailcat.dev` by default). That
+  service only ever sees encrypted WireGuard traffic - never message content or terminal output - but its
+  uptime is a genuine dependency for that fallback path; if you need to avoid it entirely, point
+  `MeshDERPMapURL` at your own DERP map.
+* **Guards still apply per hop.** Hop limit, rate limits, dedupe and TTLs (see "Bounded blast radius" above)
+  are enforced by the *sending* agent's own daemon before a message ever leaves that machine, regardless of
+  how many machines a reply chain eventually crosses.
+* **A daemon that never joins a mesh is unaffected**, including at rest: no mesh identity file is created,
+  no mesh tables gain rows, until a mesh command is actually used.
 
 ## Things to be aware of
 
