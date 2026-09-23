@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thesahibnanda-max/relay/internal/meshnet"
 	"github.com/thesahibnanda-max/relay/internal/proto"
 	"github.com/thesahibnanda-max/relay/internal/relayhome"
 	"github.com/thesahibnanda-max/relay/internal/store"
@@ -170,5 +172,105 @@ func TestMissingToolsAndUnsupportedPlatform(t *testing.T) {
 	env.Paths.Root = "/mnt/c/Users/x/.relay"
 	if c := find(checkPlatform(env), "storage location"); c.Status != Warn {
 		t.Fatalf("relay data on a Windows drive under WSL is a hazard: %+v", c)
+	}
+}
+
+func TestMeshIdentityNotYetCreatedIsInfo(t *testing.T) {
+	env, _ := testEnv(t)
+	c := find(Run(env), "mesh identity")
+	if c.Status != Info {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestMeshIdentityPresentAndValid(t *testing.T) {
+	env, _ := testEnv(t)
+	id, err := meshnet.LoadOrCreateIdentity(env.Paths.MeshIdentityPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := find(Run(env), "mesh identity")
+	if c.Status != OK || !strings.Contains(c.Detail, shortPeerID(id.PeerID())) {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestMeshIdentityWithOpenPermissionsIsAFailure(t *testing.T) {
+	env, _ := testEnv(t)
+	if _, err := meshnet.LoadOrCreateIdentity(env.Paths.MeshIdentityPath()); err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(env.Paths.MeshIdentityPath(), 0o644)
+	c := find(Run(env), "mesh identity")
+	if c.Status != Fail || c.Fix == "" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestMeshIdentityCorruptFileIsAFailure(t *testing.T) {
+	env, _ := testEnv(t)
+	p := env.Paths.MeshIdentityPath()
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := find(Run(env), "mesh identity")
+	if c.Status != Fail || c.Fix == "" {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestMeshPeersNoSessionsIsInfo(t *testing.T) {
+	env, _ := testEnv(t)
+	s, err := store.Open(env.Paths.DBPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	c := find(Run(env), "mesh peers")
+	if c.Status != Info {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestMeshPeersAllLinkedIsOK(t *testing.T) {
+	env, _ := testEnv(t)
+	ctx := context.Background()
+	s, err := store.Open(env.Paths.DBPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.EnsureMeshSession(ctx, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "secret", "nodekey:self"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertMeshPeer(ctx, store.MeshPeer{SessionID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", PeerID: "nodekey:peer", Addr: "fake:peer", Status: store.MeshPeerLinked}); err != nil {
+		t.Fatal(err)
+	}
+	c := find(Run(env), "mesh peers")
+	if c.Status != OK || !strings.Contains(c.Detail, "1 mesh session") || !strings.Contains(c.Detail, "all linked") {
+		t.Fatalf("%+v", c)
+	}
+}
+
+func TestMeshPeersUnreachableIsAWarning(t *testing.T) {
+	env, _ := testEnv(t)
+	ctx := context.Background()
+	s, err := store.Open(env.Paths.DBPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.EnsureMeshSession(ctx, "01ARZ3NDEKTSV4RRFFQ69G5FAV", "secret", "nodekey:self"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertMeshPeer(ctx, store.MeshPeer{SessionID: "01ARZ3NDEKTSV4RRFFQ69G5FAV", PeerID: "nodekey:peer", Addr: "fake:peer", Status: store.MeshPeerUnreachable}); err != nil {
+		t.Fatal(err)
+	}
+	c := find(Run(env), "mesh peers")
+	if c.Status != Warn || !strings.Contains(c.Detail, "1 unreachable") || c.Fix == "" {
+		t.Fatalf("%+v", c)
 	}
 }

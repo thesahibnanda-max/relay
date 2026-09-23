@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/thesahibnanda-max/relay/internal/adaptor"
+	"github.com/thesahibnanda-max/relay/internal/meshnet"
 	"github.com/thesahibnanda-max/relay/internal/proto"
 	"github.com/thesahibnanda-max/relay/internal/relayhome"
 	"github.com/thesahibnanda-max/relay/internal/store"
@@ -81,6 +82,7 @@ func Run(env Env) []Check {
 	out = append(out, checkHome(env)...)
 	out = append(out, checkDaemon(env))
 	out = append(out, checkStore(env)...)
+	out = append(out, checkMesh(env)...)
 	out = append(out, checkLeftovers(env))
 	out = append(out, checkTools(env)...)
 	out = append(out, checkFootprint(env)...)
@@ -248,6 +250,71 @@ func checkStore(env Env) []Check {
 		c.Status, c.Fix = Warn, "relay gc --older-than=30d --compress"
 	}
 	return append(out, c)
+}
+
+// ---- multi-machine mesh --------------------------------------------------------
+
+// checkMesh reports on this daemon's participation in any multi-machine
+// mesh (see MEMORY.md section 15) - the persisted tailcat identity a peer
+// dials to reach this machine, and what the database on disk knows about
+// mesh sessions and peers. A daemon that has never used a mesh feature has
+// neither, and this reports that as Info, not a problem: mesh capability is
+// completely inert until a human runs `relay session invite` or `--join`.
+func checkMesh(env Env) []Check {
+	var out []Check
+	out = append(out, checkMeshIdentity(env))
+	if c, ok := checkMeshPeers(env); ok {
+		out = append(out, c)
+	}
+	return out
+}
+
+func checkMeshIdentity(env Env) Check {
+	p := env.Paths.MeshIdentityPath()
+	if _, err := os.Stat(p); err != nil {
+		return Check{Name: "mesh identity", Status: Info, Detail: "not created yet (created on first `relay session invite` or --join)"}
+	}
+	if m, err := mode(p); err == nil && m&0o077 != 0 {
+		return Check{Name: "mesh identity", Status: Fail, Detail: fmt.Sprintf("%s is %#o: other users could read the key that proves this machine's identity to peers", p, m),
+			Fix: "chmod 600 " + p}
+	}
+	id, err := meshnet.LoadOrCreateIdentity(p)
+	if err != nil {
+		return Check{Name: "mesh identity", Status: Fail, Detail: err.Error(),
+			Fix: "delete " + p + " and re-invite/re-join (this machine will be a new peer to anyone it already shared a session with)"}
+	}
+	return Check{Name: "mesh identity", Status: OK, Detail: "present and valid (" + shortPeerID(id.PeerID()) + ")"}
+}
+
+func shortPeerID(id string) string {
+	s := strings.TrimPrefix(id, "nodekey:")
+	if len(s) > 8 {
+		s = s[:8]
+	}
+	return s
+}
+
+// checkMeshPeers reports what the database on disk knows about mesh
+// sessions and peers; ok is false when there is no database to read yet
+// (checkStore already reports that case).
+func checkMeshPeers(env Env) (Check, bool) {
+	db := env.Paths.DBPath()
+	if _, err := os.Stat(db); err != nil {
+		return Check{}, false
+	}
+	sessions, peers, unreachable, err := store.MeshSummary(db)
+	if err != nil {
+		return Check{Name: "mesh peers", Status: Warn, Detail: "cannot check " + db + ": " + err.Error()}, true
+	}
+	if sessions == 0 {
+		return Check{Name: "mesh peers", Status: Info, Detail: "no mesh sessions (this daemon has never invited or joined one)"}, true
+	}
+	d := fmt.Sprintf("%d mesh session(s), %d known peer(s)", sessions, peers)
+	if unreachable > 0 {
+		return Check{Name: "mesh peers", Status: Warn, Detail: fmt.Sprintf("%s, %d unreachable", d, unreachable),
+			Fix: "start this daemon and give it a few minutes: it retries unreachable peers on its own (see relay session peers <id> for which)"}, true
+	}
+	return Check{Name: "mesh peers", Status: OK, Detail: d + ", all linked"}, true
 }
 
 func checkLeftovers(env Env) Check {
