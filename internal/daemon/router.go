@@ -180,7 +180,6 @@ func (s *Server) peers(ctx context.Context, sessionID, selfID string) ([]proto.P
 	}
 	out := make([]proto.PeerInfo, 0, len(agents))
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	for _, a := range agents {
 		p := proto.PeerInfo{Name: a.Name, Role: a.Role, Tool: a.Tool, Status: a.Status, LastActive: a.LastSeenAt, Self: a.ID == selfID}
 		if _, ok := s.conns[a.ID]; ok {
@@ -195,6 +194,18 @@ func (s *Server) peers(ctx context.Context, sessionID, selfID string) ([]proto.P
 			}
 		}
 		out = append(out, p)
+	}
+	s.mu.Unlock()
+
+	// Agents gossiped in from another daemon (see MEMORY.md section 15) -
+	// relay_list_agents and this session's error listings must see the same
+	// remote agents relay ls does (see issue #18: they used to disagree).
+	mesh, err := s.meshAgents(ctx, sessionID, false)
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range mesh {
+		out = append(out, proto.PeerInfo{Name: a.Name, Role: a.Role, Tool: a.Tool, Status: a.Status, LastActive: a.LastSeenAt, Remote: true, Peer: a.OwnerPeer})
 	}
 	return out, nil
 }
