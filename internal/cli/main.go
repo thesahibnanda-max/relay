@@ -12,30 +12,25 @@ import (
 const usageText = `relay: a transparent layer between you and your AI coding agents.
 
 Run an agent (it looks and behaves exactly like the tool itself):
-  relay <claude|codex> [role] [--session=NEW|<id> | --join=<blob>] [--name=<name>]
+  relay <claude|codex> [role] [--session=NEW|<id>] [--name=<name>]
                        [--resume | --fresh] [--approve-inbound] [--record=raw|events|off]
                        [-- <tool arguments>]
 
   relay claude orchestrator --session=NEW -- --model sonnet   start a new session
   relay codex qa --session=<id> --name=checker                join it as another agent
-  relay codex qa --join=<blob> --name=checker                 join from another machine
   relay claude                                                 just log this one, alone
 
   role     orchestrator, planner, developer, qa, reviewer, or a path to a .md file
+  Everything after -- goes to the tool unchanged.
   --session=<id> --name=<name> auto-resumes a crashed/killed agent of that name if
                        a saved identity exists (nothing to opt into); --resume fails
                        loudly instead of silently registering fresh when none is found,
                        --fresh ignores any saved identity and always registers new
-  Everything after -- goes to the tool unchanged.
 
 Inspect and manage:
   relay ls [--all] [--session=<id>]      sessions and their agents
-  relay session new [--name=<label>] [--host]
-                                         create a session and print its id; --host also
-                                         prints a --join=<blob> for other machines
+  relay session new [--name=<label>]     create a session and print its id
   relay session end <id>                 stop new agents joining a session
-  relay session invite <id>              print a fresh --join=<blob> for an existing session
-  relay session peers <id>               list other machines this session's daemon knows about
   relay daemon [status|stop]             the background service (starts on demand)
   relay send <agent> <text> [--session=<id>] [--priority=low|normal|high|interrupt]
                                          message an agent yourself (text "-" reads stdin)
@@ -81,7 +76,7 @@ func Main(argv []string) int {
 		return runAgent(p, &factory, errw)
 	case KindLs:
 		return runLs(p, out, errw)
-	case KindSessionNew, KindSessionEnd, KindSessionInvite, KindSessionPeers:
+	case KindSessionNew, KindSessionEnd:
 		return runSession(p, out, errw)
 	case KindDaemon, KindDaemonStop, KindDaemonStatus:
 		return runDaemon(p, out, errw)
@@ -100,9 +95,5 @@ func Main(argv []string) int {
 	case KindGC:
 		return runGC(p, out, errw)
 	}
-	// Every Kind parse() can produce must be handled above - reaching here is
-	// a missing case (see the session peers/invite dispatch bug this guards
-	// against), so it must never fail silently again.
-	fmt.Fprintf(errw, "relay: internal error: unhandled command kind %v\n", p.Kind)
 	return 2
 }

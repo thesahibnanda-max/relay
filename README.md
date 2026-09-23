@@ -26,8 +26,8 @@ and never runs `claude mcp add` / `codex mcp add`. Everything is passed for that
 
 Linux, macOS and WSL only (native Windows is not supported: `relay` says so and exits). The code still compiles on every platform so editors and tools stay clean. One static binary, no cgo.
 
-**New to Relay?** Visit the [website](https://relay-sahib-nanda.vercel.app) for a quick overview, or read
-[NOTICE.md](NOTICE.md) for a plain-language explanation of what it does, where it works, and what its limits are.
+**New to Relay?** [NOTICE.md](NOTICE.md) explains everything in plain language: what it does, where it works,
+and what its limits are.
 
 ## Install
 
@@ -67,9 +67,9 @@ Without `--session`, `relay claude` just runs Claude as a private, solo session 
 
 | Command | What it does |
 |---|---|
-| `relay <claude\|codex> [role] [--session=NEW\|<id> \| --join=<blob>] [--name=x [--resume\|--fresh]] [--approve-inbound] [--record=raw\|events\|off] [-- tool args]` | Run a tool as an agent. `--join` connects to a session on another machine (see [Multi-machine](#multi-machine)). Everything after `--` goes to the tool unchanged. |
-| `relay ls [--all] [--session=<id>]` | Sessions and their agents (including ones joined from another machine). |
-| `relay session new [--name=..] [--host]` / `end <id>` / `invite <id>` / `peers <id>` | Create / close a session, or mint (`--host`, `invite`) and inspect (`peers`) a multi-machine join. |
+| `relay <claude\|codex> [role] [--session=NEW\|<id>] [--name=x] [--approve-inbound] [--record=raw\|events\|off] [-- tool args]` | Run a tool as an agent. Everything after `--` goes to the tool unchanged. |
+| `relay ls [--all] [--session=<id>]` | Sessions and their agents. |
+| `relay session new [--name=..]` / `relay session end <id>` | Create / close a session. |
 | `relay send <agent> <text> [--priority=low\|normal\|high\|interrupt] [--session=<id>]` | Message an agent yourself (`-` reads stdin). |
 | `relay messages [--session=..] [--agent=..] [--state=..]` | What agents said to each other, and where each message is. |
 | `relay approve [ls\|accept\|reject] [<id>\|all]` | Decide on messages held for `--approve-inbound` agents. |
@@ -83,34 +83,6 @@ at launch, as part of its system prompt.
 
 **Shim mode.** Symlink `claude` or `codex` to `relay` earlier on your `PATH` and typing `claude` runs
 it under Relay, solo, with all arguments passed straight through.
-
-## Multi-machine
-
-Agents don't have to be on the same computer. Two (or more) Relay daemons connect directly over a private
-WireGuard tunnel (via [tailcat](https://github.com/tailscale/tailcat) - no account, no server to run), so
-agents on different machines can join the very same session and talk to each other exactly like a local one:
-
-```sh
-# machine A: create a session and mint an invite in one step
-relay session new --host
-#   01AB2C3D4E5F6G7H8J9K0MNPQR
-#   from another machine, join with: relay <claude|codex> [role] --join=<blob>
-relay claude orchestrator --session=01AB2C3D4E5F6G7H8J9K0MNPQR --name=lead
-
-# machine B
-relay codex developer --join=<blob> --name=coder
-```
-
-Already have a session running locally and want to invite someone into it? `relay session invite <id>`
-mints a fresh `--join=<blob>` for it at any time; `relay session peers <id>` shows what this daemon knows
-about the other machines in a session. A peer's identity is verified and pinned the first time it's seen,
-and if a direct connection isn't possible it falls back to a public relay that only ever sees encrypted
-traffic - see [docs/SECURITY.md](docs/SECURITY.md) for exactly what that means, and
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it's built.
-
-A crashed or killed `relay <tool>` process picks its identity back up automatically when relaunched with the
-same `--session`/`--name` - no flag needed. Use `--fresh` to register as a new agent on purpose instead, or
-`--resume` to fail loudly rather than silently falling back to a fresh registration.
 
 ## What the agents get
 

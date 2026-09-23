@@ -102,23 +102,10 @@ func RenderSessions(w io.Writer, sessions []proto.SessionInfo, now time.Time) {
 			if a.ApproveInbound {
 				state += " [approve-inbound]"
 			}
-			if a.Remote {
-				state += " [remote: " + shortPeerID(a.Peer) + "]"
-			}
 			fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\n", a.Name, a.Tool, a.Role, state, ago(now, a.JoinedAt))
 		}
 		tw.Flush()
 	}
-}
-
-// shortPeerID renders a mesh peer id ("nodekey:<64 hex chars>") compactly
-// for a table cell; the full id is always available via `relay session peers`.
-func shortPeerID(id string) string {
-	s := strings.TrimPrefix(id, "nodekey:")
-	if len(s) > 8 {
-		s = s[:8]
-	}
-	return s
 }
 
 func ago(now, t time.Time) string {
@@ -169,14 +156,6 @@ func runSession(p Parsed, out, errw io.Writer) int {
 		}
 		fmt.Fprintln(out, s.ID) // stdout is just the id, so it composes: relay claude --session=$(relay session new)
 		fmt.Fprintf(errw, "join with: relay <claude|codex> [role] --session=%s\n", s.ID)
-		if p.Host {
-			blob, err := invite(c, s.ID)
-			if err != nil {
-				fmt.Fprintf(errw, "relay: session created, but could not mint an invite: %v\n", err)
-				return 1
-			}
-			fmt.Fprintf(errw, "from another machine, join with: relay <claude|codex> [role] --join=%s\n", proto.EncodeJoinBlob(blob))
-		}
 	case KindSessionEnd:
 		resp, err := c.Post("http://relay/v1/admin/sessions/"+p.Target+"/end", "application/json", nil)
 		if err != nil {
@@ -189,54 +168,8 @@ func runSession(p Parsed, out, errw io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(out, "session %s ended\n", p.Target)
-	case KindSessionInvite:
-		blob, err := invite(c, p.Target)
-		if err != nil {
-			fmt.Fprintf(errw, "relay: %v\n", err)
-			return 1
-		}
-		fmt.Fprintln(out, proto.EncodeJoinBlob(blob))
-	case KindSessionPeers:
-		var peers []proto.MeshPeerView
-		if _, err := getJSON(c, "/v1/admin/mesh/peers/"+p.Target, &peers); err != nil {
-			fmt.Fprintf(errw, "relay: %v\n", err)
-			return 1
-		}
-		if len(peers) == 0 {
-			fmt.Fprintln(out, "no peers (this session has not been joined from, or invited to, another machine)")
-			return 0
-		}
-		tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(tw, "PEER\tSTATUS\tLAST SEEN")
-		for _, pr := range peers {
-			fmt.Fprintf(tw, "%s\t%s\t%s\n", pr.PeerID, pr.Status, pr.LastSeen.Format(time.RFC3339))
-		}
-		tw.Flush()
 	}
 	return 0
-}
-
-// invite ensures a daemon is running for sessionID and mints a fresh mesh
-// join blob for it, via the admin API (never called from meshJoin's side of
-// a --join, only from the inviting side: `relay session new --host`,
-// `relay session invite`, and nowhere else).
-func invite(c *http.Client, sessionID string) (proto.JoinBlob, error) {
-	var blob proto.JoinBlob
-	if err := postJSON(c, "/v1/admin/mesh/invite", proto.InviteMeshSessionRequest{SessionID: sessionID}, &blob); err != nil {
-		return proto.JoinBlob{}, err
-	}
-	return blob, nil
-}
-
-// meshJoin teaches paths' local daemon about a remote session named by blob,
-// via the admin API, before the caller registers an agent into it - see
-// connect() in agentcmd.go. The daemon must already be running (connect
-// ensures this itself before calling meshJoin).
-func meshJoin(paths relayhome.Paths, blob proto.JoinBlob) error {
-	if err := postJSON(adminClient(paths), "/v1/admin/mesh/join", blob, nil); err != nil {
-		return fmt.Errorf("joining session %s: %w", blob.Session, err)
-	}
-	return nil
 }
 
 func runDaemon(p Parsed, out, errw io.Writer) int {

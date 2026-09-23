@@ -96,7 +96,7 @@ func Run(ctx context.Context, paths relayhome.Paths, version string, log *slog.L
 	}
 	defer os.Remove(paths.PidPath())
 
-	srv, err := New(Options{Paths: paths, Version: version, Log: log, MeshDebugLog: os.Getenv("RELAY_MESH_DEBUG") != ""})
+	srv, err := New(Options{Paths: paths, Version: version, Log: log})
 	if err != nil {
 		ln.Close()
 		os.Remove(sock)

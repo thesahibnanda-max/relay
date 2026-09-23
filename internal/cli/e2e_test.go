@@ -21,7 +21,6 @@ import (
 
 	"github.com/creack/pty"
 
-	"github.com/thesahibnanda-max/relay/internal/ids"
 	"github.com/thesahibnanda-max/relay/internal/proto"
 	"github.com/thesahibnanda-max/relay/internal/relayhome"
 )
@@ -599,11 +598,11 @@ func TestKilledAgentLeavesOnlyCollectableLeftovers(t *testing.T) {
 }
 
 // TestKilledAgentResumesAutomaticallyOnRelaunch is the real end-to-end proof
-// of M-mesh-6: relaunching the exact same `relay <tool> --session=<id>
-// --name=<x>` after a crash picks the same agent identity back up, using a
-// resume token this CLI process never saw directly - it was saved to
-// ~/.relay/identities by the killed process and read back automatically,
-// with no new flag needed for the common case.
+// of the resume feature: relaunching the exact same `relay <tool>
+// --session=<id> --name=<x>` after a crash picks the same agent identity
+// back up, using a resume token this CLI process never saw directly - it
+// was saved to ~/.relay/identities by the killed process and read back
+// automatically, with no new flag needed for the common case.
 func TestKilledAgentResumesAutomaticallyOnRelaunch(t *testing.T) {
 	w := newWorld(t)
 	alice := w.start("claude", "--session=NEW", "--name=alice")
@@ -648,7 +647,7 @@ func TestFreshIgnoresASavedIdentityAndResumeFailsLoudlyWithoutOne(t *testing.T) 
 
 	// --fresh: a saved identity exists, but must be ignored - the name is
 	// still occupied by the not-yet-reaped old registration, so this fails
-	// exactly like it would have before M-mesh-6 ever existed.
+	// exactly like it would have if resume never existed.
 	_, errOut, code := w.runRelay("claude", "--session="+session, "--name=alice", "--fresh")
 	if code == 0 || !strings.Contains(errOut, "already used") {
 		t.Fatalf("--fresh should collide on the occupied name: code=%d stderr=%q", code, errOut)
@@ -659,64 +658,6 @@ func TestFreshIgnoresASavedIdentityAndResumeFailsLoudlyWithoutOne(t *testing.T) 
 	_, errOut2, code2 := w.runRelay("claude", "--session="+session, "--name=bob", "--resume")
 	if code2 == 0 || !strings.Contains(errOut2, "no saved identity") {
 		t.Fatalf("--resume without a saved identity should fail loudly: code=%d stderr=%q", code2, errOut2)
-	}
-}
-
-// TestJoinFailureIsReportedInsteadOfSilentlyGoingSolo is the regression test
-// for issue #18's Symptom 4's "no clear error" half: runAgent used to decide
-// whether to report a connect() failure loudly by checking only p.Session,
-// never p.Join - so ANY --join failure (not just a self-join) silently fell
-// back to a relay-less solo run with zero output. A malformed/undialable
-// blob is enough to trigger a meshJoin failure without needing a second
-// daemon or real network access.
-func TestJoinFailureIsReportedInsteadOfSilentlyGoingSolo(t *testing.T) {
-	badBlob := proto.EncodeJoinBlob(proto.JoinBlob{Session: ids.New(), PeerAddr: "tcNOTAREALADDRESS", Secret: "s3cr3t"})
-	w := newWorld(t)
-	_, errOut, code := w.runRelay("claude", "--join="+badBlob, "--name=x")
-	if code == 0 {
-		t.Fatalf("a --join failure must not exit 0 (silently going solo): stderr=%q", errOut)
-	}
-	if errOut == "" {
-		t.Fatal("a --join failure must print a clear error, got nothing")
-	}
-}
-
-// TestSessionPeersActuallyRuns is the regression test for what turned out to
-// be a completely different bug than issue #18's Symptom 2 looked like: the
-// daemon's mesh state was always correct (confirmed live by querying its
-// admin socket directly), but Main()'s dispatch switch never routed
-// KindSessionPeers to runSession at all, so `relay session peers <id>`
-// silently exited 2 with zero output regardless of what the daemon knew -
-// parse_test.go only ever exercised parse(), never Main()'s actual dispatch.
-func TestSessionPeersActuallyRuns(t *testing.T) {
-	w := newWorld(t)
-	alice := w.start("claude", "--session=NEW", "--name=alice")
-	session, _ := alice.identity()
-
-	out, errOut, code := w.runRelay("session", "peers", session)
-	if code != 0 {
-		t.Fatalf("session peers: code=%d stderr=%q", code, errOut)
-	}
-	if !strings.Contains(out, "no peers") {
-		t.Fatalf("a never-mesh-joined session should say so, got stdout=%q", out)
-	}
-}
-
-// TestSessionInviteActuallyRuns is `relay session invite`'s half of the same
-// dispatch bug as TestSessionPeersActuallyRuns - KindSessionInvite was never
-// routed to runSession either, so this has silently done nothing since it
-// was introduced.
-func TestSessionInviteActuallyRuns(t *testing.T) {
-	w := newWorld(t)
-	alice := w.start("claude", "--session=NEW", "--name=alice")
-	session, _ := alice.identity()
-
-	out, errOut, code := w.runRelay("session", "invite", session)
-	if code != 0 {
-		t.Fatalf("session invite: code=%d stderr=%q", code, errOut)
-	}
-	if !strings.Contains(out, proto.JoinBlobPrefix) {
-		t.Fatalf("invite should print a --join blob, got stdout=%q", out)
 	}
 }
 

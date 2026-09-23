@@ -19,8 +19,6 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/thesahibnanda-max/relay/internal/federation"
-	"github.com/thesahibnanda-max/relay/internal/meshnet"
 	"github.com/thesahibnanda-max/relay/internal/naming"
 	"github.com/thesahibnanda-max/relay/internal/peercred"
 	"github.com/thesahibnanda-max/relay/internal/proto"
@@ -53,21 +51,6 @@ type Options struct {
 	DisconnectGrace     time.Duration // an agent gone this long is treated as exited (default 15 min)
 	PairLimit           int           // messages per sender->target pair per minute (default 20)
 	SenderLimit         int           // messages per sender per minute (default 60)
-
-	// MeshTransport, if set, backs this daemon's multi-machine mesh (see
-	// internal/federation). Nil means meshnet.RealTransport{DERPMapURL:
-	// MeshDERPMapURL} - the production default. Tests override this with an
-	// in-memory meshnet.FakeTransport so they never touch real tailcat/DERP.
-	// Either way it stays completely unused, and this daemon opens no mesh
-	// listener and creates no identity file, unless a mesh command is
-	// actually invoked - see (*Server).hub.
-	MeshTransport  meshnet.Transport
-	MeshDERPMapURL string // "" = tailcat's own default; see docs/SECURITY.md
-
-	// MeshDebugLog, when true, wires tailcat's own internal diagnostic logging
-	// (NAT/DERP negotiation, handshake state) into Log at Info level - off by
-	// default since it's verbose. See RELAY_MESH_DEBUG and docs/SECURITY.md.
-	MeshDebugLog bool
 }
 
 type Server struct {
@@ -86,9 +69,6 @@ type Server struct {
 	pairs, senders, rpcs slidingWindow
 	compress             bgCompress
 	stop                 context.CancelFunc
-
-	meshMu sync.Mutex
-	mesh   *federation.Hub // nil until the first mesh admin call; see hub()
 }
 
 type agentConn struct {
@@ -168,7 +148,6 @@ func New(opt Options) (*Server, error) {
 	s.stop = stop
 	s.wg.Add(1)
 	go func() { defer s.wg.Done(); s.expireLoop(bg) }()
-	s.resumeMeshOnStartup(bg)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/agent", s.handleAgent)
@@ -178,9 +157,6 @@ func New(opt Options) (*Server, error) {
 	mux.HandleFunc("GET /v1/admin/sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("POST /v1/admin/sessions/{id}/end", s.handleEndSession)
 	mux.HandleFunc("POST /v1/admin/gc", s.handleGC)
-	mux.HandleFunc("POST /v1/admin/mesh/invite", s.handleMeshInvite)
-	mux.HandleFunc("POST /v1/admin/mesh/join", s.handleMeshJoin)
-	mux.HandleFunc("GET /v1/admin/mesh/peers/{id}", s.handleMeshPeers)
 	s.routeAdminMessages(mux)
 	s.http = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
@@ -202,11 +178,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.closing = true
 	s.mu.Unlock()
 	s.stop()
-	s.meshMu.Lock()
-	if s.mesh != nil {
-		s.mesh.Close()
-	}
-	s.meshMu.Unlock()
 	err := s.http.Shutdown(ctx)
 	s.mu.Lock()
 	for _, c := range s.conns {
@@ -335,7 +306,6 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 	me := s.newConn(agent.ID, agent.Name, agent.Role, hello, sess.ID, ws)
 	s.conns[agent.ID] = me
 	s.mu.Unlock()
-	s.gossipRoster(sess.ID)
 
 	exited := false
 	defer func() {
@@ -348,7 +318,6 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 		if current && !exited {
 			_ = s.st.SetAgentStatus(context.Background(), agent.ID, "disconnected", nil)
 			log.Info("agent disconnected")
-			s.gossipRoster(sess.ID)
 		}
 		ws.CloseNow()
 	}()
@@ -469,7 +438,6 @@ func (s *Server) handleAgent(w http.ResponseWriter, r *http.Request) {
 				_ = s.st.EndSession(context.Background(), sess.ID)
 			}
 			log.Info("agent exited", "code", bye.ExitCode)
-			s.gossipRoster(sess.ID)
 			ws.Close(websocket.StatusNormalClosure, "bye")
 			return
 		default:
@@ -603,24 +571,6 @@ func (s *Server) connected(agentID string) bool {
 	return ok
 }
 
-// meshAgents returns this session's gossiped mesh agents, skipping exited
-// ones unless withExited - shared by sessionInfo (relay ls) and peers
-// (relay_list_agents and message-routing error listings) so they can't
-// disagree about which remote agents are visible (see issue #18).
-func (s *Server) meshAgents(ctx context.Context, sessionID string, withExited bool) ([]store.MeshAgent, error) {
-	mesh, err := s.st.ListMeshAgents(ctx, sessionID)
-	if err != nil || withExited {
-		return mesh, err
-	}
-	out := make([]store.MeshAgent, 0, len(mesh))
-	for _, a := range mesh {
-		if a.Status != "exited" {
-			out = append(out, a)
-		}
-	}
-	return out, nil
-}
-
 func (s *Server) sessionInfo(ctx context.Context, sess store.Session, withExited bool) (proto.SessionInfo, error) {
 	agents, err := s.st.ListAgents(ctx, sess.ID, withExited)
 	if err != nil {
@@ -631,22 +581,6 @@ func (s *Server) sessionInfo(ctx context.Context, sess store.Session, withExited
 		info.Agents = append(info.Agents, proto.AgentInfo{
 			ID: a.ID, Name: a.Name, Tool: a.Tool, Role: a.Role, Status: a.Status, Connected: s.connected(a.ID),
 			ApproveInbound: a.ApproveInbound, PID: a.PID, Cwd: a.Cwd, JoinedAt: a.CreatedAt, LastSeen: a.LastSeenAt, ExitCode: a.ExitCode,
-		})
-	}
-	// Agents gossiped in from another daemon (see MEMORY.md section 15).
-	// This is a plain read of what's already in this daemon's own store -
-	// it must never construct a Hub or touch the network just because
-	// someone ran `relay ls`; mesh_agents is empty for any session that has
-	// never used mesh features, so this is a cheap no-op for almost everyone.
-	mesh, err := s.meshAgents(ctx, sess.ID, withExited)
-	if err != nil {
-		return proto.SessionInfo{}, err
-	}
-	for _, a := range mesh {
-		info.Agents = append(info.Agents, proto.AgentInfo{
-			ID: a.AgentID, Name: a.Name, Tool: a.Tool, Role: a.Role, Status: a.Status,
-			Connected: a.Status == "connected", JoinedAt: a.LastSeenAt, LastSeen: a.LastSeenAt,
-			Remote: true, Peer: a.OwnerPeer,
 		})
 	}
 	return info, nil

@@ -209,10 +209,6 @@ type AgentInfo struct {
 	JoinedAt       time.Time `json:"joined_at"`
 	LastSeen       time.Time `json:"last_seen"`
 	ExitCode       *int      `json:"exit_code,omitempty"`
-	// Remote/Peer describe an agent gossiped in from another daemon (see
-	// MEMORY.md section 15's mesh work); both are zero for a local agent.
-	Remote bool   `json:"remote,omitempty"`
-	Peer   string `json:"peer,omitempty"` // owning daemon's PeerID
 }
 
 type SessionInfo struct {

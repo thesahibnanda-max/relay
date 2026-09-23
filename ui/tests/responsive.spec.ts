@@ -17,7 +17,7 @@ for (const width of WIDTHS) {
       expect(m.doc).toBeLessThanOrEqual(m.inner);
       expect(m.body).toBeLessThanOrEqual(m.inner);
       // Every important block sits inside the viewport.
-      for (const sel of ['.hero-copy', '.cmd', '.term', '.mesh-demo', '.mesh-grid', '.shot-frame', '.legend', '.tabs', '.site-footer .foot']) {
+      for (const sel of ['.hero-copy', '.cmd', '.term', '.shot-frame', '.legend', '.tabs', '.site-footer .foot']) {
         for (const box of await page.locator(sel).evaluateAll((els) => els.map((e) => { const r = e.getBoundingClientRect(); return { l: r.left, r: r.right }; }))) {
           expect(box.l, sel).toBeGreaterThanOrEqual(-0.5);
           expect(box.r, sel).toBeLessThanOrEqual(width + 0.5);
