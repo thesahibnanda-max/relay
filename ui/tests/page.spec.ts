@@ -17,7 +17,7 @@ test('has the expected structure', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveTitle(/Relay/);
   await expect(page.locator('h1')).toHaveCount(1);
-  for (const id of ['problem', 'solution', 'demo', 'install']) {
+  for (const id of ['problem', 'solution', 'mesh', 'demo', 'install']) {
     await expect(page.locator(`section#${id}`)).toHaveCount(1);
   }
   await expect(page.locator('html')).toHaveAttribute('lang', 'en');
@@ -192,5 +192,36 @@ test.describe('demo screenshot', () => {
   test('there is no video left on the page', async ({ page }) => {
     await page.goto('/');
     await expect(page.locator('video')).toHaveCount(0);
+  });
+});
+
+test.describe('mesh section', () => {
+  test('has a nav link, a heading, the two-machine example and no video', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('#site-nav a[href="#mesh"]')).toHaveCount(1);
+    const section = page.locator('section#mesh');
+    await expect(section.locator('h2')).toHaveCount(1);
+    await expect(section).toContainText('relay session new --host');
+    await expect(section).toContainText('--join=');
+    await expect(section.locator('video')).toHaveCount(0);
+  });
+
+  test('the illustrative diagram is accessible: labelled figure, hidden decoration, visible caption', async ({ page }) => {
+    await page.goto('/');
+    const figure = page.locator('#mesh .mesh-demo');
+    await expect(figure).toHaveAttribute('role', 'img');
+    const label = await figure.getAttribute('aria-label');
+    expect(label!.length).toBeGreaterThan(20);
+    const windows = figure.locator('.macwin');
+    await expect(windows).toHaveCount(2);
+    for (const el of await windows.all()) await expect(el).toHaveAttribute('aria-hidden', 'true');
+    await expect(figure.locator('.caption')).toBeVisible();
+  });
+
+  test('links to the security doc for the network disclosure', async ({ page }) => {
+    await page.goto('/');
+    const link = page.locator('#mesh a[href*="docs/SECURITY.md"]');
+    await expect(link).toHaveCount(1);
+    await expect(link).toHaveAttribute('rel', /noopener/);
   });
 });

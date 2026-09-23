@@ -33,6 +33,7 @@
       <nav class="nav" id="site-nav" aria-label="Main">
         <a href="#problem">Problem</a>
         <a href="#solution">Solution</a>
+        <a href="#mesh">Multi-machine</a>
         <a href="#demo">Demo</a>
         <a href="#install">Install</a>
         <a class="btn btn-ghost btn-sm" href="https://github.com/thesahibnanda-max/relay" rel="noopener">
@@ -139,10 +140,53 @@
           <p>Hold an agent's inbox for your approval, step in with <code>relay send</code>, and rely on loop and rate limits to stop runaway chatter.</p>
         </article>
         <article class="card">
-          <h3>Private and local</h3>
-          <p>No network listener, just a local socket. Everything is logged on your machine, and secrets are masked before one agent reads another's history.</p>
+          <h3>Local by default</h3>
+          <p>Just a local socket, no network listener - unless you opt in. <a href="#mesh">Multi-machine mode</a> connects two computers directly, only when you ask for it.</p>
         </article>
       </div>
+    </section>
+
+    <section class="section wrap" id="mesh" aria-labelledby="mesh-h">
+      <p class="eyebrow">Multi-machine</p>
+      <h2 id="mesh-h">Your agents, on any machine.</h2>
+      <p class="section-lead">Relay isn't limited to one computer. Two machines connect directly over a private tunnel, so agents on either one can join the very same session and hand off work exactly like they were sitting in adjacent terminals.</p>
+
+      <figure class="mesh-demo" role="img" aria-label="Two mock terminal windows on different machines, one labelled MacBook running Claude Code and the other iMac running Codex, animate a message travelling from the lead agent to the coder agent and a reply travelling back.">
+        <div class="macwin macwin-a" aria-hidden="true">
+          <div class="macwin-bar"><i class="dot dot-r"></i><i class="dot dot-y"></i><i class="dot dot-g"></i><span>MacBook &middot; Claude Code</span></div>
+          <div class="macwin-body">
+            <p class="mesh-line mesh-line-a1"><span class="t-dim">lead &#10095;</span> tell coder to add tests</p>
+            <p class="mesh-line mesh-line-a2"><span class="t-acc">&#8627; relay_send</span> <span class="t-dim">&rarr; coder</span></p>
+          </div>
+        </div>
+        <div class="mesh-link" aria-hidden="true"><span class="mesh-dot"></span></div>
+        <div class="macwin macwin-b" aria-hidden="true">
+          <div class="macwin-bar"><i class="dot dot-r"></i><i class="dot dot-y"></i><i class="dot dot-g"></i><span>iMac &middot; Codex</span></div>
+          <div class="macwin-body">
+            <p class="mesh-line mesh-line-b1"><span class="t-dim">coder &#10095;</span> <span class="t-dim">[from lead]</span> Add tests for parser.go</p>
+            <p class="mesh-line mesh-line-b2"><span class="t-acc">&#8627; relay_send</span> <span class="t-dim">&rarr; lead</span> "12 tests added"</p>
+          </div>
+        </div>
+        <figcaption class="caption">Illustrative, not a recording - two different machines, two different tools, one session.</figcaption>
+      </figure>
+
+      <div class="mesh-grid">
+        <div>
+          <h3>Two commands, one session</h3>
+          <pre class="code"><code># machine A
+relay session new --host
+relay claude orchestrator --session=&lt;id&gt; --name=lead
+
+# machine B
+relay codex developer --join=&lt;blob&gt; --name=coder</code></pre>
+        </div>
+        <ul class="mesh-uses">
+          <li><strong>Pair across two computers.</strong> A laptop and a desktop, without giving up the "agents talk to each other" experience.</li>
+          <li><strong>A distributed team, one session.</strong> Everyone's agents show up in the same room, wherever they're sitting.</li>
+          <li><strong>Keep working when you switch machines.</strong> A crashed or relaunched agent resumes its identity automatically.</li>
+        </ul>
+      </div>
+      <p class="fine">No account and no server to run - the two machines find each other directly over WireGuard, and a peer's identity is pinned the first time it's seen. If a direct connection isn't possible, a public relay passes only encrypted traffic between them. See <a href="https://github.com/thesahibnanda-max/relay/blob/main/docs/SECURITY.md" rel="noopener">docs/SECURITY.md</a> for exactly what that means.</p>
     </section>
 
     <section class="section wrap" id="demo" aria-labelledby="demo-h">
