@@ -15,7 +15,7 @@ Be aware of the difference between "built and tested" and "should work".
 |---|---|
 | **WSL** | The main test environment. Every feature has been run here, including live with real Claude Code and real Codex. |
 | **Linux (regular)** | Very likely fine, because WSL is Linux. Not yet run on a non-WSL Linux machine. |
-| **macOS** | The automated tests run the full suite on macOS for every change and pass routinely, but **nobody has run `relay` by hand on a real Mac yet**. It should work; treat the first real run as a test. |
+| **macOS** | It compiles and passes the code checks for macOS, but **it has never been run on a Mac**. It should work; treat the first run as a test. The macOS-specific part (checking who is on the other end of a connection) is untried. The automated CI is set up to test on macOS but has not run yet, because the project is not on GitHub. |
 | **Windows (native)** | Not supported. `relay` prints "use WSL" and exits. (The code still compiles for Windows so editors and tools do not show errors.) |
 
 Two more caveats:
@@ -173,12 +173,9 @@ even if you uninstall Relay.
 
 | Command | What it does |
 |---|---|
-| `relay claude ...` / `relay codex ...` | Run an assistant (see above). Add `--join=<blob>` instead of `--session` to join a session hosted on another machine. |
-| `relay ls` | Show sessions and who is in them, including assistants joined from another machine. |
-| `relay session new [--host]` | Create a session. Add `--host` to also print an invite for another machine. |
-| `relay session end <id>` | Close a session. |
-| `relay session invite <id>` | Print a fresh invite for an existing session, for someone on another machine to join with `--join`. |
-| `relay session peers <id>` | Show what this machine knows about the other machines in a session. |
+| `relay claude ...` / `relay codex ...` | Run an assistant (see above). |
+| `relay ls` | Show sessions and who is in them. |
+| `relay session new` / `relay session end <id>` | Create or close a session. |
 | `relay send <name> <text>` | Send a message yourself (`-` reads the text from input). |
 | `relay messages` | See the message history, with filters for session, agent and state. |
 | `relay approve` | List, accept or reject held messages. |
@@ -187,28 +184,6 @@ even if you uninstall Relay.
 | `relay daemon status` / `relay daemon stop` | Control the background service (it starts itself when needed). |
 | `relay version` | Show the version. |
 | Shim mode | Symlink `claude` or `codex` to `relay` earlier on your PATH and typing `claude` runs it under Relay, on its own. |
-
----
-
-## Working across machines
-
-Assistants don't have to be in terminals on the same computer. Two machines can connect their Relay
-switchboards directly, over a private tunnel, so their assistants join the very same session:
-
-```
-relay session new --host                                  (machine A: creates a session and prints an invite)
-relay claude orchestrator --session=<id> --name=lead       (machine A: joins it locally)
-relay codex developer --join=<invite> --name=coder         (machine B: joins using the invite)
-```
-
-From there it works exactly like a local session. No account and no server to set up - the two machines find
-each other directly, and Relay remembers each machine it has seen before so a stranger can't quietly take its
-place later. If the two machines can't reach each other directly, a public relay service passes the
-(encrypted) traffic between them instead. See [docs/SECURITY.md](docs/SECURITY.md) for exactly what that
-means for you.
-
-If a `relay claude`/`relay codex` process crashes or is killed, relaunching it with the same session and name
-picks the same assistant back up automatically - it isn't treated as a brand-new one.
 
 ---
 
@@ -228,12 +203,10 @@ picks the same assistant back up automatically - it isn't treated as a brand-new
 
 ## Security in short
 
-By default Relay only listens on a private local channel (no network port, so websites cannot reach it) and
-rejects other users on the machine. That changes only if you deliberately connect to another machine (see
-"Working across machines" above): the invite you get from `--host`/`session invite` acts like a password, so
-treat it the same way - don't paste it somewhere public. Files are private to you. Message text is stripped
-of control characters so nobody can sneak commands into another terminal, and names and roles are limited to
-plain characters. See [docs/SECURITY.md](docs/SECURITY.md).
+Relay only listens on a private local channel (no network port, so websites cannot reach it) and rejects
+other users on the machine. Files are private to you. Message text is stripped of control characters so
+nobody can sneak commands into another terminal, and names and roles are limited to plain characters. See
+[docs/SECURITY.md](docs/SECURITY.md).
 
 ---
 
@@ -255,11 +228,11 @@ plain characters. See [docs/SECURITY.md](docs/SECURITY.md).
 ## What it does not do, and known gaps
 
 * No dashboard or replay screen (planned as a later idea, not built).
+* A crashed assistant cannot be "resumed" by restarting it. A restarted one is a fresh assistant.
 * Recordings are not encrypted, and secret-hiding is pattern-based, so it can miss unusual secrets.
 * Disk-full situations are not tested.
 * Search inside a teammate's conversation is a simple text match, not a smart full-text search.
-* Working across machines has been tested thoroughly in automated tests (including real restarts), but not
-  yet by hand between two genuinely separate computers - treat a first real cross-machine run as a test.
+* The project is **not in git yet**, so there is no history or backup of the work.
 * If your Claude runs in "bypass permissions" mode, a teammate's message could lead to commands running with
   no confirmation. Keep that in mind for sessions that matter, and consider running Claude with normal
   permission prompts for them.

@@ -180,6 +180,7 @@ func (s *Server) peers(ctx context.Context, sessionID, selfID string) ([]proto.P
 	}
 	out := make([]proto.PeerInfo, 0, len(agents))
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, a := range agents {
 		p := proto.PeerInfo{Name: a.Name, Role: a.Role, Tool: a.Tool, Status: a.Status, LastActive: a.LastSeenAt, Self: a.ID == selfID}
 		if _, ok := s.conns[a.ID]; ok {
@@ -195,18 +196,6 @@ func (s *Server) peers(ctx context.Context, sessionID, selfID string) ([]proto.P
 		}
 		out = append(out, p)
 	}
-	s.mu.Unlock()
-
-	// Agents gossiped in from another daemon (see MEMORY.md section 15) -
-	// relay_list_agents and this session's error listings must see the same
-	// remote agents relay ls does (see issue #18: they used to disagree).
-	mesh, err := s.meshAgents(ctx, sessionID, false)
-	if err != nil {
-		return nil, err
-	}
-	for _, a := range mesh {
-		out = append(out, proto.PeerInfo{Name: a.Name, Role: a.Role, Tool: a.Tool, Status: a.Status, LastActive: a.LastSeenAt, Remote: true, Peer: a.OwnerPeer})
-	}
 	return out, nil
 }
 
@@ -218,33 +207,8 @@ func (s *Server) listPeers(ctx context.Context, me *agentConn) (any, *proto.Erro
 	return proto.ListAgentsResult{Session: me.sessionID, Agents: ps}, nil
 }
 
-// sendTarget is one recipient of routeSend: either a real local agent (the
-// single-machine path, unchanged since before the mesh) or one gossiped in
-// from another daemon's mesh_agents. A remote target's hold policy (hop
-// limit, approve-inbound) is decided by its OWNING daemon once the handoff
-// reaches it - never guessed at here - so this carries only what routeSend
-// needs to create a mirror row and hand it off.
-type sendTarget struct {
-	id, name       string
-	ownerPeer      string // "" for a local agent
-	approveInbound bool
-	exited         bool
-}
-
-func (t sendTarget) remote() bool { return t.ownerPeer != "" }
-
-func localTarget(a store.Agent) sendTarget {
-	return sendTarget{id: a.ID, name: a.Name, approveInbound: a.ApproveInbound, exited: a.Status == "exited"}
-}
-
-// resolveTargets turns a "to" string into recipients. "all"/"role:" stay
-// local-only for now: fanning a broadcast out across an arbitrary number of
-// mesh peers is more naturally M-mesh-5's fan-out concern than this
-// milestone's "make an already-known remote name addressable" scope. An
-// exact name is checked against local agents first, then - only if nothing
-// local matches - against this session's gossiped mesh_agents, which is
-// what makes a remote agent addressable by name at all (see M-mesh-4).
-func (s *Server) resolveTargets(ctx context.Context, sessionID string, from sender, to string) ([]sendTarget, *proto.Error) {
+// resolveTargets turns a "to" string into recipient agents.
+func (s *Server) resolveTargets(ctx context.Context, sessionID string, from sender, to string) ([]store.Agent, *proto.Error) {
 	all, err := s.st.ListAgents(ctx, sessionID, true)
 	if err != nil {
 		return nil, rpcErr(proto.CodeInternal, "internal error")
@@ -261,7 +225,7 @@ func (s *Server) resolveTargets(ctx context.Context, sessionID string, from send
 		return e
 	}
 	to = strings.TrimSpace(to)
-	var out []sendTarget
+	var out []store.Agent
 	switch {
 	case strings.EqualFold(to, "all"):
 		if !from.canBroadcast && !from.human {
@@ -269,7 +233,7 @@ func (s *Server) resolveTargets(ctx context.Context, sessionID string, from send
 		}
 		for _, a := range agents {
 			if a.ID != from.id {
-				out = append(out, localTarget(a))
+				out = append(out, a)
 			}
 		}
 		if len(out) == 0 {
@@ -280,7 +244,7 @@ func (s *Server) resolveTargets(ctx context.Context, sessionID string, from send
 		role := strings.ToLower(strings.TrimSpace(to[len("role:"):]))
 		for _, a := range agents {
 			if a.ID != from.id && strings.EqualFold(a.Role, role) {
-				out = append(out, localTarget(a))
+				out = append(out, a)
 			}
 		}
 		switch len(out) {
@@ -298,35 +262,13 @@ func (s *Server) resolveTargets(ctx context.Context, sessionID string, from send
 			if a.ID == from.id {
 				return nil, rpcErr(proto.CodeSelfSend, "you cannot send a message to yourself")
 			}
-			return []sendTarget{localTarget(a)}, nil
+			return []store.Agent{a}, nil
 		}
 	}
 	if strings.EqualFold(to, "user") {
 		return nil, rpcErr(proto.CodeUnknownAgent, "the user is not an addressable agent: put what they need to know in your normal reply to them")
 	}
-	if remote, err := s.st.FindMeshAgentByName(ctx, sessionID, to); err == nil {
-		return []sendTarget{{id: remote.AgentID, name: remote.Name, ownerPeer: remote.OwnerPeer}}, nil
-	}
 	return nil, listing(proto.CodeUnknownAgent, "no agent named %q in this session", to)
-}
-
-// markParentDone marks a reply's parent message answered, on whichever
-// daemon happens to hold it (a local authoritative row if the parent
-// originated here, or the authoritative row for an inbound handoff this
-// daemon owns) - and, if that parent's sender lives on another daemon,
-// pushes it a receipt so its mirror row learns "answered" without waiting
-// for the next Resync.
-func (s *Server) markParentDone(ctx context.Context, parent *store.Message, replyID string) {
-	if parent == nil {
-		return
-	}
-	upd, changed, err := s.st.Advance(ctx, parent.ID, store.MsgDone, "answered by "+replyID)
-	if err != nil || !changed {
-		return
-	}
-	if upd.FromPeer != "" {
-		s.spawn(func() { s.pushMeshReceipt(upd) })
-	}
 }
 
 // routeSend validates and stores a message (one per recipient) and pushes it.
@@ -383,8 +325,8 @@ func (s *Server) routeSend(ctx context.Context, sessionID string, from sender, a
 		return nil, terr
 	}
 	for _, t := range targets {
-		if t.exited {
-			return nil, rpcErr(proto.CodeTargetGone, "agent %q has exited and can no longer receive messages", t.name)
+		if t.Status == "exited" {
+			return nil, rpcErr(proto.CodeTargetGone, "agent %q has exited and can no longer receive messages", t.Name)
 		}
 	}
 
@@ -401,59 +343,32 @@ func (s *Server) routeSend(ctx context.Context, sessionID string, from sender, a
 	now := time.Now()
 	res := &proto.SendResult{Kind: kind, Priority: proto.PriorityName(prio)}
 	for _, t := range targets {
-		if dup, found, err := s.st.FindDuplicate(ctx, from.id, t.id, kind, a.Body, now.Add(-dupWindow)); err == nil && found {
+		if dup, found, err := s.st.FindDuplicate(ctx, from.id, t.ID, kind, a.Body, now.Add(-dupWindow)); err == nil && found {
 			res.IDs = append(res.IDs, dup.ID)
-			res.To = append(res.To, t.name)
+			res.To = append(res.To, t.Name)
 			res.State = dup.State
-			notes = append(notes, fmt.Sprintf("identical message to %s already sent %ds ago (%s); not sent again", t.name, int(now.Sub(dup.CreatedAt).Seconds()), dup.ID))
+			notes = append(notes, fmt.Sprintf("identical message to %s already sent %ds ago (%s); not sent again", t.Name, int(now.Sub(dup.CreatedAt).Seconds()), dup.ID))
 			continue
 		}
 
 		if !from.human && from.id != "" {
-			if ok, wait := s.pairs.allow(from.id+">"+t.id, s.opt.PairLimit, limitWindow, now); !ok {
-				return nil, rpcErr(proto.CodeRateLimited, "too many messages from you to %s (limit %d/min); wait %ds or combine them", t.name, s.opt.PairLimit, int(wait.Seconds())+1)
+			if ok, wait := s.pairs.allow(from.id+">"+t.ID, s.opt.PairLimit, limitWindow, now); !ok {
+				return nil, rpcErr(proto.CodeRateLimited, "too many messages from you to %s (limit %d/min); wait %ds or combine them", t.Name, s.opt.PairLimit, int(wait.Seconds())+1)
 			}
 			if ok, wait := s.senders.allow(from.id, s.opt.SenderLimit, limitWindow, now); !ok {
 				return nil, rpcErr(proto.CodeRateLimited, "you are sending too many messages (limit %d/min); wait %ds", s.opt.SenderLimit, int(wait.Seconds())+1)
 			}
 		}
-
-		if t.remote() {
-			// The recipient's owning daemon decides the actual hold policy
-			// (hop limit, its own approve-inbound flag) when the handoff
-			// reaches it - this mirror row's state is provisional until its
-			// first receipt corrects it, which usually arrives within the
-			// same RPC's round trip to that daemon, just not this one.
-			m, err := s.st.CreateMessage(ctx, store.Message{
-				SessionID: sess.ID, FromAgent: from.id, FromName: from.name, FromRole: from.role,
-				ToAgent: t.id, ToName: t.name, ToPeer: t.ownerPeer, Kind: kind, Priority: prio, Thread: thread,
-				ReplyTo: a.ReplyTo, Body: a.Body, Hops: hops, State: store.MsgQueued,
-				Origin: store.OriginMirror, ExpiresAt: now.Add(s.opt.MessageTTL),
-			})
-			if err != nil {
-				s.log.Error("create mirror message", "err", err)
-				return nil, rpcErr(proto.CodeInternal, "internal error")
-			}
-			res.IDs = append(res.IDs, m.ID)
-			res.To = append(res.To, t.name)
-			res.State = m.State
-			notes = append(notes, fmt.Sprintf("%s is on another machine: delivery is confirmed once it reaches them", t.name))
-			s.log.Info("message handed off to mesh peer", "id", m.ID, "from", from.name, "to", t.name, "peer", t.ownerPeer)
-			s.markParentDone(ctx, parent, m.ID)
-			s.spawn(func() { s.sendMeshHandoff(m) })
-			continue
-		}
-
 		state, detail := store.MsgQueued, ""
 		switch {
 		case hops >= MaxHops && hops%MaxHops == 0:
 			state, detail = store.MsgHeld, fmt.Sprintf("hop limit: this reply chain is %d messages deep; a human must approve it to continue", hops)
-		case t.approveInbound && !from.human:
+		case t.ApproveInbound && !from.human:
 			state, detail = store.MsgHeld, "awaiting human approval (target runs with --approve-inbound)"
 		}
 		m, err := s.st.CreateMessage(ctx, store.Message{
 			SessionID: sess.ID, FromAgent: from.id, FromName: from.name, FromRole: from.role,
-			ToAgent: t.id, ToName: t.name, Kind: kind, Priority: prio, Thread: thread, ReplyTo: a.ReplyTo,
+			ToAgent: t.ID, ToName: t.Name, Kind: kind, Priority: prio, Thread: thread, ReplyTo: a.ReplyTo,
 			Body: a.Body, Hops: hops, State: state, Detail: detail, ExpiresAt: now.Add(s.opt.MessageTTL),
 		})
 		if err != nil {
@@ -461,19 +376,22 @@ func (s *Server) routeSend(ctx context.Context, sessionID string, from sender, a
 			return nil, rpcErr(proto.CodeInternal, "internal error")
 		}
 		res.IDs = append(res.IDs, m.ID)
-		res.To = append(res.To, t.name)
+		res.To = append(res.To, t.Name)
 		res.State = m.State
-		if !s.connected(t.id) {
-			notes = append(notes, fmt.Sprintf("%s is not connected right now: the message is queued and delivered if it comes back (it expires after %s)", t.name, s.opt.MessageTTL.Round(time.Minute)))
+		if !s.connected(t.ID) {
+			notes = append(notes, fmt.Sprintf("%s is not connected right now: the message is queued and delivered if it comes back (it expires after %s)", t.Name, s.opt.MessageTTL.Round(time.Minute)))
 		}
 		if state == store.MsgHeld {
-			notes = append(notes, fmt.Sprintf("held for %s: %s", t.name, detail))
+			notes = append(notes, fmt.Sprintf("held for %s: %s", t.Name, detail))
 		}
-		s.log.Info("message accepted", "id", m.ID, "from", from.name, "to", t.name, "kind", kind, "priority", prio, "state", m.State)
-		s.markParentDone(ctx, parent, m.ID)
-		s.spawn(func() { s.flush(t.id, false) })
+		s.log.Info("message accepted", "id", m.ID, "from", from.name, "to", t.Name, "kind", kind, "priority", prio, "state", m.State)
+		if parent != nil {
+			// The reply proves the parent was read and handled.
+			_, _, _ = s.st.Advance(ctx, parent.ID, store.MsgDone, "answered by "+m.ID)
+		}
+		s.spawn(func() { s.flush(t.ID, false) })
 		if m.State == store.MsgHeld {
-			s.spawn(func() { s.notifyHeld(t.id, false) })
+			s.spawn(func() { s.notifyHeld(t.ID, false) })
 		}
 	}
 	res.ID = res.IDs[0]
@@ -535,12 +453,8 @@ func (s *Server) reportMsgState(ctx context.Context, me *agentConn, a proto.MsgS
 	if err != nil || m.ToAgent != me.id {
 		return nil, rpcErr(proto.CodeNotFound, "no such message addressed to you")
 	}
-	upd, changed, err := s.st.Advance(ctx, m.ID, a.State, "")
-	if err != nil && !errors.Is(err, store.ErrBadTransition) {
+	if _, _, err := s.st.Advance(ctx, m.ID, a.State, ""); err != nil && !errors.Is(err, store.ErrBadTransition) {
 		return nil, rpcErr(proto.CodeInternal, "internal error")
-	}
-	if changed && upd.FromPeer != "" {
-		s.spawn(func() { s.pushMeshReceipt(upd) })
 	}
 	return struct{}{}, nil
 }
@@ -580,9 +494,6 @@ func (s *Server) decideHeld(ctx context.Context, sessionID, agentID, id string, 
 		return nil, rpcErr(proto.CodeInternal, "internal error")
 	}
 	s.log.Info("held message decided", "id", m.ID, "approved", approve)
-	if upd.FromPeer != "" {
-		s.spawn(func() { s.pushMeshReceipt(upd) })
-	}
 	s.spawn(func() { s.notifyHeld(upd.ToAgent, false) })
 	if approve {
 		s.spawn(func() { s.flush(upd.ToAgent, false) })
@@ -676,7 +587,6 @@ func (s *Server) expireLoop(ctx context.Context) {
 
 func (s *Server) sweep(ctx context.Context) {
 	s.reapGone(ctx)
-	s.resyncAllMeshSessions(ctx)
 	expired, err := s.st.ExpireDue(ctx, time.Now())
 	if err != nil {
 		s.log.Error("expire messages", "err", err)
@@ -684,15 +594,6 @@ func (s *Server) sweep(ctx context.Context) {
 	}
 	for _, m := range expired {
 		s.log.Info("message expired", "id", m.ID, "to", m.ToName)
-		// A local authoritative row whose sender lives on another daemon has
-		// no local agent to notify (FromAgent is that daemon's, not ours) -
-		// tell its owning peer instead. A local-to-local message, or a
-		// mirror row we gave up waiting on (its own FromAgent is always
-		// ours), still gets the ordinary local notice.
-		if m.FromPeer != "" {
-			s.spawn(func() { s.pushMeshReceipt(m) })
-			continue
-		}
 		s.notifySender(m, "expired before it was delivered")
 	}
 }
@@ -705,10 +606,6 @@ func (s *Server) failFor(ctx context.Context, agentID string) {
 		return
 	}
 	for _, m := range failed {
-		if m.FromPeer != "" {
-			s.spawn(func() { s.pushMeshReceipt(m) })
-			continue
-		}
 		s.notifySender(m, "could not be delivered: "+m.ToName+" exited")
 	}
 }
@@ -756,7 +653,6 @@ func (s *Server) reapGone(ctx context.Context) {
 		s.log.Info("agent never came back; marking it exited", "agent", a.Name, "agent_id", a.ID)
 		_ = s.st.SetAgentStatus(ctx, a.ID, "exited", nil)
 		s.failFor(ctx, a.ID)
-		s.gossipRoster(a.SessionID)
 		if sess, err := s.st.GetSession(ctx, a.SessionID); err == nil && sess.Kind == "solo" {
 			_ = s.st.EndSession(ctx, sess.ID)
 		}

@@ -106,10 +106,6 @@ type PeerInfo struct {
 	State      string    `json:"state,omitempty"` // what its tool is doing: idle | busy | dialog | starting | unknown
 	LastActive time.Time `json:"last_active"`
 	Self       bool      `json:"self,omitempty"`
-	// Remote/Peer describe an agent gossiped in from another daemon; both
-	// are zero for a local agent. Mirrors AgentInfo's fields of the same name.
-	Remote bool   `json:"remote,omitempty"`
-	Peer   string `json:"peer,omitempty"`
 }
 
 type ListAgentsResult struct {

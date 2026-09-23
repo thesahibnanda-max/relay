@@ -51,7 +51,7 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, errw io.Writer) int {
 	if perr == nil {
 		perr = paths.Ensure()
 	}
-	explicit := p.Session != "" || p.Join != nil // the user asked for a specific session: never silently go solo
+	explicit := p.Session != "" // the user asked for a specific session: never silently go solo
 
 	col := collab.New()
 	var lk *link.Client
@@ -128,10 +128,6 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, errw io.Writer) int {
 }
 
 // connect makes sure a daemon is running and registers this agent with it.
-// If p.Join is set, it first teaches the local daemon about the remote
-// session (see meshJoin) and continues with p.Session set from the blob -
-// nothing past this point, including RegisterAgent/link.Connect below, ever
-// needs to know whether the session came from --session or --join.
 //
 // Whenever --session=<id> --name=<x> names a specific, previously-used
 // identity, connect looks for a saved resume token first (see identity.go)
@@ -146,12 +142,6 @@ func connect(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.Adaptor
 	defer cancel()
 	if _, err := daemon.Ensure(ctx, paths, exe); err != nil {
 		return nil, err
-	}
-	if p.Join != nil {
-		if err := meshJoin(paths, *p.Join); err != nil {
-			return nil, err
-		}
-		p.Session = p.Join.Session
 	}
 	cwd, _ := os.Getwd()
 	opt := link.Options{
