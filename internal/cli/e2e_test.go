@@ -681,6 +681,45 @@ func TestJoinFailureIsReportedInsteadOfSilentlyGoingSolo(t *testing.T) {
 	}
 }
 
+// TestSessionPeersActuallyRuns is the regression test for what turned out to
+// be a completely different bug than issue #18's Symptom 2 looked like: the
+// daemon's mesh state was always correct (confirmed live by querying its
+// admin socket directly), but Main()'s dispatch switch never routed
+// KindSessionPeers to runSession at all, so `relay session peers <id>`
+// silently exited 2 with zero output regardless of what the daemon knew -
+// parse_test.go only ever exercised parse(), never Main()'s actual dispatch.
+func TestSessionPeersActuallyRuns(t *testing.T) {
+	w := newWorld(t)
+	alice := w.start("claude", "--session=NEW", "--name=alice")
+	session, _ := alice.identity()
+
+	out, errOut, code := w.runRelay("session", "peers", session)
+	if code != 0 {
+		t.Fatalf("session peers: code=%d stderr=%q", code, errOut)
+	}
+	if !strings.Contains(out, "no peers") {
+		t.Fatalf("a never-mesh-joined session should say so, got stdout=%q", out)
+	}
+}
+
+// TestSessionInviteActuallyRuns is `relay session invite`'s half of the same
+// dispatch bug as TestSessionPeersActuallyRuns - KindSessionInvite was never
+// routed to runSession either, so this has silently done nothing since it
+// was introduced.
+func TestSessionInviteActuallyRuns(t *testing.T) {
+	w := newWorld(t)
+	alice := w.start("claude", "--session=NEW", "--name=alice")
+	session, _ := alice.identity()
+
+	out, errOut, code := w.runRelay("session", "invite", session)
+	if code != 0 {
+		t.Fatalf("session invite: code=%d stderr=%q", code, errOut)
+	}
+	if !strings.Contains(out, proto.JoinBlobPrefix) {
+		t.Fatalf("invite should print a --join blob, got stdout=%q", out)
+	}
+}
+
 func waitFor(t *testing.T, what string, ok func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(15 * time.Second)

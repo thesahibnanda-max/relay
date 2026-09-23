@@ -81,7 +81,7 @@ func Main(argv []string) int {
 		return runAgent(p, &factory, errw)
 	case KindLs:
 		return runLs(p, out, errw)
-	case KindSessionNew, KindSessionEnd:
+	case KindSessionNew, KindSessionEnd, KindSessionInvite, KindSessionPeers:
 		return runSession(p, out, errw)
 	case KindDaemon, KindDaemonStop, KindDaemonStatus:
 		return runDaemon(p, out, errw)
@@ -100,5 +100,9 @@ func Main(argv []string) int {
 	case KindGC:
 		return runGC(p, out, errw)
 	}
+	// Every Kind parse() can produce must be handled above - reaching here is
+	// a missing case (see the session peers/invite dispatch bug this guards
+	// against), so it must never fail silently again.
+	fmt.Fprintf(errw, "relay: internal error: unhandled command kind %v\n", p.Kind)
 	return 2
 }
