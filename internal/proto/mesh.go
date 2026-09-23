@@ -34,6 +34,7 @@ const (
 	MeshCodeVersionMismatch = "mesh_version_mismatch" // MeshVersion disagreement; refuses only this link
 	MeshCodeUnknownSession  = "mesh_unknown_session"  // this daemon has no mesh_sessions row for the session
 	MeshCodeKeyChanged      = "mesh_key_changed"      // TOFU pin violation: the peer's key differs from mesh_peers
+	MeshCodeSelfJoin        = "mesh_self_join"        // the dialing/verified identity is this daemon's own
 )
 
 // MeshEnvelope is the mesh link's wire frame, structurally identical to

@@ -51,7 +51,7 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, errw io.Writer) int {
 	if perr == nil {
 		perr = paths.Ensure()
 	}
-	explicit := p.Session != "" // the user asked for a specific session: never silently go solo
+	explicit := p.Session != "" || p.Join != nil // the user asked for a specific session: never silently go solo
 
 	col := collab.New()
 	var lk *link.Client

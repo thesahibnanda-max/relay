@@ -265,6 +265,16 @@ func (h *Hub) handleHello(ctx context.Context, conn net.Conn, verifiedPeerID str
 		writeMeshError(conn, proto.MeshCodeKeyChanged, "identity mismatch")
 		return
 	}
+	// Defense in depth: Join already refuses to dial your own address
+	// before this is ever reached, but a self-connection reaching here by
+	// any other path (e.g. NAT hairpinning) must never record this daemon
+	// as a "peer" of its own session - see the agent-level equivalent in
+	// applyGossipedAgent.
+	if verifiedPeerID == h.opt.Identity.PeerID() {
+		log.Warn("mesh: inbound hello's verified identity is our own")
+		writeMeshError(conn, proto.MeshCodeSelfJoin, "that's you")
+		return
+	}
 
 	sess, err := h.opt.Store.GetMeshSession(ctx, hello.Session)
 	if err != nil {
@@ -423,6 +433,15 @@ func (h *Hub) Join(ctx context.Context, blob proto.JoinBlob) error {
 	ourAddr, err := h.ensureListening(ctx)
 	if err != nil {
 		return err
+	}
+	// A daemon that already hosts this session minted this very blob from
+	// this same ensureListening address (see Invite) - dialing it back is
+	// never useful (you already know your own local agents without any
+	// mesh machinery) and, over a real transport, is a same-identity
+	// WireGuard loopback nothing has ever exercised. Reject before any
+	// network I/O rather than let it silently succeed or misbehave.
+	if blob.PeerAddr == string(ourAddr) {
+		return fmt.Errorf("federation: this daemon already hosts session %s; use --session=%s instead of --join", blob.Session, blob.Session)
 	}
 	ourPeerID := h.opt.Identity.PeerID()
 	if _, err := h.opt.Store.EnsureMeshSession(ctx, blob.Session, blob.Secret, ourPeerID); err != nil {
@@ -728,6 +747,14 @@ func (h *Hub) handshake(ctx context.Context, sessionID, secret string, ourAddr m
 // linked to directly, every other peer it already knew about (marked
 // unreachable until this daemon dials them itself), and its agent roster.
 func (h *Hub) applyWelcome(ctx context.Context, sessionID, ourPeerID string, w proto.MeshWelcome) error {
+	// Defense in depth, mirroring the secondhand-peers skip below: Join
+	// already refuses to dial our own address before a handshake is ever
+	// attempted, and handleHello refuses a self-identity on the accepting
+	// side - this guards the primary peer too, in case either is ever
+	// reached some other way.
+	if w.PeerID == ourPeerID {
+		return fmt.Errorf("federation: welcome claims to be us (%s)", w.PeerID)
+	}
 	if err := h.opt.Store.UpsertMeshPeer(ctx, store.MeshPeer{
 		SessionID: sessionID, PeerID: w.PeerID, Addr: w.Addr, Status: store.MeshPeerLinked,
 	}); err != nil {
