@@ -239,6 +239,56 @@ code:not(pre code) {
 @media (min-width: 52rem) { .steps { grid-template-columns: repeat(3, 1fr); } }
 .section .cards-4 { margin-top: 1rem; }
 
+/* ---------- multi-machine mesh ---------- */
+.mesh-demo {
+  margin: 2.25rem 0 0; display: grid; gap: 1.25rem; align-items: stretch;
+}
+@media (min-width: 52rem) { .mesh-demo { grid-template-columns: 1fr 3.5rem 1fr; align-items: center; } }
+.macwin {
+  min-width: 0; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
+  overflow: hidden; box-shadow: 0 20px 50px -25px rgb(0 0 0 / .55);
+}
+.macwin-bar { display: flex; align-items: center; gap: .4rem; padding: .7rem .9rem; border-bottom: 1px solid var(--line); background: var(--surface-2); }
+.macwin-bar .dot { width: 10px; height: 10px; border-radius: 50%; display: block; }
+.dot-r { background: #f5473c; } .dot-y { background: #ffb020; } .dot-g { background: #34c759; }
+.macwin-bar span { margin-left: .5rem; font-family: var(--font-mono); font-size: .75rem; color: var(--muted); }
+.macwin-body { margin: 0; padding: 1.1rem 1rem; font-size: .8rem; line-height: 1.75; font-family: var(--font-mono); min-height: 6.5rem; }
+.macwin-body p { margin: 0 0 .5rem; overflow-wrap: anywhere; }
+.macwin-body p:last-child { margin-bottom: 0; }
+
+/* A message crosses left to right, then the reply's lines appear - one shared
+   8s cycle, each line's own keyframes encoding when it's visible within it,
+   looping forever without any JS. See the reduced-motion override below for
+   the static end-state this collapses to when motion is disabled. */
+.mesh-line { opacity: 0; transform: translateY(4px); }
+@keyframes mesh-cycle-a1 { 0%, 6% { opacity: 0; transform: translateY(4px); } 12%, 58% { opacity: 1; transform: translateY(0); } 64%, 100% { opacity: 0; transform: translateY(0); } }
+@keyframes mesh-cycle-a2 { 0%, 16% { opacity: 0; transform: translateY(4px); } 22%, 58% { opacity: 1; transform: translateY(0); } 64%, 100% { opacity: 0; transform: translateY(0); } }
+@keyframes mesh-cycle-b1 { 0%, 46% { opacity: 0; transform: translateY(4px); } 52%, 96% { opacity: 1; transform: translateY(0); } 100% { opacity: 0; transform: translateY(0); } }
+@keyframes mesh-cycle-b2 { 0%, 56% { opacity: 0; transform: translateY(4px); } 62%, 96% { opacity: 1; transform: translateY(0); } 100% { opacity: 0; transform: translateY(0); } }
+.mesh-line-a1 { animation: mesh-cycle-a1 8s ease-in-out infinite; }
+.mesh-line-a2 { animation: mesh-cycle-a2 8s ease-in-out infinite; }
+.mesh-line-b1 { animation: mesh-cycle-b1 8s ease-in-out infinite; }
+.mesh-line-b2 { animation: mesh-cycle-b2 8s ease-in-out infinite; }
+
+.mesh-link { display: none; }
+@media (min-width: 52rem) {
+  .mesh-link { display: block; position: relative; height: 2px; background: var(--line); align-self: center; }
+  .mesh-dot {
+    position: absolute; top: 50%; left: 0; width: 10px; height: 10px; margin-top: -5px; border-radius: 50%;
+    background: var(--accent); opacity: 0;
+    box-shadow: 0 0 12px 2px color-mix(in srgb, var(--accent) 70%, transparent);
+    animation: mesh-travel 8s ease-in-out infinite;
+  }
+  @keyframes mesh-travel { 0%, 24% { left: 0%; opacity: 0; } 30% { opacity: 1; } 48%, 100% { left: 100%; opacity: 0; } }
+}
+
+.mesh-grid { display: grid; gap: 1.5rem; margin-top: 2.25rem; }
+@media (min-width: 52rem) { .mesh-grid { grid-template-columns: 1fr 1fr; align-items: start; } }
+.mesh-uses { list-style: none; margin: 0; padding: 0; display: grid; gap: .9rem; color: var(--muted); }
+.mesh-uses li { padding-left: 1.4rem; position: relative; }
+.mesh-uses li::before { content: ""; position: absolute; left: 0; top: .55em; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+.mesh-uses strong { display: block; color: var(--text); font-weight: 650; }
+
 /* ---------- demo screenshot ---------- */
 .shot { margin: 2rem 0 0; }
 .shot-frame {
@@ -314,3 +364,11 @@ code:not(pre code) {
 @media (min-width: 40rem) { .foot { grid-template-columns: 1fr auto; align-items: start; } }
 
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+/* The rule above freezes the mesh animation mid-cycle (most lines at
+   opacity: 0). Force the sensible static end-state instead: every line and
+   the connector fully visible, nothing mid-transition. */
+@media (prefers-reduced-motion: reduce) {
+  .mesh-line { opacity: 1 !important; transform: none !important; }
+  .mesh-dot { opacity: 1 !important; left: 100% !important; }
+}
