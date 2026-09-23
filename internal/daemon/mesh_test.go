@@ -62,6 +62,38 @@ func TestMeshInviteAndJoinEndToEnd(t *testing.T) {
 	}
 }
 
+// TestJoinRejectsJoiningYourOwnHostedSession is the regression test for
+// issue #18's Symptom 4: a daemon that already hosts a session used to be
+// able to --join its own minted blob for that very session, silently
+// recording itself as a "peer" of its own session (see Join's new
+// address-equality guard). Confirms the rejection happens before any
+// self-referential mesh_peers row is ever created.
+func TestJoinRejectsJoiningYourOwnHostedSession(t *testing.T) {
+	a := startServer(t, withMeshTransport(meshnet.NewFakeNetwork()))
+	sid := a.newSession()
+
+	var blob proto.JoinBlob
+	if code := a.postJSON("/v1/admin/mesh/invite", proto.InviteMeshSessionRequest{SessionID: sid}, &blob); code != 200 {
+		t.Fatalf("invite: HTTP %d", code)
+	}
+
+	var joinResp proto.APIError
+	if code := a.postJSON("/v1/admin/mesh/join", blob, &joinResp); code != 502 {
+		t.Fatalf("self-join: HTTP %d (want 502, a clear refusal), body: %+v", code, joinResp)
+	}
+	if joinResp.Error == "" {
+		t.Fatalf("self-join should carry a clear error message, got %+v", joinResp)
+	}
+
+	var peers []proto.MeshPeerView
+	if code := a.getJSON("/v1/admin/mesh/peers/"+sid, &peers); code != 200 {
+		t.Fatalf("peers: HTTP %d", code)
+	}
+	if len(peers) != 0 {
+		t.Fatalf("self-join must never record a peer of any kind: %+v", peers)
+	}
+}
+
 func TestMeshInviteRequiresAnExistingSession(t *testing.T) {
 	a := startServer(t, withMeshTransport(meshnet.NewFakeNetwork()))
 	code := a.postJSON("/v1/admin/mesh/invite", proto.InviteMeshSessionRequest{SessionID: "01ARZ3NDEKTSV4RRFFQ69G5FAV"}, nil)

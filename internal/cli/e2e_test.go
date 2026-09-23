@@ -21,6 +21,7 @@ import (
 
 	"github.com/creack/pty"
 
+	"github.com/thesahibnanda-max/relay/internal/ids"
 	"github.com/thesahibnanda-max/relay/internal/proto"
 	"github.com/thesahibnanda-max/relay/internal/relayhome"
 )
@@ -658,6 +659,25 @@ func TestFreshIgnoresASavedIdentityAndResumeFailsLoudlyWithoutOne(t *testing.T) 
 	_, errOut2, code2 := w.runRelay("claude", "--session="+session, "--name=bob", "--resume")
 	if code2 == 0 || !strings.Contains(errOut2, "no saved identity") {
 		t.Fatalf("--resume without a saved identity should fail loudly: code=%d stderr=%q", code2, errOut2)
+	}
+}
+
+// TestJoinFailureIsReportedInsteadOfSilentlyGoingSolo is the regression test
+// for issue #18's Symptom 4's "no clear error" half: runAgent used to decide
+// whether to report a connect() failure loudly by checking only p.Session,
+// never p.Join - so ANY --join failure (not just a self-join) silently fell
+// back to a relay-less solo run with zero output. A malformed/undialable
+// blob is enough to trigger a meshJoin failure without needing a second
+// daemon or real network access.
+func TestJoinFailureIsReportedInsteadOfSilentlyGoingSolo(t *testing.T) {
+	badBlob := proto.EncodeJoinBlob(proto.JoinBlob{Session: ids.New(), PeerAddr: "tcNOTAREALADDRESS", Secret: "s3cr3t"})
+	w := newWorld(t)
+	_, errOut, code := w.runRelay("claude", "--join="+badBlob, "--name=x")
+	if code == 0 {
+		t.Fatalf("a --join failure must not exit 0 (silently going solo): stderr=%q", errOut)
+	}
+	if errOut == "" {
+		t.Fatal("a --join failure must print a clear error, got nothing")
 	}
 }
 
