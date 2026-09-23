@@ -259,16 +259,23 @@ code:not(pre code) {
 /* A message crosses left to right, then the reply's lines appear - one shared
    8s cycle, each line's own keyframes encoding when it's visible within it,
    looping forever without any JS. See the reduced-motion override below for
-   the static end-state this collapses to when motion is disabled. */
+   the static end-state this collapses to when motion is disabled.
+
+   `steps(1, jump-end)` (not `ease-in-out`) is deliberate: with a smoothly
+   interpolated opacity, a scan mid-fade catches the text at a genuinely low
+   contrast ratio against the terminal background - a real, if momentary,
+   accessibility issue for anyone with low vision, not just a test artefact.
+   Stepping makes the reveal instant (no partial-opacity frame ever exists)
+   while keeping the slide-up on the same schedule. */
 .mesh-line { opacity: 0; transform: translateY(4px); }
 @keyframes mesh-cycle-a1 { 0%, 6% { opacity: 0; transform: translateY(4px); } 12%, 58% { opacity: 1; transform: translateY(0); } 64%, 100% { opacity: 0; transform: translateY(0); } }
 @keyframes mesh-cycle-a2 { 0%, 16% { opacity: 0; transform: translateY(4px); } 22%, 58% { opacity: 1; transform: translateY(0); } 64%, 100% { opacity: 0; transform: translateY(0); } }
 @keyframes mesh-cycle-b1 { 0%, 46% { opacity: 0; transform: translateY(4px); } 52%, 96% { opacity: 1; transform: translateY(0); } 100% { opacity: 0; transform: translateY(0); } }
 @keyframes mesh-cycle-b2 { 0%, 56% { opacity: 0; transform: translateY(4px); } 62%, 96% { opacity: 1; transform: translateY(0); } 100% { opacity: 0; transform: translateY(0); } }
-.mesh-line-a1 { animation: mesh-cycle-a1 8s ease-in-out infinite; }
-.mesh-line-a2 { animation: mesh-cycle-a2 8s ease-in-out infinite; }
-.mesh-line-b1 { animation: mesh-cycle-b1 8s ease-in-out infinite; }
-.mesh-line-b2 { animation: mesh-cycle-b2 8s ease-in-out infinite; }
+.mesh-line-a1 { animation: mesh-cycle-a1 8s steps(1, jump-end) infinite; }
+.mesh-line-a2 { animation: mesh-cycle-a2 8s steps(1, jump-end) infinite; }
+.mesh-line-b1 { animation: mesh-cycle-b1 8s steps(1, jump-end) infinite; }
+.mesh-line-b2 { animation: mesh-cycle-b2 8s steps(1, jump-end) infinite; }
 
 .mesh-link { display: none; }
 @media (min-width: 52rem) {
