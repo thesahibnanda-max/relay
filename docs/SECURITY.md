@@ -68,7 +68,9 @@ above; each change is deliberate and scoped to exactly the machines and sessions
   NATs), tailcat falls back to a public relay server it does not operate (`tailcat.dev` by default). That
   service only ever sees encrypted WireGuard traffic - never message content or terminal output - but its
   uptime is a genuine dependency for that fallback path; if you need to avoid it entirely, point
-  `MeshDERPMapURL` at your own DERP map.
+  `MeshDERPMapURL` at your own DERP map. To see tailcat's own diagnosis of *why* a direct or DERP connection
+  did or didn't succeed (NAT type, handshake state), start the daemon with `RELAY_MESH_DEBUG=1` set - off by
+  default since it's verbose, and it never affects anything except what gets logged.
 * **Guards still apply per hop.** Hop limit, rate limits, dedupe and TTLs (see "Bounded blast radius" above)
   are enforced by the *sending* agent's own daemon before a message ever leaves that machine, regardless of
   how many machines a reply chain eventually crosses.

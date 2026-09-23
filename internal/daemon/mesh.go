@@ -15,6 +15,23 @@ import (
 	"github.com/thesahibnanda-max/relay/internal/store"
 )
 
+// meshTransport picks this daemon's mesh transport: the test-injected
+// MeshTransport if set, otherwise a real tailcat-backed one - with its own
+// diagnostic logging wired in only when explicitly asked for (MeshDebugLog),
+// since tailcat's output is otherwise silently discarded (see RELAY_MESH_DEBUG).
+func meshTransport(opt Options) meshnet.Transport {
+	if opt.MeshTransport != nil {
+		return opt.MeshTransport
+	}
+	rt := meshnet.RealTransport{DERPMapURL: opt.MeshDERPMapURL}
+	if opt.MeshDebugLog {
+		rt.Logf = func(format string, args ...any) {
+			opt.Log.Info("mesh: tailcat", "detail", fmt.Sprintf(format, args...))
+		}
+	}
+	return rt
+}
+
 // hub lazily constructs this daemon's federation.Hub, loading (or creating)
 // its persisted mesh identity only the first time it's needed - a daemon
 // that never invites or joins a session never touches ~/.relay's mesh/
@@ -25,10 +42,7 @@ func (s *Server) hub() (*federation.Hub, error) {
 	if s.mesh != nil {
 		return s.mesh, nil
 	}
-	transport := s.opt.MeshTransport
-	if transport == nil {
-		transport = meshnet.RealTransport{DERPMapURL: s.opt.MeshDERPMapURL}
-	}
+	transport := meshTransport(s.opt)
 	id, err := meshnet.LoadOrCreateIdentity(s.opt.Paths.MeshIdentityPath())
 	if err != nil {
 		return nil, err

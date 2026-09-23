@@ -1,7 +1,10 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +15,48 @@ import (
 
 func withMeshTransport(net *meshnet.FakeNetwork) func(*Options) {
 	return func(o *Options) { o.MeshTransport = meshnet.FakeTransport{Net: net} }
+}
+
+// TestMeshTransportWiresDebugLoggingWhenEnabled confirms MeshDebugLog does
+// what it says: tailcat's own diagnostic output (otherwise silently
+// discarded - see RELAY_MESH_DEBUG) actually reaches the daemon's logger.
+func TestMeshTransportWiresDebugLoggingWhenEnabled(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	rt, ok := meshTransport(Options{Log: log, MeshDebugLog: true}).(meshnet.RealTransport)
+	if !ok {
+		t.Fatalf("expected meshnet.RealTransport, got %T", rt)
+	}
+	if rt.Logf == nil {
+		t.Fatal("MeshDebugLog: true should wire a non-nil Logf")
+	}
+	rt.Logf("hello %s", "world")
+	if !strings.Contains(buf.String(), "hello world") {
+		t.Fatalf("Logf did not reach the logger: %s", buf.String())
+	}
+}
+
+// TestMeshTransportLeavesDebugLoggingOffByDefault confirms today's behavior
+// (tailcat's logging silently discarded) is unchanged when MeshDebugLog is
+// left at its zero value.
+func TestMeshTransportLeavesDebugLoggingOffByDefault(t *testing.T) {
+	rt, ok := meshTransport(Options{Log: slog.Default()}).(meshnet.RealTransport)
+	if !ok {
+		t.Fatalf("expected meshnet.RealTransport, got %T", rt)
+	}
+	if rt.Logf != nil {
+		t.Fatal("MeshDebugLog: false (the default) must leave Logf nil")
+	}
+}
+
+// TestMeshTransportPrefersAnInjectedTransport confirms MeshDebugLog never
+// affects the fake-transport path every other daemon test in this file uses.
+func TestMeshTransportPrefersAnInjectedTransport(t *testing.T) {
+	fake := meshnet.FakeTransport{Net: meshnet.NewFakeNetwork()}
+	got := meshTransport(Options{MeshTransport: fake, MeshDebugLog: true})
+	if got != meshnet.Transport(fake) {
+		t.Fatalf("an injected MeshTransport must be returned as-is, got %T", got)
+	}
 }
 
 func TestMeshInviteAndJoinEndToEnd(t *testing.T) {
