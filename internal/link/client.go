@@ -97,6 +97,14 @@ func Connect(ctx context.Context, opt Options) (*Client, error) {
 	c := &Client{opt: opt, log: opt.Log, next: 1, done: make(chan struct{}), calls: map[string]chan proto.Result{}}
 	c.cond = sync.NewCond(&c.mu)
 	c.ctx, c.cancel = context.WithCancel(context.Background())
+	// Seed the token this Client should keep presenting on its own future
+	// reconnects. adopt() only overwrites it when a Welcome carries one, and
+	// a resume's Welcome never does (Token is only set on first
+	// registration) - without this, a Client whose very first Hello was
+	// itself a resume would forget the token the moment it landed, and its
+	// next automatic reconnect would go out empty, read by the daemon as a
+	// brand new registration colliding on the still-occupied name.
+	c.token = opt.Hello.Token
 
 	hctx, hcancel := context.WithTimeout(ctx, 10*time.Second)
 	defer hcancel()

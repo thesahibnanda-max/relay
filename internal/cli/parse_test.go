@@ -115,6 +115,25 @@ func TestJoinFlag(t *testing.T) {
 	}
 }
 
+func TestResumeAndFreshFlags(t *testing.T) {
+	p, err := parse("claude", "--session=NEW", "--name=a1", "--resume")
+	if err != nil || !p.Resume || p.Fresh {
+		t.Fatalf("%+v %v", p, err)
+	}
+	p, err = parse("claude", "--session=NEW", "--name=a1", "--fresh")
+	if err != nil || !p.Fresh || p.Resume {
+		t.Fatalf("%+v %v", p, err)
+	}
+	// --resume/--fresh work the same after --join as after --session, since
+	// --join counts as naming an explicit session too.
+	id := ids.New()
+	blob := proto.EncodeJoinBlob(proto.JoinBlob{Session: id, PeerAddr: "tcX", Secret: "s"})
+	p, err = parse("claude", "--join="+blob, "--name=a1", "--resume")
+	if err != nil || !p.Resume {
+		t.Fatalf("%+v %v", p, err)
+	}
+}
+
 func TestUsageErrors(t *testing.T) {
 	id := ids.New()
 	validBlob := proto.EncodeJoinBlob(proto.JoinBlob{Session: id, PeerAddr: "tcX", Secret: "s"})
@@ -138,6 +157,9 @@ func TestUsageErrors(t *testing.T) {
 		"session then join":       {"claude", "--session=NEW", "--join=" + validBlob},
 		"join twice":              {"claude", "--join=" + validBlob, "--join=" + validBlob},
 		"join not a blob at all":  {"claude", "--join=garbage"},
+		"resume and fresh":        {"claude", "--session=NEW", "--name=a1", "--resume", "--fresh"},
+		"resume without name":     {"claude", "--session=NEW", "--resume"},
+		"fresh without name":      {"claude", "--session=NEW", "--fresh"},
 	}
 	for name, args := range cases {
 		_, err := parse(args...)

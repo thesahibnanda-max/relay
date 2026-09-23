@@ -19,7 +19,7 @@ func TestResolveHonoursEnvAndEnsurePrivate(t *testing.T) {
 	if err := p.Ensure(); err != nil {
 		t.Fatal(err)
 	}
-	for _, d := range []string{p.RunDir(), p.DataDir(), p.RawDir(), p.LogDir(), p.SessionsDir()} {
+	for _, d := range []string{p.RunDir(), p.DataDir(), p.RawDir(), p.LogDir(), p.SessionsDir(), p.IdentitiesDir()} {
 		st, err := os.Stat(d)
 		if err != nil || !st.IsDir() || st.Mode().Perm() != 0o700 {
 			t.Errorf("%s: %v %v", d, st, err)

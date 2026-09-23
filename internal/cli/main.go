@@ -13,7 +13,8 @@ const usageText = `relay: a transparent layer between you and your AI coding age
 
 Run an agent (it looks and behaves exactly like the tool itself):
   relay <claude|codex> [role] [--session=NEW|<id> | --join=<blob>] [--name=<name>]
-                       [--approve-inbound] [--record=raw|events|off] [-- <tool arguments>]
+                       [--resume | --fresh] [--approve-inbound] [--record=raw|events|off]
+                       [-- <tool arguments>]
 
   relay claude orchestrator --session=NEW -- --model sonnet   start a new session
   relay codex qa --session=<id> --name=checker                join it as another agent
@@ -21,6 +22,10 @@ Run an agent (it looks and behaves exactly like the tool itself):
   relay claude                                                 just log this one, alone
 
   role     orchestrator, planner, developer, qa, reviewer, or a path to a .md file
+  --session=<id> --name=<name> auto-resumes a crashed/killed agent of that name if
+                       a saved identity exists (nothing to opt into); --resume fails
+                       loudly instead of silently registering fresh when none is found,
+                       --fresh ignores any saved identity and always registers new
   Everything after -- goes to the tool unchanged.
 
 Inspect and manage:
