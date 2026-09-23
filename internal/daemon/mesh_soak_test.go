@@ -46,14 +46,18 @@ func TestMeshCombinedSoak(t *testing.T) {
 	if testing.Short() {
 		t.Skip("soak test")
 	}
-	// 300ms, not something more aggressive: an ExpireEvery under ~100ms
+	// 500ms, not something more aggressive: an ExpireEvery under ~100ms
 	// across 3 daemons each independently resyncing the whole mesh on every
 	// tick creates enough self-inflicted handshake contention on the shared
 	// fake network to visibly slow real convergence down (a genuine finding
 	// from tuning this test, not a mesh correctness issue - production's
-	// real default is 30s). 300ms keeps this soak test itself fast without
-	// re-introducing that.
-	fast := func(o *Options) { o.ExpireEvery = 300 * time.Millisecond }
+	// real default is 30s). 300ms was fine on a fast dev machine but flaked
+	// once on a slower/loaded macOS CI runner under -race (two messages
+	// still legitimately "queued", just not yet flushed by the 20s
+	// deadline below - not lost, just slow); 500ms gives more headroom
+	// against exactly that contention without materially slowing this
+	// soak test itself.
+	fast := func(o *Options) { o.ExpireEvery = 500 * time.Millisecond }
 	fakeNet := meshnet.NewFakeNetwork()
 	a := startServer(t, withMeshTransport(fakeNet), fast)
 	b := startServer(t, withMeshTransport(fakeNet), fast)
@@ -150,13 +154,28 @@ func TestMeshCombinedSoak(t *testing.T) {
 		drain(s.from, p)
 	}
 
-	deadline := time.Now().Add(20 * time.Second)
+	// Counted by DISTINCT message id, not raw delivery count: at-least-once
+	// redelivery (expected and correct, especially right after bob's
+	// restart above) can legitimately hand back the same id twice, which
+	// would make a raw count reach len(plan) while a genuinely different
+	// message is still in flight - stopping the wait early and turning a
+	// slow-but-fine delivery into a false "lost" failure. This was a real
+	// bug caught by a CI run flaking on a slower machine: it looked like
+	// mesh data loss but was actually this loop giving up too soon.
+	distinctCount := func() int {
+		seen := make(map[string]bool, len(deliveries))
+		for _, d := range deliveries {
+			seen[d.id] = true
+		}
+		return len(seen)
+	}
+	deadline := time.Now().Add(40 * time.Second)
 	for time.Now().Before(deadline) {
-		before := len(deliveries)
+		before := distinctCount()
 		drain("alice", alice)
 		drain("bob", bob)
 		drain("carol", carol)
-		if len(deliveries) == before && len(deliveries) >= len(plan) {
+		if after := distinctCount(); after == before && after >= len(plan) {
 			break
 		}
 		time.Sleep(100 * time.Millisecond)
