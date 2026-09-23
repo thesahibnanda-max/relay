@@ -63,6 +63,11 @@ type Options struct {
 	// actually invoked - see (*Server).hub.
 	MeshTransport  meshnet.Transport
 	MeshDERPMapURL string // "" = tailcat's own default; see docs/SECURITY.md
+
+	// MeshDebugLog, when true, wires tailcat's own internal diagnostic logging
+	// (NAT/DERP negotiation, handshake state) into Log at Info level - off by
+	// default since it's verbose. See RELAY_MESH_DEBUG and docs/SECURITY.md.
+	MeshDebugLog bool
 }
 
 type Server struct {
