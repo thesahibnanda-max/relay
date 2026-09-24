@@ -51,6 +51,26 @@ func (fakeSessionService) Context(ctx context.Context, sessionID, agentID, forAg
 	return nil, nil
 }
 
+func (fakeSessionService) ReportState(ctx context.Context, sessionID, agentID, messageID, state string) error {
+	return nil
+}
+
+func (fakeSessionService) ListHeld(ctx context.Context, sessionID, agentID string) ([]mongodb.Message, error) {
+	return nil, nil
+}
+
+func (fakeSessionService) Approve(ctx context.Context, sessionID, agentID, messageID string) (mongodb.Message, error) {
+	return mongodb.Message{}, nil
+}
+
+func (fakeSessionService) Reject(ctx context.Context, sessionID, agentID, messageID string) (mongodb.Message, error) {
+	return mongodb.Message{}, nil
+}
+
+func (fakeSessionService) Sweep(ctx context.Context, shardURL string) error {
+	return nil
+}
+
 var _ session.Interface = fakeSessionService{}
 
 func newTestHandler(t *testing.T) http.Handler {

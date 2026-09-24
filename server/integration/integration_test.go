@@ -164,7 +164,7 @@ func buildStack(t *testing.T) testStack {
 	if err != nil {
 		t.Fatalf("sharding.New: %v", err)
 	}
-	svc, err := session.New(selector, sessionRepo, agentRepo, messageRepo)
+	svc, err := session.New(cfg, selector, sessionRepo, agentRepo, messageRepo)
 	if err != nil {
 		t.Fatalf("session.New: %v", err)
 	}

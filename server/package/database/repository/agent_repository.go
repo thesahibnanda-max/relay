@@ -24,6 +24,10 @@ type AgentRepository interface {
 	GetByName(ctx context.Context, mongoURL, sessionID, name string) (agent mongodb.Agent, found bool, err error)
 	ListBySession(ctx context.Context, mongoURL, sessionID string) ([]mongodb.Agent, error)
 	SetStatus(ctx context.Context, mongoURL, agentID, status string) error
+	// UpdatePolicy refreshes an agent's role-derived policy fields (checked
+	// again on every resume, in case the role changed between runs) and its
+	// status, in one write.
+	UpdatePolicy(ctx context.Context, mongoURL, agentID, status string, approveInbound, canInterrupt, canBroadcast bool) error
 	// MarkAllDisconnected force-marks every currently-"connected" agent on
 	// this shard as "disconnected" - called once per shard on server
 	// startup, mirroring the local daemon's own rule: a previous process
@@ -148,6 +152,19 @@ func (r agentRepository) MarkAllDisconnected(ctx context.Context, mongoURL strin
 	filter := bson.M{"status": "connected"}
 	update := bson.M{"$set": bson.M{"status": "disconnected", "updated_at": time.Now().UTC()}}
 	_, err = db.Collection(mongodb.CollectionAgents).UpdateMany(ctx, filter, update)
+	return err
+}
+
+func (r agentRepository) UpdatePolicy(ctx context.Context, mongoURL, agentID, status string, approveInbound, canInterrupt, canBroadcast bool) error {
+	db, err := r.pool.Database(mongoURL)
+	if err != nil {
+		return err
+	}
+	update := bson.M{"$set": bson.M{
+		"status": status, "approve_inbound": approveInbound, "can_interrupt": canInterrupt,
+		"can_broadcast": canBroadcast, "updated_at": time.Now().UTC(),
+	}}
+	_, err = db.Collection(mongodb.CollectionAgents).UpdateOne(ctx, byID(agentID), update)
 	return err
 }
 
