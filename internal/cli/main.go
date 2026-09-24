@@ -12,16 +12,24 @@ import (
 const usageText = `relay: a transparent layer between you and your AI coding agents.
 
 Run an agent (it looks and behaves exactly like the tool itself):
-  relay <claude|codex> [role] [--session=NEW|<id>] [--name=<name>]
-                       [--resume | --fresh] [--approve-inbound] [--record=raw|events|off]
-                       [-- <tool arguments>]
+  relay <claude|codex> [role] [--session=NEW|NEW_LOCAL|<id>|<id>@host[:port]] [--name=<name>]
+                       [--server=<host[:port]>] [--resume | --fresh] [--approve-inbound]
+                       [--record=raw|events|off] [-- <tool arguments>]
 
-  relay claude orchestrator --session=NEW -- --model sonnet   start a new session
-  relay codex qa --session=<id> --name=checker                join it as another agent
+  relay claude orchestrator --session=NEW --server=host:5555 -- --model sonnet
+                                                                start a new GLOBAL session (any machine can join)
+  relay codex qa --session=<ulid>@host:5555 --name=checker    join that global session from another machine
+  relay claude orchestrator --session=NEW_LOCAL -- --model sonnet   start a LOCAL-only session (this machine only)
+  relay codex qa --session=<id> --name=checker                join a local session as another agent
   relay claude                                                 just log this one, alone
 
   role     orchestrator, planner, developer, qa, reviewer, or a path to a .md file
   Everything after -- goes to the tool unchanged.
+  --session=NEW creates a new global session (dials a central server named by --server or
+                       $RELAY_SERVER); --session=NEW_LOCAL creates a local-only session on this
+                       machine, same as always. A session token printed by "others join with"
+                       (a bare ULID for local, "<ulid>@host:port" for global) is what --session
+                       takes to join one.
   --session=<id> --name=<name> auto-resumes a crashed/killed agent of that name if
                        a saved identity exists (nothing to opt into); --resume fails
                        loudly instead of silently registering fresh when none is found,

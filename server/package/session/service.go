@@ -33,10 +33,16 @@ const (
 	maxContextLimit     = 50
 )
 
-// ErrAgentLive is returned by Join when a resume attempt names an identity
-// that's still connected elsewhere - two processes must never silently share
-// one agent identity. Mirrors the local daemon's proto.CodeAgentLive.
-var ErrAgentLive = errors.New("session: agent is already connected")
+// Sentinel Join errors, each mirroring one of the local daemon's own
+// proto.Code* constants - ws/hub.go maps these back to the matching wire
+// error code, so the CLI's existing friendly() error messages work
+// identically for global and local sessions.
+var (
+	ErrAgentLive       = errors.New("session: agent is already connected")
+	ErrBadToken        = errors.New("session: bad resume token")
+	ErrSessionNotFound = errors.New("session: session not found")
+	ErrNameTaken       = errors.New("session: name is already taken in this session")
+)
 
 // JoinRequest is what a connecting agent's Hello carries.
 type JoinRequest struct {
@@ -141,7 +147,7 @@ func (s service) Join(ctx context.Context, req JoinRequest) (JoinResult, error) 
 	} else if _, found, err := s.sessions.Get(ctx, shardURL, sessionID); err != nil {
 		return JoinResult{}, err
 	} else if !found {
-		return JoinResult{}, fmt.Errorf("session: %q not found", sessionID)
+		return JoinResult{}, fmt.Errorf("%w: %q", ErrSessionNotFound, sessionID)
 	}
 
 	if req.Token != "" {
@@ -160,7 +166,7 @@ func (s service) resume(ctx context.Context, shardURL, sessionID string, req Joi
 	}
 	presented := hashToken(req.Token)
 	if !found || subtle.ConstantTimeCompare([]byte(existing.TokenHash), []byte(presented)) != 1 {
-		return JoinResult{}, errors.New("session: bad resume token")
+		return JoinResult{}, ErrBadToken
 	}
 	if existing.Status == "connected" {
 		return JoinResult{}, ErrAgentLive
@@ -178,7 +184,7 @@ func (s service) register(ctx context.Context, shardURL, sessionID string, req J
 	if _, found, err := s.agents.GetByName(ctx, shardURL, sessionID, req.Name); err != nil {
 		return JoinResult{}, err
 	} else if found {
-		return JoinResult{}, fmt.Errorf("session: name %q is already taken in this session", req.Name)
+		return JoinResult{}, fmt.Errorf("%w: %q", ErrNameTaken, req.Name)
 	}
 
 	token, hash, err := newToken()

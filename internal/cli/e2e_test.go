@@ -359,7 +359,7 @@ func TestTwoAgentsCollaborateAndLeaveNoFootprint(t *testing.T) {
 	w := newWorld(t)
 	before := w.footprint()
 
-	alice := w.start("claude", "orchestrator", "--session=NEW", "--name=alice")
+	alice := w.start("claude", "orchestrator", "--session=NEW_LOCAL", "--name=alice")
 	session, name := alice.identity()
 	if name != "alice" {
 		t.Fatalf("name %q", name)
@@ -495,7 +495,7 @@ func (r *relayProc) notSubmitted(contains string, within time.Duration) {
 
 func TestApproveInboundHoldsUntilApprovedByCLIOrChord(t *testing.T) {
 	w := newWorld(t)
-	alice := w.start("claude", "orchestrator", "--session=NEW", "--name=alice")
+	alice := w.start("claude", "orchestrator", "--session=NEW_LOCAL", "--name=alice")
 	session, _ := alice.identity()
 	bob := w.start("codex", "developer", "--session="+session, "--name=bob", "--approve-inbound")
 	bob.identity()
@@ -548,7 +548,7 @@ func TestApproveInboundHoldsUntilApprovedByCLIOrChord(t *testing.T) {
 
 func TestMessagesWaitForAnUnsentDraft(t *testing.T) {
 	w := newWorld(t)
-	alice := w.start("claude", "--session=NEW", "--name=alice")
+	alice := w.start("claude", "--session=NEW_LOCAL", "--name=alice")
 	session, _ := alice.identity()
 	bob := w.start("codex", "--session="+session, "--name=bob")
 	bob.identity()
@@ -575,7 +575,7 @@ func TestMessagesWaitForAnUnsentDraft(t *testing.T) {
 
 func TestKilledAgentLeavesOnlyCollectableLeftovers(t *testing.T) {
 	w := newWorld(t)
-	alice := w.start("claude", "--session=NEW", "--name=alice")
+	alice := w.start("claude", "--session=NEW_LOCAL", "--name=alice")
 	session, _ := alice.identity()
 	dir := w.agentDir(w.agents(session)["alice"].ID)
 	if _, err := os.Stat(dir); err != nil {
@@ -605,7 +605,7 @@ func TestKilledAgentLeavesOnlyCollectableLeftovers(t *testing.T) {
 // automatically, with no new flag needed for the common case.
 func TestKilledAgentResumesAutomaticallyOnRelaunch(t *testing.T) {
 	w := newWorld(t)
-	alice := w.start("claude", "--session=NEW", "--name=alice")
+	alice := w.start("claude", "--session=NEW_LOCAL", "--name=alice")
 	session, _ := alice.identity()
 	aliceID := w.agents(session)["alice"].ID
 
@@ -634,7 +634,7 @@ func TestKilledAgentResumesAutomaticallyOnRelaunch(t *testing.T) {
 // refuses to silently fall back to fresh registration when nothing is saved.
 func TestFreshIgnoresASavedIdentityAndResumeFailsLoudlyWithoutOne(t *testing.T) {
 	w := newWorld(t)
-	alice := w.start("claude", "--session=NEW", "--name=alice")
+	alice := w.start("claude", "--session=NEW_LOCAL", "--name=alice")
 	session, _ := alice.identity()
 
 	alice.cmd.Process.Kill()
@@ -705,7 +705,7 @@ func (w *world) peerState(as *shim, name string) string {
 
 func TestHooksDeliverMidTurnAndAtStopWithoutTypingTwice(t *testing.T) {
 	w := newWorld(t)
-	alice := w.start("claude", "--session=NEW", "--name=alice")
+	alice := w.start("claude", "--session=NEW_LOCAL", "--name=alice")
 	session, _ := alice.identity()
 	bob := w.start("claude", "--session="+session, "--name=bob")
 	bob.identity()
@@ -772,7 +772,7 @@ func TestHooksDeliverMidTurnAndAtStopWithoutTypingTwice(t *testing.T) {
 
 func TestStopContinueIsBoundedAndHookFailuresAreSilent(t *testing.T) {
 	w := newWorld(t)
-	alice := w.start("claude", "--session=NEW", "--name=alice")
+	alice := w.start("claude", "--session=NEW_LOCAL", "--name=alice")
 	session, _ := alice.identity()
 	bob := w.start("claude", "--session="+session, "--name=bob")
 	bob.identity()
@@ -817,7 +817,7 @@ const maxStopBlocksForTest = 5 // collab.maxStopBlocks
 
 func TestTranscriptFeedsContextAndConfirmsDelivery(t *testing.T) {
 	w := newWorld(t)
-	alice := w.start("claude", "--session=NEW", "--name=alice")
+	alice := w.start("claude", "--session=NEW_LOCAL", "--name=alice")
 	session, _ := alice.identity()
 	bob := w.start("claude", "--session="+session, "--name=bob")
 	bob.identity()
@@ -883,7 +883,7 @@ func TestTranscriptFeedsContextAndConfirmsDelivery(t *testing.T) {
 
 func TestCodexRolloutDrivesStateAndPlanHold(t *testing.T) {
 	w := newWorld(t)
-	alice := w.start("claude", "--session=NEW", "--name=alice")
+	alice := w.start("claude", "--session=NEW_LOCAL", "--name=alice")
 	session, _ := alice.identity()
 	coder := w.start("codex", "--session="+session, "--name=coder")
 	coder.identity()
@@ -930,7 +930,7 @@ func TestCodexRolloutDrivesStateAndPlanHold(t *testing.T) {
 
 func TestGCRetentionCommandsReportAndNeverTouchLiveSessions(t *testing.T) {
 	w := newWorld(t)
-	alice := w.start("claude", "--session=NEW", "--name=alice")
+	alice := w.start("claude", "--session=NEW_LOCAL", "--name=alice")
 	session, _ := alice.identity()
 	out, errs, code := w.runRelay("gc", "--older-than=1d", "--compress", "--dry-run")
 	if code != 0 || !strings.Contains(out, "would remove 0 idle session(s)") || !strings.Contains(out, "would compress 0 log segment(s)") {

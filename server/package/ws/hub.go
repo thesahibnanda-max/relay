@@ -108,11 +108,7 @@ func (h hub) handshake(ctx context.Context, cn *conn) (session.JoinResult, bool)
 		SessionID: hello.Session, Name: hello.Name, Token: hello.Token, Tool: hello.Tool, Role: hello.Role,
 	})
 	if err != nil {
-		code := "join_failed"
-		if errors.Is(err, session.ErrAgentLive) {
-			code = "agent_live"
-		}
-		reject(ctx, cn, code, err.Error())
+		reject(ctx, cn, joinErrorCode(err), err.Error())
 		return session.JoinResult{}, false
 	}
 
@@ -357,6 +353,24 @@ func readEnvelope(ctx context.Context, ws *websocket.Conn) (Envelope, error) {
 func reject(ctx context.Context, cn *conn, code, message string) {
 	_ = cn.writeTyped(ctx, TypeError, Error{Code: code, Message: message})
 	cn.ws.Close(websocket.StatusPolicyViolation, code)
+}
+
+// joinErrorCode maps a Join failure to a wire error code, mirroring the
+// local daemon's proto.Code* constants so the CLI's existing friendly()
+// error messages work identically for global and local sessions.
+func joinErrorCode(err error) string {
+	switch {
+	case errors.Is(err, session.ErrAgentLive):
+		return "agent_live"
+	case errors.Is(err, session.ErrBadToken):
+		return "bad_token"
+	case errors.Is(err, session.ErrSessionNotFound):
+		return "session_not_found"
+	case errors.Is(err, session.ErrNameTaken):
+		return "name_taken"
+	default:
+		return "join_failed"
+	}
 }
 
 // parsePriority mirrors the local daemon's own string aliases for P0-P3 -

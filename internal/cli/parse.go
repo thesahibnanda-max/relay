@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/thesahibnanda-max/relay/internal/adaptor"
+	"github.com/thesahibnanda-max/relay/internal/globalid"
 	"github.com/thesahibnanda-max/relay/internal/ids"
 	"github.com/thesahibnanda-max/relay/internal/naming"
 	"github.com/thesahibnanda-max/relay/internal/proto"
@@ -35,6 +36,20 @@ const (
 	KindDoctor   // relay doctor: diagnose the installation
 )
 
+// SessionKind discriminates what kind of session --session named, since
+// "NEW" now means a global (server-mediated) session and "NEW_LOCAL" is the
+// escape hatch to today's exact local-daemon behavior - internal/cli's
+// connect() dispatches on this, not on the raw Session string.
+type SessionKind int
+
+const (
+	SessionKindNone       SessionKind = iota // no --session: solo
+	SessionKindLocalNew                      // --session=NEW_LOCAL
+	SessionKindLocalJoin                     // --session=<bare ULID>
+	SessionKindGlobalNew                     // --session=NEW
+	SessionKindGlobalJoin                    // --session=<ULID>@host[:port]
+)
+
 // Record says how much of the terminal stream is kept.
 type Record string
 
@@ -52,6 +67,9 @@ type Parsed struct {
 	Shim           bool   // invoked as a symlink named after the tool: no relay flags
 	Role           string // spec: builtin name or file path ("" = none)
 	Session        string // "" (solo), proto.SessionNew, or a normalised ULID
+	SessionKind    SessionKind
+	GlobalToken    globalid.Token // set when SessionKind == SessionKindGlobalJoin
+	Server         string         // --server=<host[:port]>: set when SessionKind == SessionKindGlobalNew (RELAY_SERVER env fallback is resolved in agentcmd.go, not here)
 	Name           string
 	ApproveInbound bool
 	Record         Record
@@ -134,7 +152,7 @@ func Parse(argv []string, f *adaptor.AdaptorFactory) (Parsed, error) {
 
 func parseAgent(tool string, args []string) (Parsed, error) {
 	p := Parsed{Kind: KindAgent, Tool: strings.ToLower(tool), Record: RecordRaw}
-	var haveRole, haveSession, haveName bool
+	var haveRole, haveSession, haveName, haveServer bool
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		if a == "--" {
@@ -171,13 +189,36 @@ func parseAgent(tool string, args []string) (Parsed, error) {
 			}
 			haveSession = true
 			switch {
+			case strings.EqualFold(v, "NEW_LOCAL"):
+				p.SessionKind = SessionKindLocalNew
+				p.Session = proto.SessionNew // the local daemon's own wire sentinel is unchanged
 			case strings.EqualFold(v, proto.SessionNew):
+				// "NEW" now means a fresh GLOBAL session - see --session=NEW_LOCAL
+				// for today's exact local-only behavior.
+				p.SessionKind = SessionKindGlobalNew
 				p.Session = proto.SessionNew
 			case ids.Valid(v):
+				p.SessionKind = SessionKindLocalJoin
 				p.Session = ids.Normalize(v)
 			default:
-				return p, usagef("--session must be NEW or a session ID (a 26-character ULID), got %q", v)
+				tok, ok := globalid.Parse(v)
+				if !ok {
+					return p, usagef("--session must be NEW, NEW_LOCAL, a session ID (a 26-character ULID), or a global session token (<ULID>@host[:port]), got %q", v)
+				}
+				p.SessionKind = SessionKindGlobalJoin
+				p.GlobalToken = tok
+				p.Session = tok.String()
 			}
+		case "server":
+			v, err := need()
+			if err != nil {
+				return p, err
+			}
+			if haveServer {
+				return p, usagef("--server given twice")
+			}
+			haveServer = true
+			p.Server = v
 		case "name":
 			v, err := need()
 			if err != nil {

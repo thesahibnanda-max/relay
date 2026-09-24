@@ -35,7 +35,7 @@ func runningClient(errw io.Writer) (*http.Client, bool) {
 		return nil, false
 	}
 	if _, err := daemon.Query(paths); err != nil {
-		fmt.Fprintln(errw, "relay: the daemon is not running, so there are no sessions or messages (start one with: relay claude --session=NEW)")
+		fmt.Fprintln(errw, "relay: the daemon is not running, so there are no sessions or messages (start one with: relay claude --session=NEW_LOCAL)")
 		return nil, false
 	}
 	return adminClient(paths), true

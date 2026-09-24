@@ -14,7 +14,6 @@ import (
 
 	"github.com/thesahibnanda-max/relay/internal/agent"
 	"github.com/thesahibnanda-max/relay/internal/bus"
-	"github.com/thesahibnanda-max/relay/internal/link"
 	"github.com/thesahibnanda-max/relay/internal/proto"
 	"github.com/thesahibnanda-max/relay/internal/state"
 )
@@ -22,6 +21,19 @@ import (
 // ChordPrefix is the reserved prefix key (Ctrl+\) for approving held messages
 // in-terminal; only active on agents started with --approve-inbound.
 const ChordPrefix = 0x1c
+
+// Link is what Session needs from the underlying connection to the message
+// backend - satisfied identically by *internal/link.Client (a local
+// unix-socket connection to the daemon) or *internal/globallink.Client (a
+// global, server-mediated connection). Session and HandleCtl never know or
+// care which one they're talking to; internal/cli's connect() is the only
+// place that decides.
+type Link interface {
+	Identity() proto.Welcome
+	Send(proto.Event)
+	Call(ctx context.Context, op string, args, out any) error
+	Close(exitCode int)
+}
 
 // Session is one agent's collaboration state.
 type Session struct {
@@ -31,7 +43,7 @@ type Session struct {
 	ident  proto.Welcome
 	tool   string
 	role   string
-	lk     *link.Client
+	lk     Link
 	handle atomic.Pointer[agent.Handle]
 
 	cancel context.CancelFunc
@@ -51,7 +63,10 @@ func New() *Session {
 }
 
 // Bind attaches the daemon link (nil for a solo agent, which has no peers).
-func (s *Session) Bind(lk *link.Client, tool, role string) {
+// A solo agent's lk must be a true nil interface, never a non-nil interface
+// wrapping a nil concrete pointer - see internal/cli/agentcmd.go's connect()
+// for how that's guaranteed.
+func (s *Session) Bind(lk Link, tool, role string) {
 	s.lk, s.tool, s.role = lk, tool, role
 	if lk != nil {
 		s.ident = lk.Identity()

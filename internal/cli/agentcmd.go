@@ -17,6 +17,7 @@ import (
 	"github.com/thesahibnanda-max/relay/internal/ctl"
 	"github.com/thesahibnanda-max/relay/internal/daemon"
 	"github.com/thesahibnanda-max/relay/internal/eventlog"
+	"github.com/thesahibnanda-max/relay/internal/globallink"
 	"github.com/thesahibnanda-max/relay/internal/intercept"
 	"github.com/thesahibnanda-max/relay/internal/link"
 	"github.com/thesahibnanda-max/relay/internal/proto"
@@ -54,7 +55,7 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, errw io.Writer) int {
 	explicit := p.Session != "" // the user asked for a specific session: never silently go solo
 
 	col := collab.New()
-	var lk *link.Client
+	var lk collab.Link
 	if perr == nil {
 		lk, err = connect(paths, p, role, a, col)
 	} else {
@@ -68,13 +69,21 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, errw io.Writer) int {
 		lk = nil // solo: carry on without the daemon; the tool must always run
 	}
 
-	if id := lk.Identity(); lk != nil && id.Session.Kind == "shared" {
-		who := fmt.Sprintf("you are %s (%s)", id.Agent.Name, id.Agent.Role)
-		if id.Resumed {
-			who = fmt.Sprintf("welcome back, %s (%s) — resumed", id.Agent.Name, id.Agent.Role)
+	// lk's nil-check MUST come before any method call: unlike *link.Client,
+	// a bare collab.Link interface value panics on a true nil receiver, it
+	// doesn't degrade gracefully - see connect()/connectLocal()/
+	// connectGlobal() for the discipline that guarantees lk is either a true
+	// nil interface or a genuinely connected client, never a typed-nil
+	// pointer boxed into the interface.
+	if lk != nil {
+		if id := lk.Identity(); id.Session.Kind == "shared" {
+			who := fmt.Sprintf("you are %s (%s)", id.Agent.Name, id.Agent.Role)
+			if id.Resumed {
+				who = fmt.Sprintf("welcome back, %s (%s) — resumed", id.Agent.Name, id.Agent.Role)
+			}
+			fmt.Fprintf(errw, "relay: session %s · %s\nrelay: others join with: relay <claude|codex> [role] --session=%s\n",
+				id.Session.ID, who, id.Session.ID)
 		}
-		fmt.Fprintf(errw, "relay: session %s · %s\nrelay: others join with: relay <claude|codex> [role] --session=%s\n",
-			id.Session.ID, who, id.Session.ID)
 	}
 
 	var lg *eventlog.Logger
@@ -120,20 +129,36 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, errw io.Writer) int {
 	col.Stop()
 	cleanup()      // remove the per-launch files before we say goodbye
 	lg.Close(code) // also emits the exit event to the daemon via the tee
-	lk.Close(code)
+	if lk != nil {
+		lk.Close(code)
+	}
 	if err != nil {
 		fmt.Fprintf(errw, "relay: %v\n", err)
 	}
 	return code
 }
 
-// connect makes sure a daemon is running and registers this agent with it.
+// connect is the one place that decides local vs global: everything above
+// it (runAgent, prepareLaunch, collab.Session, HandleCtl) only ever sees the
+// collab.Link interface and never knows which transport it got.
+func connect(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.Adaptor, col *collab.Session) (collab.Link, error) {
+	switch p.SessionKind {
+	case SessionKindGlobalNew, SessionKindGlobalJoin:
+		return connectGlobal(paths, p, role, a, col)
+	default:
+		return connectLocal(paths, p, role, a, col)
+	}
+}
+
+// connectLocal makes sure a daemon is running and registers this agent with
+// it - today's exact local-session behavior (--session=NEW_LOCAL, a bare
+// ULID, or solo), unchanged.
 //
 // Whenever --session=<id> --name=<x> names a specific, previously-used
-// identity, connect looks for a saved resume token first (see identity.go)
-// and tries that before ever falling back to an ordinary fresh
+// identity, connectLocal looks for a saved resume token first (see
+// identity.go) and tries that before ever falling back to an ordinary fresh
 // registration - see connectWithResume for the exact fallback rules.
-func connect(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.Adaptor, col *collab.Session) (*link.Client, error) {
+func connectLocal(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.Adaptor, col *collab.Session) (collab.Link, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, err
@@ -248,6 +273,120 @@ func connectRetryingAgentLive(ctx context.Context, opt link.Options) (*link.Clie
 	}
 }
 
+// connectGlobal dials the central server named in p.GlobalToken (joining an
+// existing global session) or p.Server/RELAY_SERVER (creating a fresh one
+// with --session=NEW), then follows the exact same resume-by-saved-identity
+// decision connectLocal makes - see connectGlobalWithResume - just pointed
+// at internal/globallink instead of internal/link. No daemon.Ensure/spawn
+// logic applies here at all: there is no local process to start.
+func connectGlobal(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.Adaptor, col *collab.Session) (collab.Link, error) {
+	hostPort, sessionValue, err := globalDialTarget(p)
+	if err != nil {
+		return nil, err
+	}
+	hello := proto.Hello{
+		Session: sessionValue, Name: p.Name, Tool: a.Name(), Role: role.Name,
+		ApproveInbound: p.ApproveInbound, // unsupported by a Phase 1 server; harmless to pass through
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	lk, err := connectGlobalWithResume(ctx, paths, p, hostPort, hello, col)
+	if err != nil {
+		return nil, err
+	}
+	if p.Name != "" {
+		id := lk.Identity()
+		saveIdentity(paths, globalIdentityKey(id.Session.ID), id.Agent.Name, id.Token, a.Name())
+	}
+	return lk, nil
+}
+
+// globalDialTarget resolves which server to dial and what Session value to
+// send in the Hello. A join token already carries the server address and
+// the exact session ULID to resume; a fresh session has neither, so it needs
+// --server or RELAY_SERVER to say where to create it - there is no implicit
+// default server, this is self-hosted infrastructure.
+func globalDialTarget(p Parsed) (hostPort, sessionValue string, err error) {
+	if p.SessionKind == SessionKindGlobalJoin {
+		return p.GlobalToken.HostPort, p.GlobalToken.ULID, nil
+	}
+	server := p.Server
+	if server == "" {
+		server = os.Getenv("RELAY_SERVER")
+	}
+	if server == "" {
+		return "", "", errors.New("--session=NEW needs a server to create the session on: pass --server=<host[:port]> or set RELAY_SERVER")
+	}
+	return server, proto.SessionNew, nil
+}
+
+// connectGlobalWithResume mirrors connectWithResume's exact decision shape,
+// retargeted at globallink. Resume-by-saved-identity only ever applies to
+// SessionKindGlobalJoin (an existing token to resume into) - a brand new
+// session (SessionKindGlobalNew) can have no prior saved identity, exactly
+// like local's --session=NEW/NEW_LOCAL never resumes either.
+func connectGlobalWithResume(ctx context.Context, paths relayhome.Paths, p Parsed, hostPort string, hello proto.Hello, col *collab.Session) (*globallink.Client, error) {
+	opt := globallink.Options{HostPort: hostPort, Hello: hello, OnDeliver: col.Deliver, OnNotice: col.Notice}
+	canResume := p.Name != "" && p.SessionKind == SessionKindGlobalJoin && !p.Fresh
+	if !canResume {
+		if p.Resume {
+			return nil, fmt.Errorf("--resume needs --session=<token> --name=<x> naming a specific, already-registered agent")
+		}
+		return globallink.Connect(ctx, opt)
+	}
+	key := p.GlobalToken.FileSafe()
+	saved, ok := loadIdentity(paths, key, p.Name)
+	if !ok {
+		if p.Resume {
+			return nil, fmt.Errorf("no saved identity for %q in session %s (drop --resume to register fresh automatically, or add --fresh to do that on purpose)", p.Name, p.Session)
+		}
+		return globallink.Connect(ctx, opt)
+	}
+
+	resumeOpt := opt
+	resumeOpt.Hello.Token = saved.Token
+	lk, err := connectGlobalRetryingAgentLive(ctx, resumeOpt)
+	if err == nil {
+		return lk, nil
+	}
+	var pe *proto.Error
+	if errors.As(err, &pe) {
+		switch pe.Code {
+		case proto.CodeBadToken, proto.CodeSessionNotFound, proto.CodeSessionEnded:
+			deleteIdentity(paths, key, p.Name)
+			if p.Resume {
+				return nil, err
+			}
+			return globallink.Connect(ctx, opt)
+		}
+	}
+	return nil, err
+}
+
+// connectGlobalRetryingAgentLive mirrors connectRetryingAgentLive exactly,
+// retargeted at globallink - the old process may have crashed only moments
+// ago and the server hasn't yet noticed the connection is gone.
+func connectGlobalRetryingAgentLive(ctx context.Context, opt globallink.Options) (*globallink.Client, error) {
+	delays := []time.Duration{200 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second}
+	for attempt := 0; ; attempt++ {
+		lk, err := globallink.Connect(ctx, opt)
+		if err == nil {
+			return lk, nil
+		}
+		var pe *proto.Error
+		if !errors.As(err, &pe) || pe.Code != proto.CodeAgentLive || attempt >= len(delays) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-time.After(delays[attempt]):
+		}
+	}
+}
+
 // friendly turns connection failures into something a user can act on.
 func friendly(err error, p Parsed) string {
 	var pe *proto.Error
@@ -271,6 +410,9 @@ func friendly(err error, p Parsed) string {
 	if errors.Is(err, daemon.ErrVersionMismatch) {
 		return err.Error()
 	}
+	if p.SessionKind == SessionKindGlobalNew || p.SessionKind == SessionKindGlobalJoin {
+		return fmt.Sprintf("cannot reach the global session server: %v (use --session=NEW_LOCAL for a local-only session instead)", err)
+	}
 	hint := "~/.relay/log/relayd.log"
 	if paths, perr := relayhome.Resolve(); perr == nil {
 		hint = paths.DaemonLog()
@@ -283,14 +425,21 @@ func friendly(err error, p Parsed) string {
 // agent's run directory. It never fails the launch: on any problem the tool
 // simply runs as the user typed it. The returned cleanup is idempotent and
 // removes everything created here.
-func prepareLaunch(a adaptor.Adaptor, p Parsed, role roles.Role, lk *link.Client, shared bool,
+func prepareLaunch(a adaptor.Adaptor, p Parsed, role roles.Role, lk collab.Link, shared bool,
 	paths relayhome.Paths, homeOK bool, col *collab.Session, errw io.Writer) (args []string, attach bool, cleanup func()) {
 	args, cleanup = p.ToolArgs, func() {}
 	if !shared && p.Role == "" {
 		return // nothing to add: a plain solo run stays byte-for-byte what the user typed
 	}
 
-	id := lk.Identity()
+	// lk can be nil here: e.g. a role without a session (p.Role != "" alone
+	// satisfies the guard above even when shared is false) - a true nil
+	// collab.Link interface panics on Identity() unlike *link.Client's old
+	// nil-receiver safety, so this check is required, not defensive fluff.
+	var id proto.Welcome
+	if lk != nil {
+		id = lk.Identity()
+	}
 	spec := adaptor.LaunchSpec{AgentName: id.Agent.Name, Session: id.Session.ID, WithMCP: shared, WithHooks: shared, UserArgs: p.ToolArgs}
 	spec.Briefing = collab.Briefing(id, role, shared)
 
