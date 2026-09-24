@@ -72,7 +72,7 @@ func runLs(p Parsed, out, errw io.Writer) int {
 // RenderSessions prints sessions with their agents.
 func RenderSessions(w io.Writer, sessions []proto.SessionInfo, now time.Time) {
 	if len(sessions) == 0 {
-		fmt.Fprintln(w, "No sessions. Start one with: relay claude --session=NEW")
+		fmt.Fprintln(w, "No sessions. Start one with: relay claude --session=NEW_LOCAL")
 		return
 	}
 	for i, s := range sessions {

@@ -37,16 +37,39 @@ type Agent struct {
 	UpdatedAt time.Time      `bson:"updated_at"`
 }
 
-// Message is one inter-agent message. This is the bare v1 shape - a single
-// Delivered flag, not the local daemon's full held/queued/dispatched/...
-// state machine (see the plan's explicitly-deferred follow-up scope).
+// Message delivery states - Phase 1's forward-only, 3-state model (queued ->
+// dispatched -> acknowledged). This is intentionally smaller than the local
+// daemon's 9-state machine (held/rejected/expired/undeliverable and the
+// injected state are all deferred, see the project plan's Phase 2 table),
+// but it is at-least-once and idempotent: re-asserting the current state is
+// always safe, and PendingFor replays anything still short of acknowledged
+// on every reconnect.
+const (
+	MessageStateQueued       = "queued"
+	MessageStateDispatched   = "dispatched"
+	MessageStateAcknowledged = "acknowledged"
+)
+
+// DefaultMessageKind is used when a sender doesn't specify one - Phase 1
+// stores Kind/Priority/Hops but doesn't yet enforce anything based on them
+// (see the project plan's Phase 2 table for what reads these fields next).
+const (
+	DefaultMessageKind     = "task"
+	DefaultMessagePriority = 2 // mirrors the local daemon's P2 "normal"
+)
+
+// Message is one inter-agent message.
 type Message struct {
 	ID          string         `bson:"_id"`
 	SessionID   string         `bson:"session_id"`
 	FromAgentID string         `bson:"from_agent_id"`
 	ToAgentID   string         `bson:"to_agent_id"`
+	Kind        string         `bson:"kind"`
+	Priority    int            `bson:"priority"`
+	ReplyTo     string         `bson:"reply_to,omitempty"`
 	Body        string         `bson:"body"`
-	Delivered   bool           `bson:"delivered"`
+	Hops        int            `bson:"hops"`
+	State       string         `bson:"state"`
 	Metadata    map[string]any `bson:"metadata"`
 	CreatedAt   time.Time      `bson:"created_at"`
 	UpdatedAt   time.Time      `bson:"updated_at"`

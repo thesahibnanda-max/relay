@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/thesahibnanda-max/relay/server/package/database/mongodb"
 	"github.com/thesahibnanda-max/relay/server/package/session"
@@ -18,11 +19,35 @@ func (fakeSessionService) Join(ctx context.Context, req session.JoinRequest) (se
 	return session.JoinResult{}, nil
 }
 
-func (fakeSessionService) Send(ctx context.Context, sessionID, fromAgentID, toName, body string) (string, string, error) {
-	return "", "", nil
+func (fakeSessionService) Disconnect(ctx context.Context, sessionID, agentID string) error {
+	return nil
+}
+
+func (fakeSessionService) Send(ctx context.Context, sessionID, fromAgentID string, req session.SendRequest) (session.SendOutcome, error) {
+	return session.SendOutcome{}, nil
 }
 
 func (fakeSessionService) ListAgents(ctx context.Context, sessionID string) ([]mongodb.Agent, error) {
+	return nil, nil
+}
+
+func (fakeSessionService) PendingFor(ctx context.Context, sessionID, agentID string) ([]mongodb.Message, error) {
+	return nil, nil
+}
+
+func (fakeSessionService) MarkDispatched(ctx context.Context, sessionID, messageID string) error {
+	return nil
+}
+
+func (fakeSessionService) Acknowledge(ctx context.Context, sessionID, agentID, messageID string) error {
+	return nil
+}
+
+func (fakeSessionService) Wait(ctx context.Context, sessionID, agentID, messageID string, timeout time.Duration) (session.WaitOutcome, error) {
+	return session.WaitOutcome{}, nil
+}
+
+func (fakeSessionService) Context(ctx context.Context, sessionID, agentID, forAgentName string, limit int) ([]mongodb.Message, error) {
 	return nil, nil
 }
 

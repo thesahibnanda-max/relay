@@ -35,6 +35,16 @@ func identityPath(paths relayhome.Paths, sessionID, name string) string {
 	return filepath.Join(paths.IdentitiesDir(), sessionID+"__"+strings.ToLower(name)+".json")
 }
 
+// globalIdentityKey makes a global session's shareable token
+// ("<ulid>@host:port") safe to use as (part of) identityPath's filename -
+// ':' is reserved in a Windows filename. A bare local ULID never contains
+// ':', so this is a no-op for local sessions - callers may apply it
+// unconditionally. Equivalent to globalid.Token.FileSafe() for callers that
+// already have a parsed Token rather than the plain string.
+func globalIdentityKey(sessionID string) string {
+	return strings.ReplaceAll(sessionID, ":", "%3A")
+}
+
 // saveIdentity writes (session, name)'s resume token, atomically (a temp
 // file then a rename) so a crash mid-write never leaves the next process a
 // corrupt file to trip over. Best-effort throughout: resume is a

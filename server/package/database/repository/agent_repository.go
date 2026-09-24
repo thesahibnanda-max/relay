@@ -24,6 +24,12 @@ type AgentRepository interface {
 	GetByName(ctx context.Context, mongoURL, sessionID, name string) (agent mongodb.Agent, found bool, err error)
 	ListBySession(ctx context.Context, mongoURL, sessionID string) ([]mongodb.Agent, error)
 	SetStatus(ctx context.Context, mongoURL, agentID, status string) error
+	// MarkAllDisconnected force-marks every currently-"connected" agent on
+	// this shard as "disconnected" - called once per shard on server
+	// startup, mirroring the local daemon's own rule: a previous process
+	// owned any connection that was live before restart, so it's definitely
+	// gone now.
+	MarkAllDisconnected(ctx context.Context, mongoURL string) error
 }
 
 type agentRepository struct {
@@ -125,5 +131,16 @@ func (r agentRepository) SetStatus(ctx context.Context, mongoURL, agentID, statu
 	}
 	update := bson.M{"$set": bson.M{"status": status, "updated_at": time.Now().UTC()}}
 	_, err = db.Collection(mongodb.CollectionAgents).UpdateOne(ctx, byID(agentID), update)
+	return err
+}
+
+func (r agentRepository) MarkAllDisconnected(ctx context.Context, mongoURL string) error {
+	db, err := r.pool.Database(mongoURL)
+	if err != nil {
+		return err
+	}
+	filter := bson.M{"status": "connected"}
+	update := bson.M{"$set": bson.M{"status": "disconnected", "updated_at": time.Now().UTC()}}
+	_, err = db.Collection(mongodb.CollectionAgents).UpdateMany(ctx, filter, update)
 	return err
 }

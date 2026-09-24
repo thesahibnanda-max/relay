@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/thesahibnanda-max/relay/internal/adaptor"
+	"github.com/thesahibnanda-max/relay/internal/globalid"
 	"github.com/thesahibnanda-max/relay/internal/ids"
 	"github.com/thesahibnanda-max/relay/internal/proto"
 )
@@ -100,6 +101,52 @@ func TestResumeAndFreshFlags(t *testing.T) {
 	}
 }
 
+func TestGlobalSessionParsing(t *testing.T) {
+	// --session=NEW now means a fresh GLOBAL session.
+	p, err := parse("claude", "--session=NEW", "--server=example.com:5555", "--name=alice")
+	if err != nil || p.SessionKind != SessionKindGlobalNew || p.Session != proto.SessionNew || p.Server != "example.com:5555" {
+		t.Fatalf("%+v %v", p, err)
+	}
+
+	// --session=NEW_LOCAL is the escape hatch to today's exact local behavior.
+	p, err = parse("claude", "--session=NEW_LOCAL", "--name=alice")
+	if err != nil || p.SessionKind != SessionKindLocalNew || p.Session != proto.SessionNew {
+		t.Fatalf("%+v %v", p, err)
+	}
+	p, err = parse("claude", "--session=new_local", "--name=alice") // case-insensitive, like NEW
+	if err != nil || p.SessionKind != SessionKindLocalNew {
+		t.Fatalf("%+v %v", p, err)
+	}
+
+	// a bare ULID still means a local session (backward compatible).
+	id := ids.New()
+	p, err = parse("claude", "--session="+id, "--name=alice")
+	if err != nil || p.SessionKind != SessionKindLocalJoin || p.Session != id {
+		t.Fatalf("%+v %v", p, err)
+	}
+
+	// <ULID>@host[:port] is a global join token - the shareable string the
+	// "others join with" banner prints.
+	token := id + "@203.0.113.9:5555"
+	p, err = parse("claude", "--session="+token, "--name=bob")
+	if err != nil || p.SessionKind != SessionKindGlobalJoin {
+		t.Fatalf("%+v %v", p, err)
+	}
+	want := globalid.Token{ULID: id, HostPort: "203.0.113.9:5555"}
+	if p.GlobalToken != want {
+		t.Errorf("GlobalToken = %+v, want %+v", p.GlobalToken, want)
+	}
+	if p.Session != token {
+		t.Errorf("Session = %q, want %q", p.Session, token)
+	}
+
+	// a join token without an explicit port fills in the default.
+	p, err = parse("claude", "--session="+id+"@example.com", "--name=bob")
+	if err != nil || p.GlobalToken.HostPort != "example.com:5555" {
+		t.Fatalf("%+v %v", p, err)
+	}
+}
+
 func TestUsageErrors(t *testing.T) {
 	id := ids.New()
 	cases := map[string][]string{
@@ -120,6 +167,7 @@ func TestUsageErrors(t *testing.T) {
 		"resume and fresh":        {"claude", "--session=NEW", "--name=a1", "--resume", "--fresh"},
 		"resume without name":     {"claude", "--session=NEW", "--resume"},
 		"fresh without name":      {"claude", "--session=NEW", "--fresh"},
+		"server given twice":      {"claude", "--session=NEW", "--server=a", "--server=b"},
 	}
 	for name, args := range cases {
 		_, err := parse(args...)
