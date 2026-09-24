@@ -282,3 +282,37 @@ func TestMessagingCommands(t *testing.T) {
 		}
 	}
 }
+
+// TestApproveAcceptsAGlobalSessionToken proves relay approve can name a
+// global session's shareable token (not just a bare local ULID), and that
+// --name is required whenever it does - there is no admin API to browse an
+// arbitrary agent's held mail on a networked server, only a specific named
+// agent's own (see runApproveGlobal's doc comment).
+func TestApproveAcceptsAGlobalSessionToken(t *testing.T) {
+	id := ids.New()
+	token := id + "@203.0.113.9:5555"
+
+	p, err := parse("approve", "--session="+token, "--name=bob")
+	if err != nil || p.Kind != KindApprove || p.SessionKind != SessionKindGlobalJoin || p.Name != "bob" {
+		t.Fatalf("%+v %v", p, err)
+	}
+	want := globalid.Token{ULID: id, HostPort: "203.0.113.9:5555"}
+	if p.GlobalToken != want {
+		t.Errorf("GlobalToken = %+v, want %+v", p.GlobalToken, want)
+	}
+
+	if _, err := parse("approve", "--session="+token); err == nil {
+		t.Error("--session=<global token> without --name should be rejected")
+	}
+
+	p, err = parse("approve", "accept", "all", "--session="+token, "--name=bob")
+	if err != nil || p.Sub != "accept" || len(p.Words) != 1 || p.Words[0] != "all" {
+		t.Fatalf("%+v %v", p, err)
+	}
+
+	// a bare ULID is still a local session, --name optional, exactly as before.
+	p, err = parse("approve", "--session="+id)
+	if err != nil || p.SessionKind != SessionKindLocalJoin || p.Target != id {
+		t.Fatalf("%+v %v", p, err)
+	}
+}

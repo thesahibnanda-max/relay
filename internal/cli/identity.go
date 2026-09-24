@@ -24,6 +24,16 @@ type savedIdentity struct {
 	Token   string    `json:"token"`
 	Tool    string    `json:"tool"`
 	SavedAt time.Time `json:"saved_at"`
+	// Role policy at the time this identity was saved - only ever meaningful
+	// for a global session: a real agent process always resolves its role
+	// fresh on every real reconnect (see connectGlobal), so these fields
+	// exist purely so relay approve's short-lived admin connection (which
+	// runs no adaptor and has no role of its own to resolve) can present the
+	// same policy the real agent already has, instead of accidentally
+	// resetting it to false on every use.
+	ApproveInbound bool `json:"approve_inbound,omitempty"`
+	CanInterrupt   bool `json:"can_interrupt,omitempty"`
+	CanBroadcast   bool `json:"can_broadcast,omitempty"`
 }
 
 const identityFileVersion = 1
@@ -51,13 +61,23 @@ func globalIdentityKey(sessionID string) string {
 // convenience, never a hard requirement, so a write failure here must never
 // fail the caller's connection that just succeeded.
 func saveIdentity(paths relayhome.Paths, sessionID, name, token, tool string) {
+	saveIdentityWithPolicy(paths, sessionID, name, token, tool, false, false, false)
+}
+
+// saveIdentityWithPolicy is saveIdentity plus the role policy in effect when
+// it was saved - what connectGlobal uses, so relay approve's admin
+// connection (see runApproveGlobal) can read it back later.
+func saveIdentityWithPolicy(paths relayhome.Paths, sessionID, name, token, tool string, approveInbound, canInterrupt, canBroadcast bool) {
 	if token == "" || sessionID == "" || name == "" {
 		return
 	}
 	if err := os.MkdirAll(paths.IdentitiesDir(), 0o700); err != nil {
 		return
 	}
-	b, err := json.Marshal(savedIdentity{V: identityFileVersion, Session: sessionID, Name: name, Token: token, Tool: tool, SavedAt: time.Now()})
+	b, err := json.Marshal(savedIdentity{
+		V: identityFileVersion, Session: sessionID, Name: name, Token: token, Tool: tool, SavedAt: time.Now(),
+		ApproveInbound: approveInbound, CanInterrupt: canInterrupt, CanBroadcast: canBroadcast,
+	})
 	if err != nil {
 		return
 	}
