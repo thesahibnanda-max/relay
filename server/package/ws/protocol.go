@@ -131,10 +131,16 @@ type SendArgs struct {
 	ReplyTo  string `json:"reply_to,omitempty"`
 }
 
-// SendResult is OpSend's reply.
+// SendResult is OpSend's reply. Kind/Priority echo back the resolved
+// (post-default) values so a caller can tell what was actually stored, not
+// just what it asked for - found missing during the first live two-terminal
+// verification (the model correctly noticed an empty kind/priority where it
+// expected task/normal defaults).
 type SendResult struct {
-	ID    string `json:"id"`
-	State string `json:"state"`
+	ID       string `json:"id"`
+	State    string `json:"state"`
+	Kind     string `json:"kind"`
+	Priority int    `json:"priority"`
 }
 
 // ListAgentsResult is OpListAgents' reply (the request payload is empty).

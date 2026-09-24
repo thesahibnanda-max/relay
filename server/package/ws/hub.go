@@ -208,7 +208,7 @@ func (h hub) handleSend(ctx context.Context, cn *conn, me session.JoinResult, rp
 		h.replyError(ctx, cn, rpc.ID, "send_failed", err.Error())
 		return
 	}
-	h.replyRPC(ctx, cn, rpc.ID, SendResult{ID: outcome.MessageID, State: outcome.State})
+	h.replyRPC(ctx, cn, rpc.ID, SendResult{ID: outcome.MessageID, State: outcome.State, Kind: outcome.Kind, Priority: outcome.Priority})
 
 	if target, online := h.reg.get(outcome.TargetAgentID); online {
 		view := MessageView{

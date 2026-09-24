@@ -121,7 +121,7 @@ func (f *fakeServer) serve(w http.ResponseWriter, r *http.Request) {
 func (f *fakeServer) handleRPC(rpc rpcFrame) rpcResultFrame {
 	switch rpc.Op {
 	case opSend:
-		res, _ := json.Marshal(sendResult{ID: "msg-1", State: "queued"})
+		res, _ := json.Marshal(sendResult{ID: "msg-1", State: "queued", Kind: "task", Priority: 2})
 		return rpcResultFrame{ID: rpc.ID, OK: true, Result: res}
 	case opListAgents:
 		res, _ := json.Marshal(listAgentsResult{Agents: []agentInfo{
@@ -202,6 +202,12 @@ func TestCall_RoundTripsThroughEachSupportedOp(t *testing.T) {
 	}
 	if sendResult.ID != "msg-1" || sendResult.State != "queued" || len(sendResult.To) != 1 || sendResult.To[0] != "bob" {
 		t.Errorf("unexpected send result: %+v", sendResult)
+	}
+	// Found missing during the first live two-terminal verification: the
+	// model correctly noticed an empty kind/priority where it expected the
+	// resolved defaults echoed back.
+	if sendResult.Kind != "task" || sendResult.Priority != "normal" {
+		t.Errorf("expected resolved kind/priority to be echoed back, got kind=%q priority=%q", sendResult.Kind, sendResult.Priority)
 	}
 
 	var listResult proto.ListAgentsResult
