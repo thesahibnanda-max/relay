@@ -105,8 +105,10 @@ type sendArgs struct {
 }
 
 type sendResult struct {
-	ID    string `json:"id"`
-	State string `json:"state"`
+	ID       string `json:"id"`
+	State    string `json:"state"`
+	Kind     string `json:"kind"`
+	Priority int    `json:"priority"`
 }
 
 type listAgentsResult struct {

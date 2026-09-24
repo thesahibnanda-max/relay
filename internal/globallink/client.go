@@ -416,7 +416,10 @@ func (c *Client) callSend(ctx context.Context, args, out any) error {
 		if !ok {
 			return fmt.Errorf("globallink: unexpected out type %T for send", out)
 		}
-		*res = proto.SendResult{ID: r.ID, To: []string{a.To}, State: r.State}
+		*res = proto.SendResult{
+			ID: r.ID, To: []string{a.To}, State: r.State,
+			Kind: r.Kind, Priority: proto.PriorityName(r.Priority),
+		}
 	}
 	return nil
 }
