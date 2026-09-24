@@ -28,6 +28,12 @@ import (
 	"github.com/thesahibnanda-max/relay/server/package/ws"
 )
 
+// testConfig builds a config.Config the same way production does - through
+// config.New()'s real env-driven defaulting - rather than hand-constructing
+// one, so every resource/policy knob (rate limits, TTL, sweep interval...)
+// gets its real default instead of silently zero-valuing to "reject
+// everything" (a zero RPCRateLimit trips "too many requests" on the very
+// first RPC of any test, found the hard way running this suite for real).
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
 	dsn := os.Getenv("TEST_SQL_DSN")
@@ -35,7 +41,14 @@ func testConfig(t *testing.T) config.Config {
 	if dsn == "" || mongoURLs == "" {
 		t.Skip("set TEST_SQL_DSN and TEST_MONGO_URLS (see server/.env.example) against a running server/docker-compose.yml to run this test")
 	}
-	return config.Config{PORT: 0, PostgreSQLDSN: dsn, MongoURLs: strings.Split(mongoURLs, ",")}
+	t.Setenv("SQL_DSN", dsn)
+	t.Setenv("MONGO_URLS", mongoURLs)
+	t.Setenv("PORT", "0")
+	cfg, err := config.New()
+	if err != nil {
+		t.Fatalf("config.New: %v", err)
+	}
+	return cfg
 }
 
 func TestPostgresAutoMigrationCreatesTables(t *testing.T) {
