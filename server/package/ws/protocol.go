@@ -4,23 +4,37 @@
 // connection hub, and the HTTP/CORS wiring that accepts connections.
 package ws
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"time"
+)
 
 // Version is this protocol's own version number - independent of the local
 // daemon's proto.Version, since this is a different wire format entirely.
 const Version = 1
 
 // Envelope frame types - one JSON envelope per WebSocket text frame,
-// mirroring the shape (not the code) the local daemon already uses.
+// mirroring the shape (not the code) the local daemon already uses. rpc/
+// rpc_result is a single generic request/reply pair covering every RPC
+// operation (see the Op constants below) - deliberately consolidated from
+// four bespoke pairs so a Phase 2 operation (approve/reject/...) can be
+// added later as just a new Op string, with zero new frame types.
 const (
-	TypeHello      = "hello"
-	TypeWelcome    = "welcome"
-	TypeSend       = "send"
-	TypeSendResult = "send_result"
-	TypeListAgents = "list_agents"
-	TypeAgentsList = "agents_list"
-	TypeDeliver    = "deliver"
-	TypeError      = "error"
+	TypeHello     = "hello"
+	TypeWelcome   = "welcome"
+	TypeRPC       = "rpc"
+	TypeRPCResult = "rpc_result"
+	TypeDeliver   = "deliver"
+	TypeAck       = "ack" // client -> server: confirms a deliver was handled
+	TypeError     = "error"
+)
+
+// RPC operation names (the Op field of RPC/RPCResult).
+const (
+	OpSend       = "send"
+	OpListAgents = "list_agents"
+	OpWait       = "wait"
+	OpContext    = "get_context"
 )
 
 // Envelope is the one shape every frame takes.
@@ -56,18 +70,74 @@ type Welcome struct {
 	Resumed   bool   `json:"resumed"`
 }
 
-// Send asks the server to hand Body to the agent named To in the same session.
-type Send struct {
-	To   string `json:"to"`
-	Body string `json:"body"`
+// RPC is a request frame; ID is chosen by the caller and echoed back
+// verbatim in the matching RPCResult so a client with more than one
+// request in flight (e.g. a slow "wait" alongside a "list_agents") can
+// route replies correctly.
+type RPC struct {
+	ID   string          `json:"id"`
+	Op   string          `json:"op"`
+	Args json.RawMessage `json:"args,omitempty"`
 }
 
-// SendResult is Send's synchronous reply.
-type SendResult struct {
+// RPCResult is an RPC's reply.
+type RPCResult struct {
+	ID     string          `json:"id"`
+	OK     bool            `json:"ok"`
+	Result json.RawMessage `json:"result,omitempty"`
+	Error  *Error          `json:"error,omitempty"`
+}
+
+// MessageView is the shape a message takes over the wire, in a deliver push
+// or a wait/get_context result. It carries Kind/Priority/ReplyTo/Hops/State
+// even though Phase 1 doesn't enforce any of them yet - see the project
+// plan's Phase 2 table for what reads these fields next. From/To are
+// display names (not ids), matching the local daemon's own Deliver
+// convention.
+type MessageView struct {
+	ID        string    `json:"id"`
+	From      string    `json:"from"`
+	FromID    string    `json:"from_id"`
+	To        string    `json:"to"`
+	ToID      string    `json:"to_id"`
+	Kind      string    `json:"kind"`
+	Priority  int       `json:"priority"`
+	ReplyTo   string    `json:"reply_to,omitempty"`
+	Body      string    `json:"body"`
+	Hops      int       `json:"hops,omitempty"`
+	State     string    `json:"state,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Deliver is pushed to a connected agent, either live (another agent just
+// sent it something) or replayed at connect/resume time (it was sent while
+// this agent was offline).
+type Deliver struct {
+	Message MessageView `json:"message"`
+}
+
+// Ack is sent by the client back to the server once a Deliver has been
+// handled, advancing the message to mongodb.MessageStateAcknowledged.
+type Ack struct {
 	ID string `json:"id"`
 }
 
-// ListAgentsResult answers a (payload-less) ListAgents request.
+// SendArgs is the OpSend request payload.
+type SendArgs struct {
+	To       string `json:"to"`
+	Body     string `json:"body"`
+	Kind     string `json:"kind,omitempty"`
+	Priority string `json:"priority,omitempty"` // parsed/defaulted server-side; unenforced in Phase 1
+	ReplyTo  string `json:"reply_to,omitempty"`
+}
+
+// SendResult is OpSend's reply.
+type SendResult struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+}
+
+// ListAgentsResult is OpListAgents' reply (the request payload is empty).
 type ListAgentsResult struct {
 	Agents []AgentInfo `json:"agents"`
 }
@@ -81,15 +151,37 @@ type AgentInfo struct {
 	Status string `json:"status"`
 }
 
-// Deliver is pushed to a connected agent when another agent sends it a message.
-type Deliver struct {
-	ID   string `json:"id"`
-	From string `json:"from"`
-	Body string `json:"body"`
+// WaitArgs is the OpWait request payload.
+type WaitArgs struct {
+	ID       string  `json:"id"`
+	TimeoutS float64 `json:"timeout_s"`
 }
 
-// Error is sent before closing a connection that violated the protocol or
-// whose request failed.
+// WaitResult is OpWait's reply.
+type WaitResult struct {
+	ID       string       `json:"id"`
+	State    string       `json:"state"`
+	Reply    *MessageView `json:"reply,omitempty"`
+	TimedOut bool         `json:"timed_out"`
+}
+
+// ContextArgs is the OpContext request payload. Unlike the local daemon's
+// richer Mode/Query/Since options, Phase 1's get_context is always "recent
+// message history involving this agent" - the server never receives raw
+// terminal transcripts to search over.
+type ContextArgs struct {
+	Agent string `json:"agent"`
+	N     int    `json:"n,omitempty"`
+}
+
+// GetContextResult is OpContext's reply.
+type GetContextResult struct {
+	Agent    string        `json:"agent"`
+	Messages []MessageView `json:"messages"`
+}
+
+// Error is sent before closing a connection that violated the protocol, or
+// as an RPCResult's Error field when an individual RPC fails.
 type Error struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
