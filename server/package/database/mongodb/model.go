@@ -25,37 +25,44 @@ type Session struct {
 
 // Agent is one agent's document within a session.
 type Agent struct {
-	ID        string         `bson:"_id"`
-	SessionID string         `bson:"session_id"`
-	Name      string         `bson:"name"`
-	Tool      string         `bson:"tool"`
-	Role      string         `bson:"role"`
-	Status    string         `bson:"status"` // "connected" | "disconnected"
-	TokenHash string         `bson:"token_hash"`
-	Metadata  map[string]any `bson:"metadata"`
-	CreatedAt time.Time      `bson:"created_at"`
-	UpdatedAt time.Time      `bson:"updated_at"`
+	ID             string         `bson:"_id"`
+	SessionID      string         `bson:"session_id"`
+	Name           string         `bson:"name"`
+	Tool           string         `bson:"tool"`
+	Role           string         `bson:"role"`
+	Status         string         `bson:"status"` // "connected" | "disconnected" | "exited"
+	TokenHash      string         `bson:"token_hash"`
+	ApproveInbound bool           `bson:"approve_inbound"`
+	CanInterrupt   bool           `bson:"can_interrupt"`
+	CanBroadcast   bool           `bson:"can_broadcast"`
+	Metadata       map[string]any `bson:"metadata"`
+	CreatedAt      time.Time      `bson:"created_at"`
+	UpdatedAt      time.Time      `bson:"updated_at"`
 }
 
-// Message delivery states - Phase 1's forward-only, 3-state model (queued ->
-// dispatched -> acknowledged). This is intentionally smaller than the local
-// daemon's 9-state machine (held/rejected/expired/undeliverable and the
-// injected state are all deferred, see the project plan's Phase 2 table),
-// but it is at-least-once and idempotent: re-asserting the current state is
-// always safe, and PendingFor replays anything still short of acknowledged
-// on every reconnect.
+// Message delivery states - the same forward-only, branching state machine
+// the local daemon uses (see repository.nextStates for the transition
+// table). held is the only state a message can start in (--approve-inbound,
+// or a reply chain past the hop limit); everything else starts queued.
+// rejected/expired/undeliverable are terminal - a human said no, the TTL ran
+// out, or the recipient is gone for good.
 const (
-	MessageStateQueued       = "queued"
-	MessageStateDispatched   = "dispatched"
-	MessageStateAcknowledged = "acknowledged"
+	MessageStateHeld          = "held"
+	MessageStateQueued        = "queued"
+	MessageStateDispatched    = "dispatched"
+	MessageStateInjected      = "injected"
+	MessageStateAcknowledged  = "acknowledged"
+	MessageStateDone          = "done"
+	MessageStateRejected      = "rejected"
+	MessageStateExpired       = "expired"
+	MessageStateUndeliverable = "undeliverable"
 )
 
-// DefaultMessageKind is used when a sender doesn't specify one - Phase 1
-// stores Kind/Priority/Hops but doesn't yet enforce anything based on them
-// (see the project plan's Phase 2 table for what reads these fields next).
+// DefaultMessageKind/DefaultMessagePriority are used when a sender doesn't
+// specify one - "task"/P2 "normal", mirroring the local daemon exactly.
 const (
 	DefaultMessageKind     = "task"
-	DefaultMessagePriority = 2 // mirrors the local daemon's P2 "normal"
+	DefaultMessagePriority = 2
 )
 
 // Message is one inter-agent message.
@@ -66,10 +73,13 @@ type Message struct {
 	ToAgentID   string         `bson:"to_agent_id"`
 	Kind        string         `bson:"kind"`
 	Priority    int            `bson:"priority"`
+	Thread      string         `bson:"thread"` // constant across a whole reply chain; a root message's own id
 	ReplyTo     string         `bson:"reply_to,omitempty"`
 	Body        string         `bson:"body"`
 	Hops        int            `bson:"hops"`
 	State       string         `bson:"state"`
+	Detail      string         `bson:"detail,omitempty"` // human-readable "why held" / "why undeliverable" etc.
+	ExpiresAt   time.Time      `bson:"expires_at"`       // CreatedAt + config.Config.MessageTTL
 	Metadata    map[string]any `bson:"metadata"`
 	CreatedAt   time.Time      `bson:"created_at"`
 	UpdatedAt   time.Time      `bson:"updated_at"`

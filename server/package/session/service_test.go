@@ -67,6 +67,8 @@ func (f *fakeAgents) EnsureCollection(ctx context.Context, mongoURL string) erro
 func (f *fakeAgents) Create(ctx context.Context, mongoURL string, a mongodb.Agent) (mongodb.Agent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	now := time.Now().UTC()
+	a.CreatedAt, a.UpdatedAt = now, now
 	f.agents[a.ID] = a
 	return a, nil
 }
@@ -109,6 +111,7 @@ func (f *fakeAgents) SetStatus(ctx context.Context, mongoURL, agentID, status st
 		return nil
 	}
 	a.Status = status
+	a.UpdatedAt = time.Now().UTC()
 	f.agents[agentID] = a
 	return nil
 }
@@ -123,6 +126,20 @@ func (f *fakeAgents) MarkAllDisconnected(ctx context.Context, mongoURL string) e
 		}
 	}
 	return nil
+}
+
+func (f *fakeAgents) ReapGone(ctx context.Context, mongoURL string, cutoff time.Time) ([]mongodb.Agent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var gone []mongodb.Agent
+	for id, a := range f.agents {
+		if a.Status == "disconnected" && !a.UpdatedAt.After(cutoff) {
+			a.Status = "exited"
+			f.agents[id] = a
+			gone = append(gone, a)
+		}
+	}
+	return gone, nil
 }
 
 var _ repository.AgentRepository = (*fakeAgents)(nil)
@@ -162,30 +179,133 @@ func (f *fakeMessages) Get(ctx context.Context, mongoURL, messageID string) (mon
 	return m, ok, nil
 }
 
-func (f *fakeMessages) SetState(ctx context.Context, mongoURL, messageID, state string) error {
+// fakeMessages.SetState enforces the same forward-only transition table as
+// the real repository (package-level nextStates/allowedPredecessors are
+// unexported to package repository, so the fake keeps its own minimal copy
+// of just the guard it needs: never leave a terminal state, never enter
+// held from anything else).
+var fakeTerminalStates = map[string]bool{
+	mongodb.MessageStateDone: true, mongodb.MessageStateRejected: true,
+	mongodb.MessageStateExpired: true, mongodb.MessageStateUndeliverable: true,
+}
+
+func (f *fakeMessages) SetState(ctx context.Context, mongoURL, messageID, state string) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	m, ok := f.messages[messageID]
 	if !ok {
-		return nil
+		return false, nil
+	}
+	if fakeTerminalStates[m.State] && m.State != state {
+		return false, nil // a terminal state never moves again
+	}
+	if state == mongodb.MessageStateHeld && m.State != mongodb.MessageStateHeld {
+		return false, nil // nothing transitions into held from elsewhere
 	}
 	m.State = state
 	m.UpdatedAt = time.Now().UTC()
 	f.messages[messageID] = m
-	return nil
+	return true, nil
 }
 
 func (f *fakeMessages) ListPending(ctx context.Context, mongoURL, sessionID, toAgentID string) ([]mongodb.Message, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	inFlight := map[string]bool{
+		mongodb.MessageStateQueued: true, mongodb.MessageStateDispatched: true, mongodb.MessageStateInjected: true,
+	}
 	var out []mongodb.Message
 	for _, m := range f.messages {
-		if m.SessionID == sessionID && m.ToAgentID == toAgentID && m.State != mongodb.MessageStateAcknowledged {
+		if m.SessionID == sessionID && m.ToAgentID == toAgentID && inFlight[m.State] {
+			out = append(out, m)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority < out[j].Priority
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out, nil
+}
+
+func (f *fakeMessages) FindRecentDuplicate(ctx context.Context, mongoURL, sessionID, from, to, kind, body string, since time.Time) (mongodb.Message, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var found *mongodb.Message
+	for _, m := range f.messages {
+		if m.SessionID != sessionID || m.FromAgentID != from || m.ToAgentID != to || m.Kind != kind || m.Body != body {
+			continue
+		}
+		if m.CreatedAt.Before(since) || fakeTerminalStates[m.State] {
+			continue
+		}
+		if found == nil || m.CreatedAt.Before(found.CreatedAt) {
+			mm := m
+			found = &mm
+		}
+	}
+	if found == nil {
+		return mongodb.Message{}, false, nil
+	}
+	return *found, true, nil
+}
+
+func (f *fakeMessages) CountHeld(ctx context.Context, mongoURL, sessionID, agentID string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var n int64
+	for _, m := range f.messages {
+		if m.SessionID == sessionID && m.ToAgentID == agentID && m.State == mongodb.MessageStateHeld {
+			n++
+		}
+	}
+	return n, nil
+}
+
+func (f *fakeMessages) ListHeld(ctx context.Context, mongoURL, sessionID, agentID string) ([]mongodb.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []mongodb.Message
+	for _, m := range f.messages {
+		if m.SessionID == sessionID && m.ToAgentID == agentID && m.State == mongodb.MessageStateHeld {
 			out = append(out, m)
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out, nil
+}
+
+func (f *fakeMessages) ExpireDue(ctx context.Context, mongoURL string, now time.Time) ([]mongodb.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var due []mongodb.Message
+	for id, m := range f.messages {
+		if fakeTerminalStates[m.State] || m.ExpiresAt.After(now) {
+			continue
+		}
+		due = append(due, m)
+		m.State = mongodb.MessageStateExpired
+		m.UpdatedAt = now
+		f.messages[id] = m
+	}
+	return due, nil
+}
+
+func (f *fakeMessages) FailPendingFor(ctx context.Context, mongoURL, agentID string) ([]mongodb.Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var failed []mongodb.Message
+	for id, m := range f.messages {
+		if m.ToAgentID != agentID || fakeTerminalStates[m.State] {
+			continue
+		}
+		failed = append(failed, m)
+		m.State = mongodb.MessageStateUndeliverable
+		m.UpdatedAt = time.Now().UTC()
+		f.messages[id] = m
+	}
+	return failed, nil
 }
 
 func (f *fakeMessages) FindReply(ctx context.Context, mongoURL, sessionID, replyToID string) (mongodb.Message, bool, error) {

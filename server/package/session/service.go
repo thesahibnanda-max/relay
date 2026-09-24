@@ -276,7 +276,8 @@ func (s service) MarkDispatched(ctx context.Context, sessionID, messageID string
 	if err != nil {
 		return err
 	}
-	return s.messages.SetState(ctx, shardURL, messageID, mongodb.MessageStateDispatched)
+	_, err = s.messages.SetState(ctx, shardURL, messageID, mongodb.MessageStateDispatched)
+	return err
 }
 
 func (s service) Acknowledge(ctx context.Context, sessionID, agentID, messageID string) error {
@@ -294,7 +295,8 @@ func (s service) Acknowledge(ctx context.Context, sessionID, agentID, messageID 
 	if msg.ToAgentID != agentID {
 		return errors.New("session: only the recipient can acknowledge a message")
 	}
-	return s.messages.SetState(ctx, shardURL, messageID, mongodb.MessageStateAcknowledged)
+	_, err = s.messages.SetState(ctx, shardURL, messageID, mongodb.MessageStateAcknowledged)
+	return err
 }
 
 func (s service) Wait(ctx context.Context, sessionID, agentID, messageID string, timeout time.Duration) (WaitOutcome, error) {

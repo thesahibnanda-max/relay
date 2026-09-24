@@ -30,6 +30,11 @@ type AgentRepository interface {
 	// owned any connection that was live before restart, so it's definitely
 	// gone now.
 	MarkAllDisconnected(ctx context.Context, mongoURL string) error
+	// ReapGone marks every agent disconnected at or before cutoff as
+	// "exited" (gone for good, distinct from a merely offline agent that
+	// might still reconnect) and returns the reaped agents, so the caller
+	// can fail their pending mail.
+	ReapGone(ctx context.Context, mongoURL string, cutoff time.Time) ([]mongodb.Agent, error)
 }
 
 type agentRepository struct {
@@ -51,9 +56,10 @@ func (r agentRepository) EnsureCollection(ctx context.Context, mongoURL string) 
 	if err := ensureCollection(ctx, db, mongodb.CollectionAgents); err != nil {
 		return err
 	}
-	_, err = db.Collection(mongodb.CollectionAgents).Indexes().CreateOne(ctx, mongo.IndexModel{
-		Keys:    bson.D{{Key: "session_id", Value: 1}, {Key: "name", Value: 1}},
-		Options: options.Index().SetUnique(true),
+	col := db.Collection(mongodb.CollectionAgents)
+	_, err = col.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "session_id", Value: 1}, {Key: "name", Value: 1}}, Options: options.Index().SetUnique(true)},
+		{Keys: bson.D{{Key: "status", Value: 1}, {Key: "updated_at", Value: 1}}}, // the disconnect-reaper sweep's scan
 	})
 	return err
 }
@@ -143,4 +149,34 @@ func (r agentRepository) MarkAllDisconnected(ctx context.Context, mongoURL strin
 	update := bson.M{"$set": bson.M{"status": "disconnected", "updated_at": time.Now().UTC()}}
 	_, err = db.Collection(mongodb.CollectionAgents).UpdateMany(ctx, filter, update)
 	return err
+}
+
+func (r agentRepository) ReapGone(ctx context.Context, mongoURL string, cutoff time.Time) ([]mongodb.Agent, error) {
+	db, err := r.pool.Database(mongoURL)
+	if err != nil {
+		return nil, err
+	}
+	col := db.Collection(mongodb.CollectionAgents)
+	filter := bson.M{"status": "disconnected", "updated_at": bson.M{"$lte": cutoff}}
+	cur, err := col.Find(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var gone []mongodb.Agent
+	if err := cur.All(ctx, &gone); err != nil {
+		return nil, err
+	}
+	if len(gone) == 0 {
+		return nil, nil
+	}
+	ids := make([]string, len(gone))
+	for i, a := range gone {
+		ids[i] = a.ID
+	}
+	update := bson.M{"$set": bson.M{"status": "exited", "updated_at": time.Now().UTC()}}
+	if _, err := col.UpdateMany(ctx, bson.M{"_id": bson.M{"$in": ids}}, update); err != nil {
+		return nil, err
+	}
+	return gone, nil
 }
