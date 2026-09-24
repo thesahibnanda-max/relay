@@ -21,6 +21,7 @@ import (
 	"github.com/thesahibnanda-max/relay/internal/ctl"
 	"github.com/thesahibnanda-max/relay/internal/daemon"
 	"github.com/thesahibnanda-max/relay/internal/doctor"
+	"github.com/thesahibnanda-max/relay/internal/globallink"
 	"github.com/thesahibnanda-max/relay/internal/mcp"
 	"github.com/thesahibnanda-max/relay/internal/proto"
 	"github.com/thesahibnanda-max/relay/internal/relayhome"
@@ -147,6 +148,9 @@ func runMessages(p Parsed, out, errw io.Writer) int {
 }
 
 func runApprove(p Parsed, in io.Reader, out, errw io.Writer) int {
+	if p.SessionKind == SessionKindGlobalJoin {
+		return runApproveGlobal(p, out, errw)
+	}
 	c, ok := runningClient(errw)
 	if !ok {
 		return 1
@@ -240,6 +244,100 @@ func runApprove(p Parsed, in io.Reader, out, errw io.Writer) int {
 			break
 		}
 	}
+	return 0
+}
+
+// runApproveGlobal is relay approve's global-session path. There is no
+// networked equivalent of the local daemon's admin HTTP API yet (it has no
+// per-agent auth story, which doesn't translate to shared infrastructure -
+// see the project plan's documented narrowing), so this instead dials a
+// short-lived globallink connection AS the named agent, authenticated with
+// that agent's own saved resume token - the same credential it would use to
+// resume itself. That scopes this command to exactly one named agent's own
+// held mail; there is no interactive review loop here (that needs a real
+// terminal session, which this short-lived connection deliberately isn't) -
+// only the ls / accept / reject forms.
+func runApproveGlobal(p Parsed, out, errw io.Writer) int {
+	paths, err := relayhome.Resolve()
+	if err != nil {
+		fmt.Fprintf(errw, "relay: %v\n", err)
+		return 1
+	}
+	saved, ok := loadIdentity(paths, p.GlobalToken.FileSafe(), p.Name)
+	if !ok {
+		fmt.Fprintf(errw, "relay: no saved identity for %q in session %s (it must connect at least once with --name=%s before its held mail can be managed this way)\n", p.Name, p.Session, p.Name)
+		return 1
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	lk, err := globallink.Connect(ctx, globallink.Options{
+		HostPort: p.GlobalToken.HostPort,
+		Hello: proto.Hello{
+			Session: p.GlobalToken.ULID, Name: p.Name, Token: saved.Token, Tool: saved.Tool, Role: "peer",
+			ApproveInbound: saved.ApproveInbound, CanInterrupt: saved.CanInterrupt, CanBroadcast: saved.CanBroadcast,
+		},
+	})
+	if err != nil {
+		fmt.Fprintf(errw, "relay: %v\n", friendly(err, p))
+		return 1
+	}
+	defer lk.Close(0)
+
+	held, err := lk.ListHeld(ctx)
+	if err != nil {
+		fmt.Fprintf(errw, "relay: %v\n", err)
+		return 1
+	}
+
+	decide := func(m proto.MessageView, accept bool) bool {
+		verb, op := "reject", proto.OpReject
+		if accept {
+			verb, op = "approve", proto.OpApprove
+		}
+		var res proto.ApproveResult
+		if err := lk.Call(ctx, op, proto.ApproveArgs{ID: m.ID}, &res); err != nil {
+			fmt.Fprintf(errw, "relay: %s %s: %v\n", verb, m.ID, err)
+			return false
+		}
+		fmt.Fprintf(out, "%sd %s (%s -> %s)\n", verb, m.ID, m.From, m.To)
+		return true
+	}
+
+	switch p.Sub {
+	case "accept", "reject":
+		target := p.Words[0]
+		n, failed := 0, 0
+		for _, m := range held {
+			if strings.EqualFold(target, "all") || strings.EqualFold(target, m.ID) {
+				n++
+				if !decide(m, p.Sub == "accept") {
+					failed++
+				}
+			}
+		}
+		if n == 0 {
+			fmt.Fprintf(errw, "relay: no held message %q (see: relay approve --session=%s --name=%s)\n", target, p.Session, p.Name)
+			return 1
+		}
+		if failed > 0 {
+			return 1
+		}
+		return 0
+	}
+
+	if len(held) == 0 {
+		fmt.Fprintln(out, "Nothing is waiting for approval.")
+		return 0
+	}
+	now := time.Now()
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tFROM\tTO\tPRIO\tAGE\tWHY HELD\tTEXT")
+	for _, m := range held { // ListHeld already returns oldest first
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", m.ID, m.From, m.To, proto.PriorityName(m.Priority), ago(now, m.CreatedAt), snippet(m.Detail, 40), snippet(m.Body, 50))
+	}
+	tw.Flush()
+	fmt.Fprintf(out, "\nDecide with: relay approve accept <id|all> --session=%s --name=%s   or   relay approve reject <id|all> --session=%s --name=%s\n", p.Session, p.Name, p.Session, p.Name)
 	return 0
 }
 

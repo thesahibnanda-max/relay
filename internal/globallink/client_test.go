@@ -23,11 +23,12 @@ import (
 // Go module) to reuse its real handler, so this is a deliberate, small
 // duplication of just the pieces under test.
 type fakeServer struct {
-	mu          sync.Mutex
-	acksSeen    []string
-	agentSeq    int
-	tokenSeq    int
-	pushOnHello []messageView // pushed as deliver frames right after Welcome
+	mu             sync.Mutex
+	acksSeen       []string
+	agentSeq       int
+	tokenSeq       int
+	pushOnHello    []messageView // pushed as deliver frames right after Welcome
+	pushNoticeHeld []int         // pushed as notice frames right after Welcome
 }
 
 func (f *fakeServer) handler() http.Handler {
@@ -69,6 +70,7 @@ func (f *fakeServer) serve(w http.ResponseWriter, r *http.Request) {
 		token = "token-" + strconv.Itoa(f.tokenSeq)
 	}
 	push := f.pushOnHello
+	pushNotice := f.pushNoticeHeld
 	f.mu.Unlock()
 
 	welcome := welcomeFrame{SessionID: sessionID, AgentID: agentID, Name: h.Name, Resumed: resumed}
@@ -83,6 +85,12 @@ func (f *fakeServer) serve(w http.ResponseWriter, r *http.Request) {
 	for _, m := range push {
 		db, _ := marshalEnvelope(typeDeliver, deliverFrame{Message: m})
 		if c.Write(ctx, websocket.MessageText, db) != nil {
+			return
+		}
+	}
+	for _, held := range pushNotice {
+		nb, _ := marshalEnvelope(typeNotice, noticeFrame{Held: held})
+		if c.Write(ctx, websocket.MessageText, nb) != nil {
 			return
 		}
 	}
@@ -140,6 +148,26 @@ func (f *fakeServer) handleRPC(rpc rpcFrame) rpcResultFrame {
 		_ = json.Unmarshal(rpc.Args, &a)
 		res, _ := json.Marshal(waitResult{ID: a.ID, State: "acknowledged"})
 		return rpcResultFrame{ID: rpc.ID, OK: true, Result: res}
+	case opApprove, opReject:
+		var a approveArgs
+		_ = json.Unmarshal(rpc.Args, &a)
+		id := a.ID
+		if id == "" {
+			id = "held-1"
+		}
+		state := "queued"
+		if rpc.Op == opReject {
+			state = "rejected"
+		}
+		res, _ := json.Marshal(approveResult{ID: id, State: state})
+		return rpcResultFrame{ID: rpc.ID, OK: true, Result: res}
+	case opListHeld:
+		res, _ := json.Marshal(listHeldResult{Messages: []messageView{
+			{ID: "held-1", From: "bob", To: "alice", Kind: "task", Body: "please approve", State: "held", Detail: "awaiting approval", CreatedAt: time.Unix(0, 0).UTC()},
+		}})
+		return rpcResultFrame{ID: rpc.ID, OK: true, Result: res}
+	case opMsgState, opAgentState:
+		return rpcResultFrame{ID: rpc.ID, OK: true, Result: json.RawMessage("{}")}
 	default:
 		return rpcResultFrame{ID: rpc.ID, OK: false, Error: &wireError{Code: "bad_request", Message: "unknown op"}}
 	}
@@ -235,17 +263,95 @@ func TestCall_RoundTripsThroughEachSupportedOp(t *testing.T) {
 	}
 }
 
-// TestCall_UnsupportedOpReturnsBadRequest covers approve/reject/agent_state/
-// msg_state - not supported by a Phase 1 server, deliberately, per the
-// project plan's Phase 2 table.
-func TestCall_UnsupportedOpReturnsBadRequest(t *testing.T) {
+// TestCall_UnknownOpReturnsBadRequest covers an op this package has no
+// translation for at all (every proto.Op* constant is now supported).
+func TestCall_UnknownOpReturnsBadRequest(t *testing.T) {
 	hostPort := startFakeServer(t, &fakeServer{})
 	c := connectTestClient(t, hostPort, Options{})
 
-	err := c.Call(context.Background(), proto.OpApprove, proto.ApproveArgs{}, nil)
+	err := c.Call(context.Background(), "not-a-real-op", struct{}{}, nil)
 	var pe *proto.Error
 	if !errors.As(err, &pe) || pe.Code != proto.CodeBadRequest {
 		t.Fatalf("expected a CodeBadRequest *proto.Error, got %v", err)
+	}
+}
+
+// TestCall_ApproveAndRejectRoundTrip covers the Phase 2 approve/reject ops -
+// the same proto.ApproveArgs/ApproveResult shapes internal/collab's chord
+// handler already calls unconditionally.
+func TestCall_ApproveAndRejectRoundTrip(t *testing.T) {
+	hostPort := startFakeServer(t, &fakeServer{})
+	c := connectTestClient(t, hostPort, Options{})
+	ctx := context.Background()
+
+	var approveResult proto.ApproveResult
+	if err := c.Call(ctx, proto.OpApprove, proto.ApproveArgs{ID: "held-1"}, &approveResult); err != nil {
+		t.Fatalf("Call(approve): %v", err)
+	}
+	if approveResult.ID != "held-1" || approveResult.State != "queued" {
+		t.Errorf("unexpected approve result: %+v", approveResult)
+	}
+
+	var rejectResult proto.ApproveResult
+	if err := c.Call(ctx, proto.OpReject, proto.ApproveArgs{ID: "held-2"}, &rejectResult); err != nil {
+		t.Fatalf("Call(reject): %v", err)
+	}
+	if rejectResult.ID != "held-2" || rejectResult.State != "rejected" {
+		t.Errorf("unexpected reject result: %+v", rejectResult)
+	}
+}
+
+// TestCall_MsgStateAndAgentStateRoundTrip covers the two report-only ops
+// internal/collab already calls unconditionally (sessionEnv.Report and the
+// PTY-state ticker) - both reply with an empty result.
+func TestCall_MsgStateAndAgentStateRoundTrip(t *testing.T) {
+	hostPort := startFakeServer(t, &fakeServer{})
+	c := connectTestClient(t, hostPort, Options{})
+	ctx := context.Background()
+
+	if err := c.Call(ctx, proto.OpMsgState, proto.MsgStateArgs{ID: "msg-1", State: "injected"}, nil); err != nil {
+		t.Fatalf("Call(msg_state): %v", err)
+	}
+	if err := c.Call(ctx, proto.OpAgentState, proto.AgentStateArgs{State: "busy"}, nil); err != nil {
+		t.Fatalf("Call(agent_state): %v", err)
+	}
+}
+
+// TestListHeld_ReturnsHeldMessages covers the globallink-only ListHeld
+// method relay approve's short-lived connection uses (there is no
+// proto.Op* constant for it - see the method's own doc comment).
+func TestListHeld_ReturnsHeldMessages(t *testing.T) {
+	hostPort := startFakeServer(t, &fakeServer{})
+	c := connectTestClient(t, hostPort, Options{})
+
+	held, err := c.ListHeld(context.Background())
+	if err != nil {
+		t.Fatalf("ListHeld: %v", err)
+	}
+	if len(held) != 1 || held[0].ID != "held-1" || held[0].Detail != "awaiting approval" {
+		t.Fatalf("unexpected ListHeld result: %+v", held)
+	}
+}
+
+// TestNotice_CallsOnNotice proves a notice frame reaches OnNotice - what
+// makes the terminal bell (internal/collab.Session.Notice) actually ring for
+// a global session.
+func TestNotice_CallsOnNotice(t *testing.T) {
+	fs := &fakeServer{pushNoticeHeld: []int{1}}
+	hostPort := startFakeServer(t, fs)
+
+	done := make(chan int, 1)
+	connectTestClient(t, hostPort, Options{
+		OnNotice: func(held int) { done <- held },
+	})
+
+	select {
+	case held := <-done:
+		if held != 1 {
+			t.Fatalf("OnNotice got held=%d, want 1", held)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("OnNotice was never called")
 	}
 }
 

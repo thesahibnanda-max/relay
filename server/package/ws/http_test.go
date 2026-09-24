@@ -7,9 +7,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/thesahibnanda-max/relay/server/package/config"
 	"github.com/thesahibnanda-max/relay/server/package/database/mongodb"
 	"github.com/thesahibnanda-max/relay/server/package/session"
 )
+
+// testConfig mirrors the defaults config.New would produce, without needing
+// real env vars set for a pure HTTP/CORS test.
+func testConfig() config.Config {
+	return config.Config{
+		PairRateLimit: 20, SenderRateLimit: 60, RPCRateLimit: 200,
+		RPCRateWindow: 10 * time.Second, MaxInFlightRPCs: 16,
+	}
+}
 
 // fakeSessionService is a no-op stand-in for session.Interface, just enough
 // to satisfy ws.New for a pure HTTP/CORS test - no real database involved.
@@ -51,11 +61,35 @@ func (fakeSessionService) Context(ctx context.Context, sessionID, agentID, forAg
 	return nil, nil
 }
 
+func (fakeSessionService) ReportState(ctx context.Context, sessionID, agentID, messageID, state string) error {
+	return nil
+}
+
+func (fakeSessionService) ListHeld(ctx context.Context, sessionID, agentID string) ([]mongodb.Message, error) {
+	return nil, nil
+}
+
+func (fakeSessionService) HeldCount(ctx context.Context, sessionID, agentID string) (int, error) {
+	return 0, nil
+}
+
+func (fakeSessionService) Approve(ctx context.Context, sessionID, agentID, messageID string) (mongodb.Message, error) {
+	return mongodb.Message{}, nil
+}
+
+func (fakeSessionService) Reject(ctx context.Context, sessionID, agentID, messageID string) (mongodb.Message, error) {
+	return mongodb.Message{}, nil
+}
+
+func (fakeSessionService) Sweep(ctx context.Context, shardURL string) error {
+	return nil
+}
+
 var _ session.Interface = fakeSessionService{}
 
 func newTestHandler(t *testing.T) http.Handler {
 	t.Helper()
-	hub, err := New(fakeSessionService{})
+	hub, err := New(testConfig(), fakeSessionService{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

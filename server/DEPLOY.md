@@ -1,0 +1,104 @@
+# Deploying the relay global-session server
+
+This is the centralized server `--session=NEW` (a global session) talks to. It's a single
+static Go binary plus a Postgres instance (the control-plane shard map) and one or more
+MongoDB instances (the actual session/agent/message data, one shard per URL in `MONGO_URLS`).
+Nothing here assumes a big machine - the defaults below match what the local daemon already
+proves in production, and every resource knob is an env var so a small VM (an Oracle Cloud
+free-tier instance, for example) can be tuned without a rebuild.
+
+## Environment variables
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PORT` | `5555` | TCP port the server listens on. |
+| `SQL_DSN` | *(required)* | Postgres DSN (gorm/`pgx` style), e.g. `host=localhost user=relay password=relay dbname=relay port=5432 sslmode=disable`. |
+| `MONGO_URLS` | *(required)* | Comma-separated MongoDB connection strings, one per shard. A single shard is fine to start; add more later and restart - new shards are picked up automatically. |
+| `PAIR_RATE_LIMIT` | `20` | Messages/minute a sender may send to one specific recipient. |
+| `SENDER_RATE_LIMIT` | `60` | Messages/minute a sender may send in total, across all recipients. |
+| `RPC_RATE_LIMIT` | `200` | RPCs a single connection may issue per `RPC_RATE_WINDOW`. |
+| `RPC_RATE_WINDOW` | `10s` | The window `RPC_RATE_LIMIT` is measured over. |
+| `MAX_INFLIGHT_RPCS` | `16` | Concurrent in-flight RPCs a single connection may have outstanding. |
+| `DEDUP_WINDOW` | `30s` | An identical (from, to, kind, body) retry within this window coalesces into the existing message instead of creating a new one. |
+| `MESSAGE_TTL` | `1h` | How long an undelivered message lives before the sweep expires it. |
+| `SWEEP_EVERY` | `30s` | How often the TTL-expiry + disconnect-reaper maintenance pass runs, per shard. |
+| `DISCONNECT_GRACE` | `15m` | How long a disconnected agent may stay offline before the sweep reaps it as gone for good (`exited`) and fails its pending mail to `undeliverable`. |
+
+On a very small VM (1 shared vCPU, ~1GB RAM), lowering `RPC_RATE_LIMIT`/`MAX_INFLIGHT_RPCS`
+and raising `SWEEP_EVERY` (e.g. to `2m`) trades a little latency for less CPU/DB load; none
+of this needs a code change.
+
+## Running with Docker
+
+```
+docker build -t relay-server -f server/Dockerfile server
+docker run -d --name relay-server -p 5555:5555 \
+  -e SQL_DSN="host=<postgres-host> user=relay password=<pw> dbname=relay port=5432 sslmode=disable" \
+  -e MONGO_URLS="mongodb://<mongo-host>:27017" \
+  relay-server
+```
+
+`server/docker-compose.yml` starts a local Postgres + two MongoDB instances for development
+and integration testing - not meant to be the production database story by itself, but the
+env vars above work identically against it (see `server/.env.example`).
+
+## Running as a systemd service (no Docker)
+
+Build the binary once (`cd server && CGO_ENABLED=0 go build -o /usr/local/bin/relay-server .`),
+then:
+
+```ini
+# /etc/systemd/system/relay-server.service
+[Unit]
+Description=relay global-session server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/relay-server
+Restart=on-failure
+RestartSec=2
+Environment=PORT=5555
+Environment=SQL_DSN=host=localhost user=relay password=relay dbname=relay port=5432 sslmode=disable
+Environment=MONGO_URLS=mongodb://localhost:27017
+# Tune for a small VM:
+Environment=RPC_RATE_LIMIT=100
+Environment=MAX_INFLIGHT_RPCS=8
+Environment=SWEEP_EVERY=2m
+DynamicUser=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```
+sudo systemctl daemon-reload
+sudo systemctl enable --now relay-server
+```
+
+## TLS via a reverse proxy
+
+The server itself only speaks plain `ws://` - it has no TLS story of its own, deliberately
+(that's a solved problem a reverse proxy handles better). [Caddy](https://caddyserver.com/)
+gets automatic HTTPS from a two-line Caddyfile, which is the right amount of ops for a
+free-tier VM:
+
+```
+# /etc/caddy/Caddyfile
+relay.example.com {
+    reverse_proxy localhost:5555
+}
+```
+
+Once a proxy terminates TLS in front of it, clients must dial `wss://` instead of `ws://`:
+set `RELAY_GLOBAL_TLS=1` in the environment of every `relay` CLI invocation that connects to
+this server (already-supported client-side switch in `internal/globallink`), and pass
+`--server=relay.example.com:443` (or whatever port Caddy listens on).
+
+## Out of scope
+
+No horizontal scaling or multi-instance story: `relay-server` keeps its live-connection
+registry and per-agent live tool state in a single process's memory, exactly as documented
+in the Phase 1 plan. Running two instances behind a load balancer would split agents across
+processes that can't see each other's connections - don't do that. A single small instance
+per deployment is the supported shape.

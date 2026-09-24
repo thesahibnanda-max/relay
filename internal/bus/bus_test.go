@@ -311,6 +311,33 @@ func TestAgingPromotesButNeverToInterrupt(t *testing.T) {
 	}
 }
 
+// TestAgingWorksForAGlobalSessionMessageUnchanged proves the Phase 2 plan's
+// own claim that priority aging needs zero new server-side code for global
+// sessions: internal/collab.Session.Deliver feeds a global session's
+// proto.MessageView (translated by internal/globallink.toProtoMessageView,
+// which carries Thread/Detail/State but never FromRole - a global session
+// has no daemon-side role concept) into this exact same Bus.Add path, with
+// no globallink- or collab-specific branching anywhere in this package.
+func TestAgingWorksForAGlobalSessionMessageUnchanged(t *testing.T) {
+	env := newEnv()
+	b := New(env)
+	now := time.Now()
+	b.now = func() time.Time { return now }
+
+	globalShaped := proto.MessageView{
+		ID: "global-1", From: "alice", To: "bob", Kind: "task", Priority: P3,
+		Thread: "global-1", Body: "from a global session", State: "queued",
+	}
+	b.Add(globalShaped)
+	if got := b.effective(b.queue[0]); got != P3 {
+		t.Fatalf("fresh P3: %d", got)
+	}
+	now = now.Add(3 * agingStep)
+	if got := b.effective(b.queue[0]); got != P1 {
+		t.Fatalf("a global session's message should age exactly like any other, got %d", got)
+	}
+}
+
 func TestBootstrapIsTypedOnceAndNotReported(t *testing.T) {
 	env := newEnv()
 	b := New(env)

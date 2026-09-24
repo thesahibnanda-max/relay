@@ -40,11 +40,10 @@ const tlsEnvVar = "RELAY_GLOBAL_TLS"
 
 type Options struct {
 	HostPort string // "host:port" to dial
-	// Hello carries Session/Name/Token/Tool/Role - the same proto.Hello an
-	// internal/link connection uses, so internal/cli builds one Hello value
-	// the same way for both paths. Every other field (PID, Cwd,
-	// ApproveInbound, CanInterrupt, CanBroadcast, Proto, Client) is
-	// local-daemon-only and ignored here.
+	// Hello carries Session/Name/Token/Tool/Role/ApproveInbound/CanInterrupt/
+	// CanBroadcast - the same proto.Hello an internal/link connection uses,
+	// so internal/cli builds one Hello value the same way for both paths.
+	// PID/Cwd/Proto/Client remain local-daemon-only and are ignored here.
 	Hello proto.Hello
 
 	// OnDeliver is called (from the connection's reader, so it must not
@@ -52,8 +51,8 @@ type Options struct {
 	// the same message can arrive again after a reconnect, but
 	// internal/bus's own dedup-by-id makes that safe.
 	OnDeliver func(proto.MessageView)
-	// OnNotice is never called by a Phase 1 server (no --approve-inbound
-	// yet) - kept so Phase 2 needs no client-side signature change.
+	// OnNotice is called whenever the server pushes a notice frame - the
+	// connected agent's held-message count just changed.
 	OnNotice func(held int)
 
 	BackoffMin time.Duration // default 100ms
@@ -103,6 +102,7 @@ func Connect(ctx context.Context, opt Options) (*Client, error) {
 	ws, w, err := c.dialAndHello(hctx, helloFrame{
 		Session: opt.Hello.Session, Name: opt.Hello.Name, Token: opt.Hello.Token,
 		Tool: opt.Hello.Tool, Role: opt.Hello.Role,
+		ApproveInbound: opt.Hello.ApproveInbound, CanInterrupt: opt.Hello.CanInterrupt, CanBroadcast: opt.Hello.CanBroadcast,
 	})
 	if err != nil {
 		c.cancel()
@@ -241,7 +241,10 @@ func (c *Client) run(ws *websocket.Conn) {
 				backoff = c.opt.BackoffMax
 			}
 			c.mu.Lock()
-			h := helloFrame{Session: c.sessionULID, Name: c.opt.Hello.Name, Token: c.token, Tool: c.opt.Hello.Tool, Role: c.opt.Hello.Role}
+			h := helloFrame{
+				Session: c.sessionULID, Name: c.opt.Hello.Name, Token: c.token, Tool: c.opt.Hello.Tool, Role: c.opt.Hello.Role,
+				ApproveInbound: c.opt.Hello.ApproveInbound, CanInterrupt: c.opt.Hello.CanInterrupt, CanBroadcast: c.opt.Hello.CanBroadcast,
+			}
 			c.mu.Unlock()
 			dctx, dcancel := context.WithTimeout(c.ctx, 5*time.Second)
 			var w welcomeFrame
@@ -340,6 +343,11 @@ func (c *Client) serve(ws *websocket.Conn) {
 				}
 				c.mu.Unlock()
 			}
+		case typeNotice:
+			var n noticeFrame
+			if json.Unmarshal(env.Payload, &n) == nil && c.opt.OnNotice != nil {
+				c.opt.OnNotice(n.Held)
+			}
 		case typeError:
 			return
 		}
@@ -364,8 +372,8 @@ func (c *Client) sendAck(ctx context.Context, messageID string) {
 
 func toProtoMessageView(m messageView) proto.MessageView {
 	return proto.MessageView{
-		ID: m.ID, From: m.From, To: m.To, Kind: m.Kind, Priority: m.Priority,
-		ReplyTo: m.ReplyTo, Body: m.Body, Hops: m.Hops, State: m.State, CreatedAt: m.CreatedAt,
+		ID: m.ID, From: m.From, To: m.To, Kind: m.Kind, Priority: m.Priority, Thread: m.Thread,
+		ReplyTo: m.ReplyTo, Body: m.Body, Hops: m.Hops, State: m.State, Detail: m.Detail, CreatedAt: m.CreatedAt,
 	}
 }
 
@@ -386,13 +394,19 @@ func (c *Client) Call(ctx context.Context, op string, args, out any) error {
 		return c.callContext(ctx, args, out)
 	case proto.OpWait:
 		return c.callWait(ctx, args, out)
+	case proto.OpApprove:
+		return c.callApprove(ctx, opApprove, args, out)
+	case proto.OpReject:
+		return c.callApprove(ctx, opReject, args, out)
+	case proto.OpMsgState:
+		return c.callMsgState(ctx, args)
+	case proto.OpAgentState:
+		return c.callAgentState(ctx, args)
 	default:
-		// approve/reject/agent_state/msg_state: not supported by a Phase 1
-		// global session server yet - see the project plan's Phase 2 table.
 		// CodeBadRequest (not Offline/Internal) makes callers like
-		// collab's sessionEnv.Report silently swallow this instead of
-		// treating it as a retryable failure.
-		return &proto.Error{Code: proto.CodeBadRequest, Message: "relay: " + op + " is not supported for global sessions yet"}
+		// collab's sessionEnv.Report silently swallow an op this package has
+		// no translation for, instead of treating it as a retryable failure.
+		return &proto.Error{Code: proto.CodeBadRequest, Message: "relay: " + op + " is not supported for global sessions"}
 	}
 }
 
@@ -418,7 +432,7 @@ func (c *Client) callSend(ctx context.Context, args, out any) error {
 		}
 		*res = proto.SendResult{
 			ID: r.ID, To: []string{a.To}, State: r.State,
-			Kind: r.Kind, Priority: proto.PriorityName(r.Priority),
+			Kind: r.Kind, Priority: proto.PriorityName(r.Priority), Note: r.Note,
 		}
 	}
 	return nil
@@ -443,7 +457,7 @@ func (c *Client) callListAgents(ctx context.Context, out any) error {
 		id := c.Identity()
 		peers := make([]proto.PeerInfo, len(r.Agents))
 		for i, a := range r.Agents {
-			peers[i] = proto.PeerInfo{Name: a.Name, Role: a.Role, Tool: a.Tool, Status: a.Status, Self: a.Name == id.Agent.Name}
+			peers[i] = proto.PeerInfo{Name: a.Name, Role: a.Role, Tool: a.Tool, Status: a.Status, State: a.State, Self: a.Name == id.Agent.Name}
 		}
 		*res = proto.ListAgentsResult{Session: id.Session.ID, Agents: peers}
 	}
@@ -507,6 +521,75 @@ func (c *Client) callWait(ctx context.Context, args, out any) error {
 		*res = wr
 	}
 	return nil
+}
+
+// callApprove backs both proto.OpApprove and proto.OpReject, which share one
+// wire shape (approveArgs/approveResult) and differ only in the op string.
+func (c *Client) callApprove(ctx context.Context, wireOp string, args, out any) error {
+	a, ok := args.(proto.ApproveArgs)
+	if !ok {
+		return fmt.Errorf("globallink: unexpected args type %T for %s", args, wireOp)
+	}
+	raw, err := c.doRPC(ctx, wireOp, approveArgs{ID: a.ID})
+	if err != nil {
+		return err
+	}
+	var r approveResult
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &r); err != nil {
+			return err
+		}
+	}
+	if out != nil {
+		res, ok := out.(*proto.ApproveResult)
+		if !ok {
+			return fmt.Errorf("globallink: unexpected out type %T for %s", out, wireOp)
+		}
+		*res = proto.ApproveResult{ID: r.ID, State: r.State}
+	}
+	return nil
+}
+
+func (c *Client) callMsgState(ctx context.Context, args any) error {
+	a, ok := args.(proto.MsgStateArgs)
+	if !ok {
+		return fmt.Errorf("globallink: unexpected args type %T for msg_state", args)
+	}
+	_, err := c.doRPC(ctx, opMsgState, msgStateArgs{ID: a.ID, State: a.State})
+	return err
+}
+
+func (c *Client) callAgentState(ctx context.Context, args any) error {
+	a, ok := args.(proto.AgentStateArgs)
+	if !ok {
+		return fmt.Errorf("globallink: unexpected args type %T for agent_state", args)
+	}
+	_, err := c.doRPC(ctx, opAgentState, agentStateArgs{State: a.State, PlanMode: a.PlanMode})
+	return err
+}
+
+// ListHeld returns every message currently held for the connected agent,
+// oldest first. A globallink-only capability: the local daemon has no
+// equivalent RPC op (its own held-message listing goes through the admin
+// HTTP API instead), so there is no proto.Op* constant to route this
+// through Call - relay approve's short-lived global connection calls this
+// directly.
+func (c *Client) ListHeld(ctx context.Context) ([]proto.MessageView, error) {
+	raw, err := c.doRPC(ctx, opListHeld, struct{}{})
+	if err != nil {
+		return nil, err
+	}
+	var r listHeldResult
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &r); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]proto.MessageView, len(r.Messages))
+	for i, m := range r.Messages {
+		out[i] = toProtoMessageView(m)
+	}
+	return out, nil
 }
 
 // doRPC sends one rpc frame and waits for its matching rpc_result, waiting

@@ -286,7 +286,8 @@ func connectGlobal(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.A
 	}
 	hello := proto.Hello{
 		Session: sessionValue, Name: p.Name, Tool: a.Name(), Role: role.Name,
-		ApproveInbound: p.ApproveInbound, // unsupported by a Phase 1 server; harmless to pass through
+		ApproveInbound: p.ApproveInbound,
+		CanInterrupt:   role.CanInterrupt, CanBroadcast: role.CanBroadcast,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -298,7 +299,8 @@ func connectGlobal(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.A
 	}
 	if p.Name != "" {
 		id := lk.Identity()
-		saveIdentity(paths, globalIdentityKey(id.Session.ID), id.Agent.Name, id.Token, a.Name())
+		saveIdentityWithPolicy(paths, globalIdentityKey(id.Session.ID), id.Agent.Name, id.Token, a.Name(),
+			hello.ApproveInbound, hello.CanInterrupt, hello.CanBroadcast)
 	}
 	return lk, nil
 }

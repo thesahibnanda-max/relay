@@ -42,10 +42,12 @@ Inspect and manage:
   relay daemon [status|stop]             the background service (starts on demand)
   relay send <agent> <text> [--session=<id>] [--priority=low|normal|high|interrupt]
                                          message an agent yourself (text "-" reads stdin)
-  relay approve [ls|accept|reject] [<message-id>|all]
+  relay approve [ls|accept|reject] [<message-id>|all] [--session=<id> --name=<agent>]
                                          release or refuse messages held for agents that
                                          run with --approve-inbound (in that agent's own
-                                         terminal: Ctrl+\ then a = approve oldest, r = reject)
+                                         terminal: Ctrl+\ then a = approve oldest, r = reject);
+                                         --session=<global token> --name=<agent> acts on one
+                                         named agent's own held mail in a global session
   relay messages [--session=<id>] [--agent=<name>] [--state=<s>] [--limit=<n>]
                                          what agents said to each other
   relay gc [--older-than=30d] [--compress] [--dry-run]

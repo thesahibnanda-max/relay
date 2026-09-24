@@ -8,9 +8,9 @@ type SendRequest struct {
 	// Priority is the already-resolved priority to store (mongodb.DefaultMessagePriority
 	// if the caller has no opinion). Parsing the wire's string encoding
 	// ("p0"/"high"/"normal"/...) and filling in that default happens in
-	// ws.handleSend, not here - 0 is a legitimate future priority value
-	// (P0/interrupt, see the project plan's Phase 2 table) and can't double
-	// as an "unset" sentinel the way an empty Kind string can.
+	// ws.handleSend, not here - 0 is a legitimate priority value (P0/
+	// interrupt) and can't double as an "unset" sentinel the way an empty
+	// Kind string can.
 	Priority int
 }
 
@@ -20,6 +20,10 @@ type SendRequest struct {
 type SendOutcome struct {
 	MessageID, TargetAgentID, State, Kind string
 	Priority                              int
+	// Note explains a non-obvious outcome - e.g. "duplicate of a recent
+	// identical message" when Send coalesced into an existing message
+	// instead of creating a new one. Empty in the ordinary case.
+	Note string
 }
 
 // WaitOutcome is what Wait reports once it stops polling.

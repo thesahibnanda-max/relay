@@ -20,6 +20,7 @@ const (
 	typeRPCResult = "rpc_result"
 	typeDeliver   = "deliver"
 	typeAck       = "ack"
+	typeNotice    = "notice"
 	typeError     = "error"
 )
 
@@ -28,6 +29,11 @@ const (
 	opListAgents = "list_agents"
 	opWait       = "wait"
 	opContext    = "get_context"
+	opApprove    = "approve"
+	opReject     = "reject"
+	opListHeld   = "list_held"
+	opMsgState   = "msg_state"
+	opAgentState = "agent_state"
 )
 
 type envelope struct {
@@ -45,11 +51,14 @@ func marshalEnvelope(typ string, payload any) ([]byte, error) {
 }
 
 type helloFrame struct {
-	Session string `json:"session"`
-	Name    string `json:"name"`
-	Token   string `json:"token,omitempty"`
-	Tool    string `json:"tool"`
-	Role    string `json:"role"`
+	Session        string `json:"session"`
+	Name           string `json:"name"`
+	Token          string `json:"token,omitempty"`
+	Tool           string `json:"tool"`
+	Role           string `json:"role"`
+	ApproveInbound bool   `json:"approve_inbound,omitempty"`
+	CanInterrupt   bool   `json:"can_interrupt,omitempty"`
+	CanBroadcast   bool   `json:"can_broadcast,omitempty"`
 }
 
 type welcomeFrame struct {
@@ -81,10 +90,12 @@ type messageView struct {
 	ToID      string    `json:"to_id"`
 	Kind      string    `json:"kind"`
 	Priority  int       `json:"priority"`
+	Thread    string    `json:"thread,omitempty"`
 	ReplyTo   string    `json:"reply_to,omitempty"`
 	Body      string    `json:"body"`
 	Hops      int       `json:"hops,omitempty"`
 	State     string    `json:"state,omitempty"`
+	Detail    string    `json:"detail,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -94,6 +105,10 @@ type deliverFrame struct {
 
 type ackFrame struct {
 	ID string `json:"id"`
+}
+
+type noticeFrame struct {
+	Held int `json:"held"`
 }
 
 type sendArgs struct {
@@ -109,6 +124,7 @@ type sendResult struct {
 	State    string `json:"state"`
 	Kind     string `json:"kind"`
 	Priority int    `json:"priority"`
+	Note     string `json:"note,omitempty"`
 }
 
 type listAgentsResult struct {
@@ -121,6 +137,30 @@ type agentInfo struct {
 	Tool   string `json:"tool"`
 	Role   string `json:"role"`
 	Status string `json:"status"`
+	State  string `json:"state,omitempty"`
+}
+
+type approveArgs struct {
+	ID string `json:"id,omitempty"`
+}
+
+type approveResult struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+}
+
+type listHeldResult struct {
+	Messages []messageView `json:"messages"`
+}
+
+type msgStateArgs struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+}
+
+type agentStateArgs struct {
+	State    string `json:"state"`
+	PlanMode bool   `json:"plan_mode,omitempty"`
 }
 
 type waitArgs struct {

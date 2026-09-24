@@ -408,17 +408,39 @@ func parseApprove(args []string) (Parsed, error) {
 		a := args[i]
 		if strings.HasPrefix(a, "-") {
 			name := strings.TrimLeft(strings.SplitN(a, "=", 2)[0], "-")
-			if name != "session" {
-				return p, usagef("unknown option %q for approve (try --session=<id>)", a)
+			switch name {
+			case "session":
+				v, j, err := flagValue(args, i, "session")
+				if err != nil {
+					return p, err
+				}
+				switch {
+				case ids.Valid(v):
+					p.SessionKind = SessionKindLocalJoin
+					p.Target = ids.Normalize(v)
+				default:
+					tok, ok := globalid.Parse(v)
+					if !ok {
+						return p, usagef("--session must be a session ID (a 26-character ULID) or a global session token (<ULID>@host[:port]), got %q", v)
+					}
+					p.SessionKind = SessionKindGlobalJoin
+					p.GlobalToken = tok
+					p.Target = tok.String()
+				}
+				i = j
+			case "name":
+				v, j, err := flagValue(args, i, "name")
+				if err != nil {
+					return p, err
+				}
+				if ok, why := naming.Validate(v); !ok {
+					return p, usagef("--name %q: %s", v, why)
+				}
+				p.Name = v
+				i = j
+			default:
+				return p, usagef("unknown option %q for approve (try --session=<id> and, for a global session, --name=<agent>)", a)
 			}
-			v, j, err := flagValue(args, i, "session")
-			if err != nil {
-				return p, err
-			}
-			if p.Target, err = sessionFlag(v); err != nil {
-				return p, err
-			}
-			i = j
 			continue
 		}
 		if p.Sub == "" {
@@ -442,6 +464,9 @@ func parseApprove(args []string) (Parsed, error) {
 		if len(p.Words) != 0 {
 			return p, usagef("unexpected argument %q (usage: relay approve [ls|accept|reject] [message-id|all])", p.Words[0])
 		}
+	}
+	if p.SessionKind == SessionKindGlobalJoin && p.Name == "" {
+		return p, usagef("--name is required with a global --session (which agent's held mail to act on)")
 	}
 	return p, nil
 }
