@@ -10,6 +10,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/thesahibnanda-max/relay/server/package/config"
 	"github.com/thesahibnanda-max/relay/server/package/database/mongodb"
 	"github.com/thesahibnanda-max/relay/server/package/session"
 )
@@ -33,15 +34,29 @@ type Interface interface {
 }
 
 type hub struct {
+	cfg     config.Config
 	session session.Interface
 	reg     *registry
+	live    *liveStates
+	// pairLimit/senderLimit gate message traffic (checked in handleSend,
+	// before any DB write - an over-limit send is rejected outright, not
+	// queued); rpc-level limiting is per-connection instead, see conn.
+	pairLimit   *keyedLimiter
+	senderLimit *keyedLimiter
 }
 
-func New(sessionService session.Interface) (Interface, error) {
+func New(cfg config.Config, sessionService session.Interface) (Interface, error) {
 	if sessionService == nil {
 		return nil, errors.New("ws: session service is nil")
 	}
-	return hub{session: sessionService, reg: newRegistry()}, nil
+	return hub{
+		cfg:         cfg,
+		session:     sessionService,
+		reg:         newRegistry(),
+		live:        newLiveStates(),
+		pairLimit:   newKeyedLimiter(cfg.PairRateLimit, time.Minute),
+		senderLimit: newKeyedLimiter(cfg.SenderRateLimit, time.Minute),
+	}, nil
 }
 
 func (h hub) Accept(w http.ResponseWriter, r *http.Request) {
@@ -56,7 +71,7 @@ func (h hub) Accept(w http.ResponseWriter, r *http.Request) {
 	defer c.CloseNow()
 	c.SetReadLimit(readLimit)
 
-	cn := newConn(c)
+	cn := newConn(c, h.cfg.RPCRateLimit, h.cfg.RPCRateWindow, h.cfg.MaxInFlightRPCs)
 	ctx := r.Context()
 	result, ok := h.handshake(ctx, cn)
 	if !ok {
@@ -106,6 +121,7 @@ func (h hub) handshake(ctx context.Context, cn *conn) (session.JoinResult, bool)
 
 	result, err := h.session.Join(ctx, session.JoinRequest{
 		SessionID: hello.Session, Name: hello.Name, Token: hello.Token, Tool: hello.Tool, Role: hello.Role,
+		ApproveInbound: hello.ApproveInbound, CanInterrupt: hello.CanInterrupt, CanBroadcast: hello.CanBroadcast,
 	})
 	if err != nil {
 		reject(ctx, cn, joinErrorCode(err), err.Error())
@@ -176,6 +192,32 @@ func (h hub) handleRPC(ctx context.Context, cn *conn, me session.JoinResult, pay
 		_ = cn.writeTyped(ctx, TypeError, Error{Code: "bad_request", Message: "malformed rpc"})
 		return
 	}
+
+	if !cn.rpcLimiter.allow() {
+		h.replyError(ctx, cn, rpc.ID, "rate_limited", "too many requests, slow down")
+		return
+	}
+	select {
+	case cn.inflight <- struct{}{}:
+	default:
+		h.replyError(ctx, cn, rpc.ID, "rate_limited", "too many concurrent requests")
+		return
+	}
+
+	if rpc.Op == OpWait {
+		// Up to maxWaitSeconds - must not block this connection's one
+		// reader goroutine, so it runs on its own, releasing its inflight
+		// slot whenever it eventually replies. cn.writeTyped's internal
+		// mutex is what makes it safe for this goroutine's eventual reply to
+		// interleave with any other push to the same connection.
+		go func() {
+			defer func() { <-cn.inflight }()
+			h.handleWait(ctx, cn, me, rpc)
+		}()
+		return
+	}
+	defer func() { <-cn.inflight }()
+
 	switch rpc.Op {
 	case OpSend:
 		h.handleSend(ctx, cn, me, rpc)
@@ -183,12 +225,16 @@ func (h hub) handleRPC(ctx context.Context, cn *conn, me session.JoinResult, pay
 		h.handleListAgents(ctx, cn, me, rpc)
 	case OpContext:
 		h.handleContext(ctx, cn, me, rpc)
-	case OpWait:
-		// Up to maxWaitSeconds - must not block this connection's one
-		// reader goroutine, so it runs on its own. cn.writeTyped's internal
-		// mutex is what makes it safe for this goroutine's eventual reply to
-		// interleave with any other push to the same connection.
-		go h.handleWait(ctx, cn, me, rpc)
+	case OpApprove:
+		h.handleApprove(ctx, cn, me, rpc)
+	case OpReject:
+		h.handleReject(ctx, cn, me, rpc)
+	case OpListHeld:
+		h.handleListHeld(ctx, cn, me, rpc)
+	case OpMsgState:
+		h.handleMsgState(ctx, cn, me, rpc)
+	case OpAgentState:
+		h.handleAgentState(ctx, cn, me, rpc)
 	default:
 		h.replyError(ctx, cn, rpc.ID, "bad_request", "unknown op")
 	}
@@ -200,6 +246,14 @@ func (h hub) handleSend(ctx context.Context, cn *conn, me session.JoinResult, rp
 		h.replyError(ctx, cn, rpc.ID, "bad_request", "malformed send args")
 		return
 	}
+	// Rejected outright, before any DB write - mirrors the local daemon's
+	// own rate limiting exactly (an over-limit send never gets persisted,
+	// let alone queued).
+	if !h.senderLimit.allow(me.AgentID) || !h.pairLimit.allow(me.AgentID+"|"+args.To) {
+		h.replyError(ctx, cn, rpc.ID, "rate_limited", "sending too fast, slow down")
+		return
+	}
+
 	outcome, err := h.session.Send(ctx, me.SessionID, me.AgentID, session.SendRequest{
 		To: args.To, Body: args.Body, Kind: args.Kind, ReplyTo: args.ReplyTo,
 		Priority: parsePriority(args.Priority),
@@ -208,18 +262,75 @@ func (h hub) handleSend(ctx context.Context, cn *conn, me session.JoinResult, rp
 		h.replyError(ctx, cn, rpc.ID, "send_failed", err.Error())
 		return
 	}
-	h.replyRPC(ctx, cn, rpc.ID, SendResult{ID: outcome.MessageID, State: outcome.State, Kind: outcome.Kind, Priority: outcome.Priority})
+	h.replyRPC(ctx, cn, rpc.ID, SendResult{
+		ID: outcome.MessageID, State: outcome.State, Kind: outcome.Kind, Priority: outcome.Priority, Note: outcome.Note,
+	})
 
-	if target, online := h.reg.get(outcome.TargetAgentID); online {
+	switch outcome.State {
+	case mongodb.MessageStateQueued:
 		view := MessageView{
 			ID: outcome.MessageID, From: me.Name, FromID: me.AgentID,
 			To: args.To, ToID: outcome.TargetAgentID,
 			Kind: outcome.Kind, Priority: outcome.Priority, ReplyTo: args.ReplyTo, Body: args.Body,
+			State: outcome.State,
 		}
-		if err := target.writeTyped(ctx, TypeDeliver, Deliver{Message: view}); err == nil {
-			_ = h.session.MarkDispatched(ctx, me.SessionID, outcome.MessageID)
+		h.dispatchIfOnline(ctx, me.SessionID, view)
+	case mongodb.MessageStateHeld:
+		h.pushNotice(ctx, me.SessionID, outcome.TargetAgentID)
+	}
+}
+
+// dispatchIfOnline pushes a message live to its recipient if currently
+// connected, marking it dispatched on success. Shared by handleSend (a
+// freshly created message) and handleApprove/flushPending (a message that
+// just left held), so both paths use one push-and-mark-dispatched rule.
+func (h hub) dispatchIfOnline(ctx context.Context, sessionID string, view MessageView) bool {
+	target, online := h.reg.get(view.ToID)
+	if !online {
+		return false
+	}
+	if err := target.writeTyped(ctx, TypeDeliver, Deliver{Message: view}); err != nil {
+		return false
+	}
+	_ = h.session.MarkDispatched(ctx, sessionID, view.ID)
+	return true
+}
+
+// flushPending pushes every currently-queued message for agentID if it's
+// online right now, marking each dispatched - mirrors the local daemon's own
+// decideHeld -> flush behavior (approving one held message also flushes
+// whatever else was already queued for the same agent, not just the one
+// just approved).
+func (h hub) flushPending(ctx context.Context, sessionID, agentID string) {
+	if _, online := h.reg.get(agentID); !online {
+		return
+	}
+	pending, err := h.session.PendingFor(ctx, sessionID, agentID)
+	if err != nil {
+		return
+	}
+	names := h.agentNames(ctx, sessionID)
+	for _, m := range pending {
+		if m.State == mongodb.MessageStateQueued {
+			h.dispatchIfOnline(ctx, sessionID, messageView(m, names))
 		}
 	}
+}
+
+// pushNotice tells agentID (if currently connected) how many messages are
+// held for it right now - fired whenever that count might have changed (a
+// new message just became held for it, or one of its held messages just
+// left held via approve/reject).
+func (h hub) pushNotice(ctx context.Context, sessionID, agentID string) {
+	cn, online := h.reg.get(agentID)
+	if !online {
+		return
+	}
+	held, err := h.session.HeldCount(ctx, sessionID, agentID)
+	if err != nil {
+		return
+	}
+	_ = cn.writeTyped(ctx, TypeNotice, Notice{Held: held})
 }
 
 func (h hub) handleListAgents(ctx context.Context, cn *conn, me session.JoinResult, rpc RPC) {
@@ -230,7 +341,14 @@ func (h hub) handleListAgents(ctx context.Context, cn *conn, me session.JoinResu
 	}
 	out := make([]AgentInfo, len(agents))
 	for i, a := range agents {
-		out[i] = AgentInfo{ID: a.ID, Name: a.Name, Tool: a.Tool, Role: a.Role, Status: a.Status}
+		info := AgentInfo{ID: a.ID, Name: a.Name, Tool: a.Tool, Role: a.Role, Status: a.Status}
+		// Live tool state only means anything for an agent connected right
+		// now - mirrors the local daemon's own rule exactly.
+		if _, online := h.reg.get(a.ID); online {
+			info.Status = "connected"
+			info.State = h.live.get(a.ID)
+		}
+		out[i] = info
 	}
 	h.replyRPC(ctx, cn, rpc.ID, ListAgentsResult{Agents: out})
 }
@@ -289,6 +407,95 @@ func (h hub) handleAck(ctx context.Context, me session.JoinResult, payload json.
 	_ = h.session.Acknowledge(ctx, me.SessionID, me.AgentID, ack.ID)
 }
 
+// handleApprove releases a held message addressed to the caller (ID empty
+// picks the oldest), then flushes it - and anything else already queued for
+// the caller - live if the caller is connected right now (it always is,
+// since this RPC arrived on that very connection, but the short-lived
+// admin connection relay approve uses for a global session is exactly the
+// same kind of connection, so no special-casing is needed).
+func (h hub) handleApprove(ctx context.Context, cn *conn, me session.JoinResult, rpc RPC) {
+	var args ApproveArgs
+	if err := json.Unmarshal(rpc.Args, &args); err != nil {
+		h.replyError(ctx, cn, rpc.ID, "bad_request", "malformed approve args")
+		return
+	}
+	msg, err := h.session.Approve(ctx, me.SessionID, me.AgentID, args.ID)
+	if err != nil {
+		h.replyError(ctx, cn, rpc.ID, "approve_failed", err.Error())
+		return
+	}
+	h.replyRPC(ctx, cn, rpc.ID, ApproveResult{ID: msg.ID, State: msg.State})
+	h.pushNotice(ctx, me.SessionID, me.AgentID)
+	h.flushPending(ctx, me.SessionID, me.AgentID)
+}
+
+// handleReject permanently refuses a held message (ID empty picks the
+// oldest) and notifies its sender - notifySender's own message isn't
+// live-pushed here even if the sender happens to be online right now; it's
+// delivered the same way any other sweep-generated notify is, on that
+// agent's next connect, send, or approve - a deliberate, documented
+// simplification, not an oversight.
+func (h hub) handleReject(ctx context.Context, cn *conn, me session.JoinResult, rpc RPC) {
+	var args ApproveArgs
+	if err := json.Unmarshal(rpc.Args, &args); err != nil {
+		h.replyError(ctx, cn, rpc.ID, "bad_request", "malformed reject args")
+		return
+	}
+	msg, err := h.session.Reject(ctx, me.SessionID, me.AgentID, args.ID)
+	if err != nil {
+		h.replyError(ctx, cn, rpc.ID, "reject_failed", err.Error())
+		return
+	}
+	h.replyRPC(ctx, cn, rpc.ID, ApproveResult{ID: msg.ID, State: msg.State})
+	h.pushNotice(ctx, me.SessionID, me.AgentID)
+}
+
+func (h hub) handleListHeld(ctx context.Context, cn *conn, me session.JoinResult, rpc RPC) {
+	held, err := h.session.ListHeld(ctx, me.SessionID, me.AgentID)
+	if err != nil {
+		h.replyError(ctx, cn, rpc.ID, "list_held_failed", err.Error())
+		return
+	}
+	names := h.agentNames(ctx, me.SessionID)
+	views := make([]MessageView, len(held))
+	for i, m := range held {
+		views[i] = messageView(m, names)
+	}
+	h.replyRPC(ctx, cn, rpc.ID, ListHeldResult{Messages: views})
+}
+
+// handleMsgState records what the caller's own local scheduler did with a
+// message it received (injected/acknowledged/done) - an out-of-order or
+// duplicate report is a safe no-op, enforced by the same transition table
+// SetState already applies. Mirrors the local daemon's own msg_state
+// handler, including its empty {} reply.
+func (h hub) handleMsgState(ctx context.Context, cn *conn, me session.JoinResult, rpc RPC) {
+	var args MsgStateArgs
+	if err := json.Unmarshal(rpc.Args, &args); err != nil {
+		h.replyError(ctx, cn, rpc.ID, "bad_request", "malformed msg_state args")
+		return
+	}
+	if err := h.session.ReportState(ctx, me.SessionID, me.AgentID, args.ID, args.State); err != nil {
+		h.replyError(ctx, cn, rpc.ID, "msg_state_failed", err.Error())
+		return
+	}
+	h.replyRPC(ctx, cn, rpc.ID, struct{}{})
+}
+
+// handleAgentState records the caller's own live tool state, purely
+// in-memory (see liveStates) - what relay_list_agents' State field reads.
+// Mirrors the local daemon's own agent_state handler, including its empty
+// {} reply.
+func (h hub) handleAgentState(ctx context.Context, cn *conn, me session.JoinResult, rpc RPC) {
+	var args AgentStateArgs
+	if err := json.Unmarshal(rpc.Args, &args); err != nil {
+		h.replyError(ctx, cn, rpc.ID, "bad_request", "malformed agent_state args")
+		return
+	}
+	h.live.set(me.AgentID, args.State)
+	h.replyRPC(ctx, cn, rpc.ID, struct{}{})
+}
+
 func (h hub) replyRPC(ctx context.Context, cn *conn, id string, result any) {
 	b, err := json.Marshal(result)
 	if err != nil {
@@ -330,8 +537,8 @@ func messageView(m mongodb.Message, names map[string]string) MessageView {
 	return MessageView{
 		ID: m.ID, From: names[m.FromAgentID], FromID: m.FromAgentID,
 		To: names[m.ToAgentID], ToID: m.ToAgentID,
-		Kind: m.Kind, Priority: m.Priority, ReplyTo: m.ReplyTo, Body: m.Body,
-		Hops: m.Hops, State: m.State, CreatedAt: m.CreatedAt,
+		Kind: m.Kind, Priority: m.Priority, Thread: m.Thread, ReplyTo: m.ReplyTo, Body: m.Body,
+		Hops: m.Hops, State: m.State, Detail: m.Detail, CreatedAt: m.CreatedAt,
 	}
 }
 

@@ -9,6 +9,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -123,9 +124,16 @@ type testStack struct {
 	hub       ws.Interface
 }
 
-func buildStack(t *testing.T) testStack {
+// buildStack wires the full server against the real docker-compose stack.
+// mutators (if any) tweak the config before anything is built - what the
+// rate-limit/TTL/disconnect-grace tests use to shrink those knobs down to
+// something a test can trigger in milliseconds instead of minutes.
+func buildStack(t *testing.T, mutators ...func(*config.Config)) testStack {
 	t.Helper()
 	cfg := testConfig(t)
+	for _, mutate := range mutators {
+		mutate(&cfg)
+	}
 
 	pg, err := postgres.New(cfg)
 	if err != nil {
@@ -168,7 +176,7 @@ func buildStack(t *testing.T) testStack {
 	if err != nil {
 		t.Fatalf("session.New: %v", err)
 	}
-	hub, err := ws.New(svc)
+	hub, err := ws.New(cfg, svc)
 	if err != nil {
 		t.Fatalf("ws.New: %v", err)
 	}
@@ -501,6 +509,434 @@ func TestServerRestartMarksAllConnectedDisconnected(t *testing.T) {
 	}
 	if agent.Status != "disconnected" {
 		t.Fatalf("expected the agent to be disconnected after MarkAllDisconnected, got %q", agent.Status)
+	}
+}
+
+// TestApproveInboundHoldsThenApproveDelivers proves the full held/notice/
+// list_held/approve round trip for a --approve-inbound target: the message
+// stays held (never delivered) until approved, a notice fires when it
+// becomes held, and approving it both queues and immediately delivers it
+// since the recipient is online.
+func TestApproveInboundHoldsThenApproveDelivers(t *testing.T) {
+	stack := buildStack(t)
+	wsURL := startServer(t, stack.hub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	alice, _, err := gorilla.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial alice: %v", err)
+	}
+	defer alice.CloseNow()
+	aliceWelcome := helloAndWait(t, ctx, alice, ws.Hello{Session: session.SessionNew, Name: "alice", Tool: "test", Role: "peer"})
+
+	bob, _, err := gorilla.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial bob: %v", err)
+	}
+	defer bob.CloseNow()
+	helloAndWait(t, ctx, bob, ws.Hello{Session: aliceWelcome.SessionID, Name: "bob", Tool: "test", Role: "peer", ApproveInbound: true})
+
+	sendResult := decodeResult[ws.SendResult](t, rpcCall(t, ctx, alice, ws.OpSend, ws.SendArgs{To: "bob", Body: "please approve me"}))
+	if sendResult.State != mongodb.MessageStateHeld {
+		t.Fatalf("expected the message to be held for an approve-inbound target, got %q", sendResult.State)
+	}
+
+	notice := readTyped[ws.Notice](t, ctx, bob, ws.TypeNotice)
+	if notice.Held != 1 {
+		t.Fatalf("expected held count 1, got %d", notice.Held)
+	}
+
+	held := decodeResult[ws.ListHeldResult](t, rpcCall(t, ctx, bob, ws.OpListHeld, struct{}{}))
+	if len(held.Messages) != 1 || held.Messages[0].ID != sendResult.ID {
+		t.Fatalf("unexpected list_held result: %+v", held)
+	}
+
+	approveResult := decodeResult[ws.ApproveResult](t, rpcCall(t, ctx, bob, ws.OpApprove, ws.ApproveArgs{}))
+	if approveResult.ID != sendResult.ID || approveResult.State != mongodb.MessageStateQueued {
+		t.Fatalf("unexpected approve result: %+v", approveResult)
+	}
+
+	deliver := readTyped[ws.Deliver](t, ctx, bob, ws.TypeDeliver)
+	if deliver.Message.ID != sendResult.ID || deliver.Message.Body != "please approve me" {
+		t.Fatalf("unexpected deliver after approve: %+v", deliver.Message)
+	}
+}
+
+// TestRejectNotifiesSender proves rejecting a held message notifies the
+// original sender - delivered as an ordinary "notify" message the sender
+// picks up via get_context, not a live push (a documented simplification:
+// only the approving agent's own connection gets a live push right now).
+func TestRejectNotifiesSender(t *testing.T) {
+	stack := buildStack(t)
+	wsURL := startServer(t, stack.hub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	alice, _, err := gorilla.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial alice: %v", err)
+	}
+	defer alice.CloseNow()
+	aliceWelcome := helloAndWait(t, ctx, alice, ws.Hello{Session: session.SessionNew, Name: "alice", Tool: "test", Role: "peer"})
+
+	bob, _, err := gorilla.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial bob: %v", err)
+	}
+	defer bob.CloseNow()
+	helloAndWait(t, ctx, bob, ws.Hello{Session: aliceWelcome.SessionID, Name: "bob", Tool: "test", Role: "peer", ApproveInbound: true})
+
+	sendResult := decodeResult[ws.SendResult](t, rpcCall(t, ctx, alice, ws.OpSend, ws.SendArgs{To: "bob", Body: "reject me"}))
+	readTyped[ws.Notice](t, ctx, bob, ws.TypeNotice) // held count -> 1
+
+	rejectResult := decodeResult[ws.ApproveResult](t, rpcCall(t, ctx, bob, ws.OpReject, ws.ApproveArgs{ID: sendResult.ID}))
+	if rejectResult.State != mongodb.MessageStateRejected {
+		t.Fatalf("expected rejected, got %q", rejectResult.State)
+	}
+	readTyped[ws.Notice](t, ctx, bob, ws.TypeNotice) // held count -> 0
+
+	ctxResult := decodeResult[ws.GetContextResult](t, rpcCall(t, ctx, alice, ws.OpContext, ws.ContextArgs{Agent: "alice", N: 10}))
+	var sawNotify bool
+	for _, m := range ctxResult.Messages {
+		if m.Kind == "notify" {
+			sawNotify = true
+		}
+	}
+	if !sawNotify {
+		t.Fatalf("expected a notify message to alice after the reject, got %+v", ctxResult.Messages)
+	}
+}
+
+// TestHopLimitReHoldsEveryEighthReply proves a reply chain crossing a
+// multiple of session.MaxHops is held again for human approval instead of
+// being delivered straight through - built directly against the session
+// service (not the wire) since the point is the hop-counting logic, not the
+// RPC transport, and a 9-message ping-pong is much clearer this way.
+func TestHopLimitReHoldsEveryEighthReply(t *testing.T) {
+	stack := buildStack(t)
+	ctx := context.Background()
+
+	alice, err := stack.svc.Join(ctx, session.JoinRequest{SessionID: session.SessionNew, Name: "alice-hop", Tool: "test", Role: "peer"})
+	if err != nil {
+		t.Fatalf("join alice: %v", err)
+	}
+	bob, err := stack.svc.Join(ctx, session.JoinRequest{SessionID: alice.SessionID, Name: "bob-hop", Tool: "test", Role: "peer"})
+	if err != nil {
+		t.Fatalf("join bob: %v", err)
+	}
+
+	var lastID string
+	fromID, toName := alice.AgentID, "bob-hop"
+	for i := 0; i <= session.MaxHops; i++ {
+		outcome, err := stack.svc.Send(ctx, alice.SessionID, fromID, session.SendRequest{
+			To: toName, Body: fmt.Sprintf("hop %d", i), Priority: 2, ReplyTo: lastID,
+		})
+		if err != nil {
+			t.Fatalf("send hop %d: %v", i, err)
+		}
+		lastID = outcome.MessageID
+		if fromID == alice.AgentID {
+			fromID, toName = bob.AgentID, "alice-hop"
+		} else {
+			fromID, toName = alice.AgentID, "bob-hop"
+		}
+
+		if i == session.MaxHops {
+			if outcome.State != mongodb.MessageStateHeld {
+				t.Fatalf("expected hop %d to be held (hop limit), got state %q", i, outcome.State)
+			}
+		} else if outcome.State != mongodb.MessageStateQueued {
+			t.Fatalf("hop %d: expected queued, got %q", i, outcome.State)
+		}
+	}
+}
+
+// TestDedupCoalescesRecentIdenticalSend proves an identical (from,to,kind,
+// body) retry within the dedup window returns the existing message instead
+// of creating a new one.
+func TestDedupCoalescesRecentIdenticalSend(t *testing.T) {
+	stack := buildStack(t)
+	wsURL := startServer(t, stack.hub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	alice, _, err := gorilla.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial alice: %v", err)
+	}
+	defer alice.CloseNow()
+	aliceWelcome := helloAndWait(t, ctx, alice, ws.Hello{Session: session.SessionNew, Name: "alice", Tool: "test", Role: "peer"})
+
+	bob, _, err := gorilla.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial bob: %v", err)
+	}
+	defer bob.CloseNow()
+	helloAndWait(t, ctx, bob, ws.Hello{Session: aliceWelcome.SessionID, Name: "bob", Tool: "test", Role: "peer"})
+
+	first := decodeResult[ws.SendResult](t, rpcCall(t, ctx, alice, ws.OpSend, ws.SendArgs{To: "bob", Body: "retry me"}))
+	readTyped[ws.Deliver](t, ctx, bob, ws.TypeDeliver)
+
+	second := decodeResult[ws.SendResult](t, rpcCall(t, ctx, alice, ws.OpSend, ws.SendArgs{To: "bob", Body: "retry me"}))
+	if second.ID != first.ID {
+		t.Fatalf("expected the duplicate to coalesce into %q, got a new id %q", first.ID, second.ID)
+	}
+	if second.Note == "" {
+		t.Fatal("expected a Note explaining the duplicate coalesce")
+	}
+}
+
+// TestRateLimitRejectsSendsOverThePairLimit proves an over-limit send is
+// rejected outright (no DB write, no queue) rather than merely delayed.
+func TestRateLimitRejectsSendsOverThePairLimit(t *testing.T) {
+	stack := buildStack(t, func(c *config.Config) { c.PairRateLimit = 1 })
+	wsURL := startServer(t, stack.hub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	alice, _, err := gorilla.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial alice: %v", err)
+	}
+	defer alice.CloseNow()
+	aliceWelcome := helloAndWait(t, ctx, alice, ws.Hello{Session: session.SessionNew, Name: "alice", Tool: "test", Role: "peer"})
+
+	bob, _, err := gorilla.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial bob: %v", err)
+	}
+	defer bob.CloseNow()
+	helloAndWait(t, ctx, bob, ws.Hello{Session: aliceWelcome.SessionID, Name: "bob", Tool: "test", Role: "peer"})
+
+	first := rpcCall(t, ctx, alice, ws.OpSend, ws.SendArgs{To: "bob", Body: "one"})
+	if !first.OK {
+		t.Fatalf("expected the first send within the limit to succeed: %+v", first.Error)
+	}
+	readTyped[ws.Deliver](t, ctx, bob, ws.TypeDeliver)
+
+	second := rpcCall(t, ctx, alice, ws.OpSend, ws.SendArgs{To: "bob", Body: "two"})
+	if second.OK {
+		t.Fatal("expected the second send over the pair limit of 1/min to be rejected")
+	}
+	if second.Error.Code != "rate_limited" {
+		t.Fatalf("expected rate_limited, got %q (%s)", second.Error.Code, second.Error.Message)
+	}
+}
+
+// TestSweepExpiresDueMessagesAndNotifiesSender proves the TTL sweep expires
+// a message once its ExpiresAt has passed and notifies the original sender -
+// called directly against the service rather than waiting on the real
+// background ticker, since the point is ExpireDue's own logic.
+func TestSweepExpiresDueMessagesAndNotifiesSender(t *testing.T) {
+	stack := buildStack(t, func(c *config.Config) { c.MessageTTL = 50 * time.Millisecond })
+	ctx := context.Background()
+
+	alice, err := stack.svc.Join(ctx, session.JoinRequest{SessionID: session.SessionNew, Name: "alice-ttl", Tool: "test", Role: "peer"})
+	if err != nil {
+		t.Fatalf("join alice: %v", err)
+	}
+	if _, err := stack.svc.Join(ctx, session.JoinRequest{SessionID: alice.SessionID, Name: "bob-ttl", Tool: "test", Role: "peer"}); err != nil {
+		t.Fatalf("join bob: %v", err)
+	}
+
+	outcome, err := stack.svc.Send(ctx, alice.SessionID, alice.AgentID, session.SendRequest{To: "bob-ttl", Body: "will expire", Priority: 2})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	shardURL, err := stack.shards.ShardURLFor(ctx, alice.SessionID)
+	if err != nil {
+		t.Fatalf("ShardURLFor: %v", err)
+	}
+	if err := stack.svc.Sweep(ctx, shardURL); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	messages, err := stack.svc.Context(ctx, alice.SessionID, alice.AgentID, "alice-ttl", 10)
+	if err != nil {
+		t.Fatalf("Context: %v", err)
+	}
+	var sawExpired, sawNotify bool
+	for _, m := range messages {
+		if m.ID == outcome.MessageID && m.State == mongodb.MessageStateExpired {
+			sawExpired = true
+		}
+		if m.Kind == "notify" {
+			sawNotify = true
+		}
+	}
+	if !sawExpired {
+		t.Fatalf("expected the message to be expired after the sweep, got %+v", messages)
+	}
+	if !sawNotify {
+		t.Fatalf("expected a notify message to alice after expiry, got %+v", messages)
+	}
+}
+
+// TestSweepReapsGoneAgentsAndFailsPendingMail proves the disconnect reaper
+// marks a long-gone agent "exited" and fails whatever was still pending for
+// it to undeliverable, notifying the sender.
+func TestSweepReapsGoneAgentsAndFailsPendingMail(t *testing.T) {
+	stack := buildStack(t, func(c *config.Config) { c.DisconnectGrace = 50 * time.Millisecond })
+	ctx := context.Background()
+
+	alice, err := stack.svc.Join(ctx, session.JoinRequest{SessionID: session.SessionNew, Name: "alice-reap", Tool: "test", Role: "peer"})
+	if err != nil {
+		t.Fatalf("join alice: %v", err)
+	}
+	bob, err := stack.svc.Join(ctx, session.JoinRequest{SessionID: alice.SessionID, Name: "bob-reap", Tool: "test", Role: "peer"})
+	if err != nil {
+		t.Fatalf("join bob: %v", err)
+	}
+
+	outcome, err := stack.svc.Send(ctx, alice.SessionID, alice.AgentID, session.SendRequest{To: "bob-reap", Body: "gone before you saw it", Priority: 2})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if err := stack.svc.Disconnect(ctx, alice.SessionID, bob.AgentID); err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	shardURL, err := stack.shards.ShardURLFor(ctx, alice.SessionID)
+	if err != nil {
+		t.Fatalf("ShardURLFor: %v", err)
+	}
+	if err := stack.svc.Sweep(ctx, shardURL); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	agents, err := stack.svc.ListAgents(ctx, alice.SessionID)
+	if err != nil {
+		t.Fatalf("ListAgents: %v", err)
+	}
+	var bobExited bool
+	for _, a := range agents {
+		if a.ID == bob.AgentID && a.Status == "exited" {
+			bobExited = true
+		}
+	}
+	if !bobExited {
+		t.Fatalf("expected bob to be reaped to exited status, got %+v", agents)
+	}
+
+	messages, err := stack.svc.Context(ctx, alice.SessionID, alice.AgentID, "alice-reap", 10)
+	if err != nil {
+		t.Fatalf("Context: %v", err)
+	}
+	var sawUndeliverable, sawNotify bool
+	for _, m := range messages {
+		if m.ID == outcome.MessageID && m.State == mongodb.MessageStateUndeliverable {
+			sawUndeliverable = true
+		}
+		if m.Kind == "notify" {
+			sawNotify = true
+		}
+	}
+	if !sawUndeliverable {
+		t.Fatalf("expected the pending message to be marked undeliverable, got %+v", messages)
+	}
+	if !sawNotify {
+		t.Fatalf("expected a notify message to alice after bob was reaped, got %+v", messages)
+	}
+}
+
+// TestListAgentsShowsLiveAgentState proves an agent_state report surfaces in
+// another agent's list_agents call while the reporter is connected.
+func TestListAgentsShowsLiveAgentState(t *testing.T) {
+	stack := buildStack(t)
+	wsURL := startServer(t, stack.hub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	alice, _, err := gorilla.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial alice: %v", err)
+	}
+	defer alice.CloseNow()
+	aliceWelcome := helloAndWait(t, ctx, alice, ws.Hello{Session: session.SessionNew, Name: "alice", Tool: "test", Role: "peer"})
+
+	bob, _, err := gorilla.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial bob: %v", err)
+	}
+	defer bob.CloseNow()
+	helloAndWait(t, ctx, bob, ws.Hello{Session: aliceWelcome.SessionID, Name: "bob", Tool: "test", Role: "peer"})
+
+	stateResult := rpcCall(t, ctx, bob, ws.OpAgentState, ws.AgentStateArgs{State: "busy"})
+	if !stateResult.OK {
+		t.Fatalf("agent_state failed: %+v", stateResult.Error)
+	}
+
+	list := decodeResult[ws.ListAgentsResult](t, rpcCall(t, ctx, alice, ws.OpListAgents, struct{}{}))
+	var bobInfo *ws.AgentInfo
+	for i := range list.Agents {
+		if list.Agents[i].Name == "bob" {
+			bobInfo = &list.Agents[i]
+		}
+	}
+	if bobInfo == nil {
+		t.Fatalf("bob missing from list_agents: %+v", list.Agents)
+	}
+	if bobInfo.State != "busy" {
+		t.Fatalf("expected bob's live state to be %q, got %q", "busy", bobInfo.State)
+	}
+	if bobInfo.Status != "connected" {
+		t.Fatalf("expected bob's status to be connected, got %q", bobInfo.Status)
+	}
+}
+
+// TestMsgStateAdvancesToInjectedThenDone proves the msg_state RPC lets a
+// recipient report what it actually did with a message it received.
+func TestMsgStateAdvancesToInjectedThenDone(t *testing.T) {
+	stack := buildStack(t)
+	wsURL := startServer(t, stack.hub)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	alice, _, err := gorilla.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial alice: %v", err)
+	}
+	defer alice.CloseNow()
+	aliceWelcome := helloAndWait(t, ctx, alice, ws.Hello{Session: session.SessionNew, Name: "alice", Tool: "test", Role: "peer"})
+
+	bob, _, err := gorilla.Dial(ctx, wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial bob: %v", err)
+	}
+	defer bob.CloseNow()
+	helloAndWait(t, ctx, bob, ws.Hello{Session: aliceWelcome.SessionID, Name: "bob", Tool: "test", Role: "peer"})
+
+	sendResult := decodeResult[ws.SendResult](t, rpcCall(t, ctx, alice, ws.OpSend, ws.SendArgs{To: "bob", Body: "please inject"}))
+	readTyped[ws.Deliver](t, ctx, bob, ws.TypeDeliver)
+
+	if r := rpcCall(t, ctx, bob, ws.OpMsgState, ws.MsgStateArgs{ID: sendResult.ID, State: mongodb.MessageStateInjected}); !r.OK {
+		t.Fatalf("msg_state injected failed: %+v", r.Error)
+	}
+	if r := rpcCall(t, ctx, bob, ws.OpMsgState, ws.MsgStateArgs{ID: sendResult.ID, State: mongodb.MessageStateDone}); !r.OK {
+		t.Fatalf("msg_state done failed: %+v", r.Error)
+	}
+
+	messages := decodeResult[ws.GetContextResult](t, rpcCall(t, ctx, bob, ws.OpContext, ws.ContextArgs{Agent: "bob", N: 10}))
+	var got string
+	for _, m := range messages.Messages {
+		if m.ID == sendResult.ID {
+			got = m.State
+		}
+	}
+	if got != mongodb.MessageStateDone {
+		t.Fatalf("expected the message to end in done, got %q", got)
 	}
 }
 

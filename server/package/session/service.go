@@ -114,6 +114,10 @@ type Interface interface {
 	// first - always scoped to the caller's own mail, secure by
 	// construction (no id parameter to ask for someone else's).
 	ListHeld(ctx context.Context, sessionID, agentID string) ([]mongodb.Message, error)
+	// HeldCount reports how many messages are currently held for agentID -
+	// what a notice{held} push tells the client after any operation that
+	// changes it (a new held message, an approve, or a reject).
+	HeldCount(ctx context.Context, sessionID, agentID string) (int, error)
 	// Approve releases a held message (messageID == "" picks the oldest
 	// held for agentID) back to normal delivery and returns it, so the
 	// caller (ws/hub.go) can push it live if the recipient is online.
@@ -464,6 +468,15 @@ func (s service) ListHeld(ctx context.Context, sessionID, agentID string) ([]mon
 		return nil, err
 	}
 	return s.messages.ListHeld(ctx, shardURL, sessionID, agentID)
+}
+
+func (s service) HeldCount(ctx context.Context, sessionID, agentID string) (int, error) {
+	shardURL, err := s.shards.ShardURLFor(ctx, sessionID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.messages.CountHeld(ctx, shardURL, sessionID, agentID)
+	return int(n), err
 }
 
 func (s service) Approve(ctx context.Context, sessionID, agentID, messageID string) (mongodb.Message, error) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -15,14 +16,22 @@ import (
 // pingLoop's Ping, an eventual "wait" rpc_result) - writes to a single
 // *websocket.Conn must be serialized, which is what this mutex does. Reads
 // are unaffected: only the connection's own owning goroutine (handshake,
-// then the serve loop) ever reads from it.
+// then the serve loop) ever reads from it. rpcLimiter and inflight are this
+// connection's own RPC-level rate/concurrency caps - distinct from the hub's
+// pair/sender send limiters, which are about message traffic, not RPC load.
 type conn struct {
-	ws *websocket.Conn
-	mu sync.Mutex
+	ws         *websocket.Conn
+	mu         sync.Mutex
+	rpcLimiter *rateLimiter
+	inflight   chan struct{}
 }
 
-func newConn(ws *websocket.Conn) *conn {
-	return &conn{ws: ws}
+func newConn(ws *websocket.Conn, rpcLimit int, rpcWindow time.Duration, maxInFlight int) *conn {
+	return &conn{
+		ws:         ws,
+		rpcLimiter: newRateLimiter(rpcLimit, rpcWindow),
+		inflight:   make(chan struct{}, maxInFlight),
+	}
 }
 
 // writeTyped marshals payload into typ's envelope and writes it, holding the

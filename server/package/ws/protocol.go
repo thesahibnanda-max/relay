@@ -25,7 +25,8 @@ const (
 	TypeRPC       = "rpc"
 	TypeRPCResult = "rpc_result"
 	TypeDeliver   = "deliver"
-	TypeAck       = "ack" // client -> server: confirms a deliver was handled
+	TypeAck       = "ack"    // client -> server: confirms a deliver was handled
+	TypeNotice    = "notice" // server -> client: this agent's held-message count changed
 	TypeError     = "error"
 )
 
@@ -35,6 +36,11 @@ const (
 	OpListAgents = "list_agents"
 	OpWait       = "wait"
 	OpContext    = "get_context"
+	OpApprove    = "approve"     // release a held message (--approve-inbound / hop-limit)
+	OpReject     = "reject"      // permanently refuse a held message
+	OpListHeld   = "list_held"   // list messages held for the caller - no id param, always self-scoped
+	OpMsgState   = "msg_state"   // report injected/acknowledged/done for a message
+	OpAgentState = "agent_state" // report the caller's own live tool state (idle/busy/dialog/...)
 )
 
 // Envelope is the one shape every frame takes.
@@ -59,6 +65,11 @@ type Hello struct {
 	Token   string `json:"token,omitempty"` // non-empty: resume this exact agent
 	Tool    string `json:"tool"`
 	Role    string `json:"role"`
+	// Role policy, refreshed on every join/resume in case the role changed
+	// between runs - mirrors the local daemon's own Hello fields exactly.
+	ApproveInbound bool `json:"approve_inbound,omitempty"`
+	CanInterrupt   bool `json:"can_interrupt,omitempty"`
+	CanBroadcast   bool `json:"can_broadcast,omitempty"`
 }
 
 // Welcome is the reply to a successful Hello.
@@ -102,10 +113,12 @@ type MessageView struct {
 	ToID      string    `json:"to_id"`
 	Kind      string    `json:"kind"`
 	Priority  int       `json:"priority"`
+	Thread    string    `json:"thread,omitempty"`
 	ReplyTo   string    `json:"reply_to,omitempty"`
 	Body      string    `json:"body"`
 	Hops      int       `json:"hops,omitempty"`
 	State     string    `json:"state,omitempty"`
+	Detail    string    `json:"detail,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -122,6 +135,12 @@ type Ack struct {
 	ID string `json:"id"`
 }
 
+// Notice is pushed to an agent whenever its held-message count changes - a
+// new message becomes held for it, or one of its held messages leaves held.
+type Notice struct {
+	Held int `json:"held"`
+}
+
 // SendArgs is the OpSend request payload.
 type SendArgs struct {
 	To       string `json:"to"`
@@ -135,12 +154,14 @@ type SendArgs struct {
 // (post-default) values so a caller can tell what was actually stored, not
 // just what it asked for - found missing during the first live two-terminal
 // verification (the model correctly noticed an empty kind/priority where it
-// expected task/normal defaults).
+// expected task/normal defaults). Note explains a non-obvious outcome, such
+// as "duplicate of a recent identical message".
 type SendResult struct {
 	ID       string `json:"id"`
 	State    string `json:"state"`
 	Kind     string `json:"kind"`
 	Priority int    `json:"priority"`
+	Note     string `json:"note,omitempty"`
 }
 
 // ListAgentsResult is OpListAgents' reply (the request payload is empty).
@@ -148,13 +169,50 @@ type ListAgentsResult struct {
 	Agents []AgentInfo `json:"agents"`
 }
 
-// AgentInfo is one entry in a ListAgentsResult.
+// AgentInfo is one entry in a ListAgentsResult. Status is the persisted
+// connection status (connected|disconnected|exited); State is the live,
+// never-persisted tool state (idle|busy|dialog|...), "unknown" if the agent
+// has never reported one (including right after a server restart, since
+// this is intentionally not durable).
 type AgentInfo struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	Tool   string `json:"tool"`
 	Role   string `json:"role"`
 	Status string `json:"status"`
+	State  string `json:"state,omitempty"`
+}
+
+// ApproveArgs is the OpApprove/OpReject request payload. ID empty picks the
+// oldest held message addressed to the caller.
+type ApproveArgs struct {
+	ID string `json:"id,omitempty"`
+}
+
+// ApproveResult is OpApprove/OpReject's reply.
+type ApproveResult struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+}
+
+// ListHeldResult is OpListHeld's reply (the request payload is empty) -
+// always scoped to messages held for the calling agent.
+type ListHeldResult struct {
+	Messages []MessageView `json:"messages"`
+}
+
+// MsgStateArgs is the OpMsgState request payload, reporting the caller's
+// progress handling a message it received (injected/acknowledged/done).
+type MsgStateArgs struct {
+	ID    string `json:"id"`
+	State string `json:"state"`
+}
+
+// AgentStateArgs is the OpAgentState request payload, reporting the
+// caller's own live tool state - never persisted, see AgentInfo.State.
+type AgentStateArgs struct {
+	State    string `json:"state"`
+	PlanMode bool   `json:"plan_mode,omitempty"`
 }
 
 // WaitArgs is the OpWait request payload.
