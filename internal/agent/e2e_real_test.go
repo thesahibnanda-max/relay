@@ -155,6 +155,10 @@ func realCases() []struct {
 	}{
 		{"claude", "claude", []string{"--model", "haiku"}},
 		{"codex", "codex", nil},
+		// --allow-all is only ever used here, in this adaptor's own opt-in
+		// real-binary tests: bypassing every dialog would defeat the whole
+		// point of Relay's human-in-the-loop orchestration on a real launch.
+		{"copilot", "copilot", []string{"--allow-all"}},
 	}
 }
 

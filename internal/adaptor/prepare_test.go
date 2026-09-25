@@ -93,8 +93,9 @@ func TestClaudeDegradesInsteadOfClobberingUserPrompt(t *testing.T) {
 
 func TestNonInteractiveRunsAreUntouched(t *testing.T) {
 	for tool, argsets := range map[string][][]string{
-		"claude": {{"-p", "hi"}, {"--print", "hi"}, {"mcp", "list"}, {"--version"}, {"doctor"}, {"--help"}},
-		"codex":  {{"exec", "hi"}, {"mcp", "list"}, {"login"}, {"--help"}, {"queue", "--message", "x"}, {"review"}},
+		"claude":  {{"-p", "hi"}, {"--print", "hi"}, {"mcp", "list"}, {"--version"}, {"doctor"}, {"--help"}},
+		"codex":   {{"exec", "hi"}, {"mcp", "list"}, {"login"}, {"--help"}, {"queue", "--message", "x"}, {"review"}},
+		"copilot": {{"-p", "hi"}, {"--prompt", "hi"}, {"mcp", "list"}, {"--version"}, {"login"}, {"--help"}},
 	} {
 		for _, args := range argsets {
 			s := spec(t, "BRIEF", true, args...)
@@ -219,5 +220,95 @@ func TestClaudeHooksArePerLaunchAndKeepUserSettings(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir())
 	if p := prepare(t, "codex", s); p.Hooks {
 		t.Fatal("codex hooks are not used")
+	}
+	// nor does Copilot (its events.jsonl is followed instead)
+	s = spec(t, "", true)
+	s.WithHooks = true
+	if p := prepare(t, "copilot", s); p.Hooks {
+		t.Fatal("copilot hooks are not used")
+	}
+}
+
+func TestCopilotLaunchIsAdditiveAndKeepsUserArgsLast(t *testing.T) {
+	s := spec(t, "BRIEF", true, "--model", "gpt-5.4", "fix the bug")
+	p := prepare(t, "copilot", s)
+	mcpPath := filepath.Join(s.RunDir, "mcp.json")
+	want := []string{"--additional-mcp-config", "@" + mcpPath, "--allow-tool=relay", "--model", "gpt-5.4", "fix the bug"}
+	if !reflect.DeepEqual(p.Args, want) {
+		t.Fatalf("args:\n got %q\nwant %q", p.Args, want)
+	}
+	if !p.MCP || p.BriefingDelivered || len(p.Notes) == 0 {
+		t.Fatalf("copilot never delivers a briefing via a flag: %+v", p)
+	}
+	if strings.Contains(strings.Join(p.Args, " "), "BRIEF") {
+		t.Fatalf("the briefing must not appear on the command line: %q", p.Args)
+	}
+	data, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Servers map[string]struct {
+			Type    string   `json:"type"`
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+			Tools   []string `json:"tools"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	r := cfg.Servers["relay"]
+	if r.Type != "local" || r.Command != "/opt/relay bin/relay" || !reflect.DeepEqual(r.Args, []string{"mcp", "--dir", s.RunDir}) ||
+		!reflect.DeepEqual(r.Tools, []string{"*"}) || len(cfg.Servers) != 1 {
+		t.Fatalf("mcp config: %+v", cfg)
+	}
+	if st, _ := os.Stat(mcpPath); st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", st.Mode().Perm())
+	}
+}
+
+func TestCopilotSoloWithNoMCPAddsNothing(t *testing.T) {
+	s := spec(t, "BRIEF", false, "--resume")
+	p := prepare(t, "copilot", s)
+	if !reflect.DeepEqual(p.Args, []string{"--resume"}) || p.MCP || p.BriefingDelivered || len(p.Notes) == 0 {
+		t.Fatalf("%q %+v", p.Args, p)
+	}
+	if entries, _ := os.ReadDir(s.RunDir); len(entries) != 0 {
+		t.Fatalf("no files needed: %v", entries)
+	}
+	// no MCP and no briefing: the tool runs exactly as typed
+	p = prepare(t, "copilot", spec(t, "", false, "a", "b"))
+	if !reflect.DeepEqual(p.Args, []string{"a", "b"}) || len(p.Notes) != 0 {
+		t.Fatalf("%q %+v", p.Args, p)
+	}
+}
+
+func TestCopilotDegradesInsteadOfClobberingUserMCPFlag(t *testing.T) {
+	s := spec(t, "BRIEF", true, "--additional-mcp-config", "@mine.json")
+	p := prepare(t, "copilot", s)
+	if p.MCP || len(p.Notes) == 0 {
+		t.Fatalf("the user's own flag must win: %+v", p)
+	}
+	if entries, _ := os.ReadDir(s.RunDir); len(entries) != 0 {
+		t.Fatalf("no mcp.json when degraded: %v", entries)
+	}
+}
+
+// Copilot has no CLI flag for a system prompt at all, so - unlike
+// Claude/Codex, where this only happens on conflict - the briefing degrades
+// to a bootstrap message unconditionally, for every combination of MCP and
+// user args.
+func TestCopilotBriefingAlwaysDegradesToBootstrap(t *testing.T) {
+	for _, mcp := range []bool{true, false} {
+		for _, args := range [][]string{nil, {"--model", "gpt-5.4"}, {"fix the bug"}} {
+			p := prepare(t, "copilot", spec(t, "BRIEF", mcp, args...))
+			if p.BriefingDelivered || len(p.Notes) == 0 {
+				t.Errorf("mcp=%v args=%q: briefing must always degrade, got %+v", mcp, args, p)
+			}
+			if strings.Contains(strings.Join(p.Args, " "), "BRIEF") {
+				t.Errorf("mcp=%v args=%q: briefing leaked onto the command line: %q", mcp, args, p.Args)
+			}
+		}
 	}
 }

@@ -100,6 +100,11 @@ alt-screen and dialog text; if it falls behind it reports *desynced* and deliver
 * **Codex**: the rollout file (`~/.codex/sessions/.../rollout-*.jsonl`) gives exact turn boundaries
   (`task_started` / `task_complete`), located by working directory and the Relay briefing in its developer
   message. A finished plan awaiting your decision is treated as a dialog.
+* **Copilot CLI**: its per-session event log (`~/.copilot/session-state/*/events.jsonl`) gives turn
+  boundaries (`assistant.turn_start` / `session.task_complete`), located the same way as Codex's rollout
+  file but matched against the typed bootstrap message instead of a developer-role transcript entry (see
+  below - Copilot has no flag to deliver the briefing any other way). This format is undocumented and
+  explicitly marked unstable upstream; permission dialogs are recognised from the screen only.
 
 ## Per-launch registration (`internal/adaptor`)
 
@@ -107,15 +112,20 @@ Each adaptor turns "this agent, this session" into extra flags and files for one
 
 * Claude: `--mcp-config`, `--allowedTools mcp__relay`, `--settings`, `--append-system-prompt`.
 * Codex: `-c mcp_servers.relay.*` (tools auto-approved), `-c developer_instructions=`.
+* Copilot: `--additional-mcp-config @<file>` plus, separately, `--allow-tool=relay` - confirmed live
+  that the config file's own `"tools":["*"]` only controls which tools the model is offered, not
+  whether calling one prompts for approval; without `--allow-tool` every `relay_send`/`relay_whoami`
+  call pops its own "Do you want to use this tool?" dialog. No flag exists to deliver a system prompt
+  at all, so the briefing always arrives as a typed bootstrap message instead.
 
 Verified additive: the user's own MCP servers, hooks and settings keep working. If the user passes their
-own `--append-system-prompt`/`--settings`/`developer_instructions`, Relay does not override them: it
-degrades (typed briefing / idle-only delivery) and says so. Non-interactive invocations (`-p`, `exec`,
-`mcp list`, ...) run untouched.
+own `--append-system-prompt`/`--settings`/`developer_instructions`/`--additional-mcp-config`, Relay does
+not override them: it degrades (typed briefing / idle-only delivery) and says so. Non-interactive
+invocations (`-p`, `exec`, `mcp list`, ...) run untouched.
 
 ## Conversations (`internal/transcript`, `relay_get_context`)
 
-Read-only parsers normalise both tools' transcripts into turns (`user`, `assistant`, `tool_call`,
+Read-only parsers normalise the tools' transcripts into turns (`user`, `assistant`, `tool_call`,
 `tool_result`, `system`). Turns are uploaded as events (unless `--record=off`), stored in SQLite, and served
 by the daemon through the redaction filter, newest first, capped at 24 KB.
 
@@ -130,6 +140,7 @@ a per-agent size quota. `relay gc` prunes idle sessions and compresses leftovers
 Unit tests per package; deterministic end-to-end tests that run the real binary against a scripted fake TUI
 (`testdata/fakeagent`): delivery, approval, drafts, hooks, transcripts, zero footprint; chaos and soak tests
 in `internal/link`; fuzz targets for the input parser, the injection sanitiser, the envelope decoder, the
-transcript parsers, redaction and the MCP server. Real-Claude/Codex verification is done by hand in an
-isolated tmux server: use `RELAY_HOME` under `/tmp`, run in an already-trusted directory, type prompts with
-`tmux send-keys -l` followed by a separate Enter.
+transcript parsers, redaction and the MCP server. Real-Claude/Codex/Copilot verification is done by hand in
+an isolated tmux server: use `RELAY_HOME` under `/tmp`, run in an already-trusted directory, type prompts
+with `tmux send-keys -l` followed by a separate Enter. Copilot's `events.jsonl` format is unstable
+upstream, and its own CLI flags change often, so re-verify after any Copilot CLI upgrade the same way.

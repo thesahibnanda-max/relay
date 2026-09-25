@@ -12,7 +12,7 @@ import (
 const usageText = `relay: a transparent layer between you and your AI coding agents.
 
 Run an agent (it looks and behaves exactly like the tool itself):
-  relay <claude|codex> [role] [--session=NEW|NEW_LOCAL|<id>|<id>@host[:port]] [--name=<name>]
+  relay <claude|codex|copilot> [role] [--session=NEW|NEW_LOCAL|<id>|<id>@host[:port]] [--name=<name>]
                        [--server=<host[:port]>] [--resume | --fresh] [--approve-inbound]
                        [--record=raw|events|off] [-- <tool arguments>]
 
@@ -25,6 +25,7 @@ Run an agent (it looks and behaves exactly like the tool itself):
                                                                 official binary)
   relay claude orchestrator --session=NEW_LOCAL -- --model sonnet   start a LOCAL-only session (this machine only)
   relay codex qa --session=<id> --name=checker                join a local session as another agent
+  relay copilot reviewer --session=<id> --name=reviewer        join with GitHub Copilot CLI instead
   relay claude                                                 just log this one, alone
 
   role     orchestrator, planner, developer, qa, reviewer, or a path to a .md file

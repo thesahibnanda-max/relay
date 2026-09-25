@@ -107,7 +107,7 @@ func usagef(format string, a ...any) error { return &UsageError{fmt.Sprintf(form
 
 // Parse interprets argv (including argv[0]).
 func Parse(argv []string, f *adaptor.AdaptorFactory) (Parsed, error) {
-	// Shim mode: a symlink named "claude" or "codex". Everything belongs to the tool.
+	// Shim mode: a symlink named "claude", "codex" or "copilot". Everything belongs to the tool.
 	if _, ok := f.ByName(filepath.Base(argv[0])); ok {
 		return Parsed{Kind: KindAgent, Tool: filepath.Base(argv[0]), Shim: true, Record: RecordRaw, ToolArgs: argv[1:]}, nil
 	}

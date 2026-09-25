@@ -84,7 +84,7 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, in io.Reader, errw io.W
 			if id.Resumed {
 				who = fmt.Sprintf("welcome back, %s (%s) — resumed", id.Agent.Name, id.Agent.Role)
 			}
-			fmt.Fprintf(errw, "relay: session %s · %s\nrelay: others join with: relay <claude|codex> [role] --session=%s\n",
+			fmt.Fprintf(errw, "relay: session %s · %s\nrelay: others join with: relay <claude|codex|copilot> [role] --session=%s\n",
 				id.Session.ID, who, id.Session.ID)
 			// The tool switches the terminal to its own alternate screen right
 			// after this, hiding the lines above for good (see issue #41) - a

@@ -135,9 +135,11 @@ func TestFootprintScanFindsRelayRegistrations(t *testing.T) {
 	env, home := testEnv(t)
 	os.MkdirAll(filepath.Join(home, ".claude"), 0o755)
 	os.MkdirAll(filepath.Join(home, ".codex"), 0o755)
+	os.MkdirAll(filepath.Join(home, ".copilot"), 0o755)
 	os.MkdirAll(env.Cwd, 0o755)
 	os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(`{"theme":"dark"}`), 0o644)
 	os.WriteFile(filepath.Join(home, ".codex", "config.toml"), []byte("[projects.\"/x/relay\"]\ntrust_level=\"trusted\"\n"), 0o644) // a path that merely contains "relay"
+	os.WriteFile(filepath.Join(home, ".copilot", "mcp-config.json"), []byte(`{"mcpServers":{}}`), 0o644)
 	if c := find(Run(env), "zero footprint"); c.Status != OK {
 		t.Fatalf("innocent files must not be flagged: %+v", c)
 	}
@@ -150,6 +152,21 @@ func TestFootprintScanFindsRelayRegistrations(t *testing.T) {
 	}
 }
 
+func TestFootprintScanCoversCopilotHooksGlob(t *testing.T) {
+	env, home := testEnv(t)
+	os.MkdirAll(filepath.Join(home, ".copilot", "hooks"), 0o755)
+	os.WriteFile(filepath.Join(home, ".copilot", "hooks", "custom.json"), []byte(`{"hooks":{"preToolUse":[{"type":"command","bash":"echo hi"}]}}`), 0o644)
+	if c := find(Run(env), "zero footprint"); c.Status != OK {
+		t.Fatalf("an unrelated hook file must not be flagged: %+v", c)
+	}
+	os.WriteFile(filepath.Join(home, ".copilot", "hooks", "custom.json"),
+		[]byte(`{"hooks":{"sessionStart":[{"type":"command","bash":"relay mcp --dir /x"}]}}`), 0o644)
+	c := find(Run(env), "zero footprint")
+	if c.Status != Warn || !strings.Contains(c.Detail, filepath.Join(home, ".copilot", "hooks", "custom.json")) {
+		t.Fatalf("a glob-matched hooks file registering relay must be flagged: %+v", c)
+	}
+}
+
 func TestMissingToolsAndUnsupportedPlatform(t *testing.T) {
 	env, _ := testEnv(t)
 	env.ToolVersion = func(b string) (string, string, error) {
@@ -159,7 +176,7 @@ func TestMissingToolsAndUnsupportedPlatform(t *testing.T) {
 		return "/x/" + b, "", nil
 	}
 	cs := Run(env)
-	if find(cs, "tool: codex").Status != Info || find(cs, "tool: claude").Status != OK {
+	if find(cs, "tool: codex").Status != Info || find(cs, "tool: claude").Status != OK || find(cs, "tool: copilot").Status != OK {
 		t.Fatalf("%+v", cs)
 	}
 	env.GOOS = "windows"

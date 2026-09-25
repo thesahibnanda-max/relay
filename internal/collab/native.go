@@ -25,15 +25,16 @@ const (
 )
 
 type native struct {
-	mu         sync.Mutex
-	ctx        context.Context
-	trPath     string
-	trCancel   context.CancelFunc
-	stopBlocks int
-	started    time.Time
-	cwd        string
-	upload     bool
-	codexOnce  sync.Once
+	mu          sync.Mutex
+	ctx         context.Context
+	trPath      string
+	trCancel    context.CancelFunc
+	stopBlocks  int
+	started     time.Time
+	cwd         string
+	upload      bool
+	codexOnce   sync.Once
+	copilotOnce sync.Once
 }
 
 // SetUploadTurns controls whether conversation turns are sent to the daemon
@@ -54,6 +55,9 @@ func (s *Session) startNative(ctx context.Context) {
 	if s.tool == "codex" && s.lk != nil {
 		s.nat.codexOnce.Do(func() { go s.followCodex(ctx) })
 	}
+	if s.tool == "copilot" && s.lk != nil {
+		s.nat.copilotOnce.Do(func() { go s.followCopilot(ctx) })
+	}
 }
 
 // followCodex waits for this agent's rollout file to appear (Codex writes it at
@@ -64,6 +68,25 @@ func (s *Session) followCodex(ctx context.Context) {
 	defer t.Stop()
 	for {
 		if path := transcript.LocateCodex(q); path != "" {
+			s.setTranscript(path)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// followCopilot waits for this agent's events.jsonl to appear (Copilot writes
+// it once the session starts) and follows it.
+func (s *Session) followCopilot(ctx context.Context) {
+	q := transcript.CopilotQuery{Cwd: s.nat.cwd, Since: s.nat.started, Name: s.ident.Agent.Name, Session: s.ident.Session.ID}
+	t := time.NewTicker(500 * time.Millisecond)
+	defer t.Stop()
+	for {
+		if path := transcript.LocateCopilot(q); path != "" {
 			s.setTranscript(path)
 			return
 		}
@@ -93,7 +116,8 @@ func (s *Session) setTranscript(path string) {
 }
 
 // onRecord handles one transcript record: upload turns, confirm delivery, and
-// (for Codex, whose rollout marks turn boundaries) update the tool's state.
+// (for Codex and Copilot, whose transcripts mark turn boundaries) update the
+// tool's state.
 func (s *Session) onRecord(rec transcript.Record) {
 	s.nat.mu.Lock()
 	upload := s.nat.upload

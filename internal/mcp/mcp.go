@@ -254,7 +254,7 @@ func Tools() []Tool {
 		},
 		{
 			Name: "relay_list_agents", op: "list_agents",
-			Description: "List the agents in your Relay session with their role, tool (claude/codex), status and what they are doing (idle, busy, dialog). Use exact names from this list when sending messages.",
+			Description: "List the agents in your Relay session with their role, tool (claude/codex/copilot), status and what they are doing (idle, busy, dialog). Use exact names from this list when sending messages.",
 			InputSchema: obj(nil, map[string]any{}),
 		},
 		{

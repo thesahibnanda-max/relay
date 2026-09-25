@@ -292,11 +292,21 @@ func checkFootprint(env Env) []Check {
 	if codexHome == "" {
 		codexHome = env.Home + "/.codex"
 	}
+	copilotHome := env.Getenv("COPILOT_HOME")
+	if copilotHome == "" {
+		copilotHome = env.Home + "/.copilot"
+	}
 	files := []string{
 		claudeHome + "/settings.json", claudeHome + "/settings.local.json", claudeHome + "/CLAUDE.md", env.Home + "/.claude.json",
 		codexHome + "/config.toml", codexHome + "/AGENTS.md",
+		copilotHome + "/mcp-config.json", copilotHome + "/config.json", copilotHome + "/settings.json",
 		env.Cwd + "/.mcp.json", env.Cwd + "/.claude/settings.json", env.Cwd + "/.claude/settings.local.json",
 		env.Cwd + "/CLAUDE.md", env.Cwd + "/AGENTS.md", env.Cwd + "/.codex/config.toml",
+	}
+	// Copilot's hooks live one per file in a directory, not a fixed path, so
+	// they need a glob rather than a literal entry in the files list above.
+	if matches, _ := filepath.Glob(copilotHome + "/hooks/*.json"); len(matches) > 0 {
+		files = append(files, matches...)
 	}
 	var found []string
 	scanned := 0
