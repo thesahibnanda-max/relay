@@ -92,7 +92,7 @@ func Main(argv []string) int {
 		fmt.Fprintln(out, "relay", Version)
 		return 0
 	case KindAgent:
-		return runAgent(p, &factory, errw)
+		return runAgent(p, &factory, os.Stdin, errw)
 	case KindLs:
 		return runLs(p, out, errw)
 	case KindSessionNew, KindSessionEnd:
