@@ -12,6 +12,8 @@ import (
 
 	"github.com/thesahibnanda-max/relay/server/package/config"
 	"github.com/thesahibnanda-max/relay/server/package/cron"
+	"github.com/thesahibnanda-max/relay/server/package/database/mongodb"
+	"github.com/thesahibnanda-max/relay/server/package/database/postgres"
 	"github.com/thesahibnanda-max/relay/server/package/database/repository"
 	"github.com/thesahibnanda-max/relay/server/package/session"
 	"github.com/thesahibnanda-max/relay/server/package/ws"
@@ -26,10 +28,10 @@ import (
 // begins listening; OnStop shuts the HTTP server down cleanly. *http.Server
 // is the standard library's own type - an unavoidable pointer, like
 // *gorm.DB and *mongo.Client elsewhere in this module.
-func Serve(lc fx.Lifecycle, cfg config.Config, mongoURLs repository.MongoURLRepository, agents repository.AgentRepository, sessions session.Interface, handler ws.Interface, pingCron cron.Interface) {
+func Serve(lc fx.Lifecycle, cfg config.Config, mongoURLs repository.MongoURLRepository, agents repository.AgentRepository, sessions session.Interface, handler ws.Interface, pingCron cron.Interface, pg postgres.Interface, mongoPool mongodb.Interface) {
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.PORT),
-		Handler: ws.NewHandler(handler),
+		Handler: ws.NewHandler(handler, pg, mongoPool),
 	}
 	sweepStop := make(chan struct{})
 

@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -219,6 +220,8 @@ type testStack struct {
 	agentRepo repository.AgentRepository
 	svc       session.Interface
 	hub       ws.Interface
+	pg        postgres.Interface
+	mongoPool mongodb.Interface
 }
 
 // buildStack wires the full server against the real docker-compose stack.
@@ -290,14 +293,46 @@ func buildStack(t *testing.T, mutators ...func(*config.Config)) testStack {
 	if err != nil {
 		t.Fatalf("ws.New: %v", err)
 	}
-	return testStack{shards: selector, agentRepo: agentRepo, svc: svc, hub: hub}
+	return testStack{shards: selector, agentRepo: agentRepo, svc: svc, hub: hub, pg: pg, mongoPool: mongoPool}
 }
 
-func startServer(t *testing.T, hub ws.Interface) string {
+func startServer(t *testing.T, stack testStack) string {
 	t.Helper()
-	srv := httptest.NewServer(ws.NewHandler(hub))
+	srv := httptest.NewServer(ws.NewHandler(stack.hub, stack.pg, stack.mongoPool))
 	t.Cleanup(srv.Close)
 	return "ws" + strings.TrimPrefix(srv.URL, "http") + ws.Path
+}
+
+type healthzBody struct {
+	Status string `json:"status"`
+	SQL    string `json:"sql"`
+	NoSQL  string `json:"no-sql"`
+}
+
+// TestHealthzEndpoint_ReflectsRealDatabaseConnectivity proves the fully
+// wired-up handler (not the fakes package ws's own unit tests use) reports
+// healthy against the real Postgres/Mongo docker-compose stack - the actual
+// code path a deploy script or external monitor hits.
+func TestHealthzEndpoint_ReflectsRealDatabaseConnectivity(t *testing.T) {
+	stack := buildStack(t)
+	srv := httptest.NewServer(ws.NewHandler(stack.hub, stack.pg, stack.mongoPool))
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /healthz: got status %d, want 200", resp.StatusCode)
+	}
+	var body healthzBody
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding /healthz body: %v", err)
+	}
+	if want := (healthzBody{Status: "healthy", SQL: "healthy", NoSQL: "healthy"}); body != want {
+		t.Errorf("unexpected body: %+v, want %+v", body, want)
+	}
 }
 
 // TestEndToEndTwoAgentsOneSession dials the WS server twice, joining the
@@ -306,7 +341,7 @@ func startServer(t *testing.T, hub ws.Interface) string {
 // the plan's stated end-to-end acceptance check.
 func TestEndToEndTwoAgentsOneSession(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -355,7 +390,7 @@ func TestEndToEndTwoAgentsOneSession(t *testing.T) {
 // connection must flip the agent's stored status.
 func TestDisconnectMarksAgentDisconnected(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -393,7 +428,7 @@ func TestDisconnectMarksAgentDisconnected(t *testing.T) {
 // Phase 1's at-least-once, crash-survives-delivery guarantee.
 func TestMessageRedeliveredOnReconnect(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -440,7 +475,7 @@ func TestMessageRedeliveredOnReconnect(t *testing.T) {
 // silently share one agent identity.
 func TestResumeRejectsStillConnectedIdentity(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -483,7 +518,7 @@ func TestResumeRejectsStillConnectedIdentity(t *testing.T) {
 // once one arrives.
 func TestWaitReturnsReply(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -519,7 +554,7 @@ func TestWaitReturnsReply(t *testing.T) {
 // blocking forever.
 func TestWaitTimesOut(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -551,7 +586,7 @@ func TestWaitTimesOut(t *testing.T) {
 // equivalent returns an agent's recent message history in order.
 func TestGetContextReturnsMessageHistory(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -629,7 +664,7 @@ func TestServerRestartMarksAllConnectedDisconnected(t *testing.T) {
 // since the recipient is online.
 func TestApproveInboundHoldsThenApproveDelivers(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -680,7 +715,7 @@ func TestApproveInboundHoldsThenApproveDelivers(t *testing.T) {
 // only the approving agent's own connection gets a live push right now).
 func TestRejectNotifiesSender(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -769,7 +804,7 @@ func TestHopLimitReHoldsEveryEighthReply(t *testing.T) {
 // of creating a new one.
 func TestDedupCoalescesRecentIdenticalSend(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -804,7 +839,7 @@ func TestDedupCoalescesRecentIdenticalSend(t *testing.T) {
 // rejected outright (no DB write, no queue) rather than merely delayed.
 func TestRateLimitRejectsSendsOverThePairLimit(t *testing.T) {
 	stack := buildStack(t, func(c *config.Config) { c.PairRateLimit = 1 })
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -963,7 +998,7 @@ func TestSweepReapsGoneAgentsAndFailsPendingMail(t *testing.T) {
 // another agent's list_agents call while the reporter is connected.
 func TestListAgentsShowsLiveAgentState(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1009,7 +1044,7 @@ func TestListAgentsShowsLiveAgentState(t *testing.T) {
 // recipient report what it actually did with a message it received.
 func TestMsgStateAdvancesToInjectedThenDone(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
