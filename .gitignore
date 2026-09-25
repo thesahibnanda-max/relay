@@ -12,6 +12,7 @@ ui/.vercel/
 .vercel/
 .DS_Store
 *.log
+.env.stage
 
 # AI assistant notes and config: local only, never pushed
 MEMORY.md
