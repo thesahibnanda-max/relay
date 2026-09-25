@@ -173,14 +173,17 @@ type ListAgentsResult struct {
 // connection status (connected|disconnected|exited); State is the live,
 // never-persisted tool state (idle|busy|dialog|...), "unknown" if the agent
 // has never reported one (including right after a server restart, since
-// this is intentionally not durable).
+// this is intentionally not durable). LastActive is the agent document's own
+// UpdatedAt (join/resume, a status change, or being reaped) - not refined by
+// any more-recent message activity the way the local daemon's equivalent is.
 type AgentInfo struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Tool   string `json:"tool"`
-	Role   string `json:"role"`
-	Status string `json:"status"`
-	State  string `json:"state,omitempty"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Tool       string    `json:"tool"`
+	Role       string    `json:"role"`
+	Status     string    `json:"status"`
+	State      string    `json:"state,omitempty"`
+	LastActive time.Time `json:"last_active"`
 }
 
 // ApproveArgs is the OpApprove/OpReject request payload. ID empty picks the

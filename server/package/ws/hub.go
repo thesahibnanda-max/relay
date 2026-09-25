@@ -341,7 +341,7 @@ func (h hub) handleListAgents(ctx context.Context, cn *conn, me session.JoinResu
 	}
 	out := make([]AgentInfo, len(agents))
 	for i, a := range agents {
-		info := AgentInfo{ID: a.ID, Name: a.Name, Tool: a.Tool, Role: a.Role, Status: a.Status}
+		info := AgentInfo{ID: a.ID, Name: a.Name, Tool: a.Tool, Role: a.Role, Status: a.Status, LastActive: a.UpdatedAt}
 		// Live tool state only means anything for an agent connected right
 		// now - mirrors the local daemon's own rule exactly.
 		if _, online := h.reg.get(a.ID); online {

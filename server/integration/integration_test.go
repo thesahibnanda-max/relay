@@ -1037,6 +1037,7 @@ func TestSweepReapsGoneAgentsAndFailsPendingMail(t *testing.T) {
 func TestListAgentsShowsLiveAgentState(t *testing.T) {
 	stack := buildStack(t)
 	wsURL := startServer(t, stack)
+	before := time.Now().UTC()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -1075,6 +1076,18 @@ func TestListAgentsShowsLiveAgentState(t *testing.T) {
 	}
 	if bobInfo.Status != "connected" {
 		t.Fatalf("expected bob's status to be connected, got %q", bobInfo.Status)
+	}
+	// Regression test: LastActive used to always come back as the Go zero
+	// time.Time (it was never copied from mongodb.Agent.UpdatedAt into the
+	// wire reply at all). Not asserting it reflects the agent_state call
+	// just made - that RPC only updates the connection's in-memory live
+	// State, not the persisted document - so it should be pinned to around
+	// bob's join/registration instead.
+	if bobInfo.LastActive.Before(before) {
+		t.Fatalf("expected bob's LastActive to be at or after %v (test start), got %v", before, bobInfo.LastActive)
+	}
+	if time.Since(bobInfo.LastActive) > time.Minute {
+		t.Fatalf("expected bob's LastActive to be recent, got %v", bobInfo.LastActive)
 	}
 }
 

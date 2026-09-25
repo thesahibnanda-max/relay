@@ -126,6 +126,12 @@ func (f *fakeServer) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// bobLastActive is a fixed, recognizable non-zero timestamp (deliberately
+// not near the Unix epoch, which could be mistaken for a bug producing a
+// near-zero value) - the fake server's canned list_agents reply uses it so
+// the round-trip test below can assert on an exact, unambiguous value.
+var bobLastActive = time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+
 func (f *fakeServer) handleRPC(rpc rpcFrame) rpcResultFrame {
 	switch rpc.Op {
 	case opSend:
@@ -133,7 +139,7 @@ func (f *fakeServer) handleRPC(rpc rpcFrame) rpcResultFrame {
 		return rpcResultFrame{ID: rpc.ID, OK: true, Result: res}
 	case opListAgents:
 		res, _ := json.Marshal(listAgentsResult{Agents: []agentInfo{
-			{ID: "agent-2", Name: "bob", Tool: "claude", Role: "peer", Status: "connected"},
+			{ID: "agent-2", Name: "bob", Tool: "claude", Role: "peer", Status: "connected", LastActive: bobLastActive},
 		}})
 		return rpcResultFrame{ID: rpc.ID, OK: true, Result: res}
 	case opContext:
@@ -244,6 +250,11 @@ func TestCall_RoundTripsThroughEachSupportedOp(t *testing.T) {
 	}
 	if len(listResult.Agents) != 1 || listResult.Agents[0].Name != "bob" {
 		t.Errorf("unexpected list_agents result: %+v", listResult)
+	}
+	// Regression test: LastActive used to be silently dropped between the
+	// wire reply and proto.PeerInfo, always coming out as the zero value.
+	if !listResult.Agents[0].LastActive.Equal(bobLastActive) {
+		t.Errorf("LastActive = %v, want %v", listResult.Agents[0].LastActive, bobLastActive)
 	}
 
 	var ctxResult proto.ContextResult

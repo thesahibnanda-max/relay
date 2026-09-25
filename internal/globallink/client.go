@@ -462,7 +462,7 @@ func (c *Client) callListAgents(ctx context.Context, out any) error {
 		id := c.Identity()
 		peers := make([]proto.PeerInfo, len(r.Agents))
 		for i, a := range r.Agents {
-			peers[i] = proto.PeerInfo{Name: a.Name, Role: a.Role, Tool: a.Tool, Status: a.Status, State: a.State, Self: a.Name == id.Agent.Name}
+			peers[i] = proto.PeerInfo{Name: a.Name, Role: a.Role, Tool: a.Tool, Status: a.Status, State: a.State, LastActive: a.LastActive, Self: a.Name == id.Agent.Name}
 		}
 		*res = proto.ListAgentsResult{Session: id.Session.ID, Agents: peers}
 	}
