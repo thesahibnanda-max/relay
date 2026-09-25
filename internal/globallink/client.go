@@ -40,6 +40,11 @@ const tlsEnvVar = "RELAY_GLOBAL_TLS"
 
 type Options struct {
 	HostPort string // "host:port" to dial
+	// ForceTLS is set by internal/cli when dialing an official release
+	// build's one configured builtin server, which is always TLS-terminated
+	// - independent of and in addition to RELAY_GLOBAL_TLS (see tlsEnvVar),
+	// which remains the only way to opt into TLS for a self-hosted server.
+	ForceTLS bool
 	// Hello carries Session/Name/Token/Tool/Role/ApproveInbound/CanInterrupt/
 	// CanBroadcast - the same proto.Hello an internal/link connection uses,
 	// so internal/cli builds one Hello value the same way for both paths.
@@ -168,7 +173,7 @@ func (c *Client) Close(exitCode int) {
 
 func (c *Client) dialURL() string {
 	scheme := "ws"
-	if os.Getenv(tlsEnvVar) != "" {
+	if c.opt.ForceTLS || os.Getenv(tlsEnvVar) != "" {
 		scheme = "wss"
 	}
 	return scheme + "://" + c.opt.HostPort + wsPath

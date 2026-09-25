@@ -280,7 +280,7 @@ func connectRetryingAgentLive(ctx context.Context, opt link.Options) (*link.Clie
 // at internal/globallink instead of internal/link. No daemon.Ensure/spawn
 // logic applies here at all: there is no local process to start.
 func connectGlobal(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.Adaptor, col *collab.Session) (collab.Link, error) {
-	hostPort, sessionValue, err := globalDialTarget(p)
+	hostPort, sessionValue, forceTLS, err := globalDialTarget(p)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +293,7 @@ func connectGlobal(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.A
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	lk, err := connectGlobalWithResume(ctx, paths, p, hostPort, hello, col)
+	lk, err := connectGlobalWithResume(ctx, paths, p, hostPort, forceTLS, hello, col)
 	if err != nil {
 		return nil, err
 	}
@@ -305,23 +305,36 @@ func connectGlobal(paths relayhome.Paths, p Parsed, role roles.Role, a adaptor.A
 	return lk, nil
 }
 
-// globalDialTarget resolves which server to dial and what Session value to
-// send in the Hello. A join token already carries the server address and
-// the exact session ULID to resume; a fresh session has neither, so it needs
-// --server or RELAY_SERVER to say where to create it - there is no implicit
-// default server, this is self-hosted infrastructure.
-func globalDialTarget(p Parsed) (hostPort, sessionValue string, err error) {
+// globalDialTarget resolves which server to dial, what Session value to send
+// in the Hello, and whether the dial must be forced to TLS. A join token
+// already carries the server address and the exact session ULID to resume; a
+// fresh session has neither, so it needs --server or RELAY_SERVER to say
+// where to create it - there is no implicit default server for a
+// local/from-source build (self-hosted infrastructure). An official release
+// binary instead has one server baked in at build time - see
+// resolveGlobalServer - which both branches below route through, so a
+// request for any other host (via --server/RELAY_SERVER or a join token
+// naming a different host) is rejected the same way in either case.
+func globalDialTarget(p Parsed) (hostPort, sessionValue string, forceTLS bool, err error) {
 	if p.SessionKind == SessionKindGlobalJoin {
-		return p.GlobalToken.HostPort, p.GlobalToken.ULID, nil
+		hostPort, forceTLS, err := resolveGlobalServer(p.GlobalToken.HostPort)
+		if err != nil {
+			return "", "", false, err
+		}
+		return hostPort, p.GlobalToken.ULID, forceTLS, nil
 	}
 	server := p.Server
 	if server == "" {
 		server = os.Getenv("RELAY_SERVER")
 	}
-	if server == "" {
-		return "", "", errors.New("--session=NEW needs a server to create the session on: pass --server=<host[:port]> or set RELAY_SERVER")
+	hostPort, forceTLS, err = resolveGlobalServer(server)
+	if err != nil {
+		return "", "", false, err
 	}
-	return server, proto.SessionNew, nil
+	if hostPort == "" {
+		return "", "", false, errors.New("--session=NEW needs a server to create the session on: pass --server=<host[:port]> or set RELAY_SERVER")
+	}
+	return hostPort, proto.SessionNew, forceTLS, nil
 }
 
 // connectGlobalWithResume mirrors connectWithResume's exact decision shape,
@@ -329,8 +342,8 @@ func globalDialTarget(p Parsed) (hostPort, sessionValue string, err error) {
 // SessionKindGlobalJoin (an existing token to resume into) - a brand new
 // session (SessionKindGlobalNew) can have no prior saved identity, exactly
 // like local's --session=NEW/NEW_LOCAL never resumes either.
-func connectGlobalWithResume(ctx context.Context, paths relayhome.Paths, p Parsed, hostPort string, hello proto.Hello, col *collab.Session) (*globallink.Client, error) {
-	opt := globallink.Options{HostPort: hostPort, Hello: hello, OnDeliver: col.Deliver, OnNotice: col.Notice}
+func connectGlobalWithResume(ctx context.Context, paths relayhome.Paths, p Parsed, hostPort string, forceTLS bool, hello proto.Hello, col *collab.Session) (*globallink.Client, error) {
+	opt := globallink.Options{HostPort: hostPort, ForceTLS: forceTLS, Hello: hello, OnDeliver: col.Deliver, OnNotice: col.Notice}
 	canResume := p.Name != "" && p.SessionKind == SessionKindGlobalJoin && !p.Fresh
 	if !canResume {
 		if p.Resume {
