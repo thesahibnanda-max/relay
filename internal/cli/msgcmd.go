@@ -269,10 +269,17 @@ func runApproveGlobal(p Parsed, out, errw io.Writer) int {
 		return 1
 	}
 
+	hostPort, forceTLS, err := resolveGlobalServer(p.GlobalToken.HostPort)
+	if err != nil {
+		fmt.Fprintf(errw, "relay: %v\n", err)
+		return 1
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	lk, err := globallink.Connect(ctx, globallink.Options{
-		HostPort: p.GlobalToken.HostPort,
+		HostPort: hostPort,
+		ForceTLS: forceTLS,
 		Hello: proto.Hello{
 			Session: p.GlobalToken.ULID, Name: p.Name, Token: saved.Token, Tool: saved.Tool, Role: "peer",
 			ApproveInbound: saved.ApproveInbound, CanInterrupt: saved.CanInterrupt, CanBroadcast: saved.CanBroadcast,

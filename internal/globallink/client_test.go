@@ -408,3 +408,24 @@ func TestDeliver_CallsOnDeliverAndAcksEveryTime(t *testing.T) {
 		t.Fatalf("unexpected deliveries: %v", delivered)
 	}
 }
+
+// TestDialURL_ForceTLSSwitchesToWSSEvenWithoutTheEnvVar proves internal/cli
+// can force TLS for an official release binary's one builtin server (see
+// Options.ForceTLS) independently of RELAY_GLOBAL_TLS, which remains the
+// only TLS switch for a self-hosted server.
+func TestDialURL_ForceTLSSwitchesToWSSEvenWithoutTheEnvVar(t *testing.T) {
+	c := &Client{opt: Options{HostPort: "relay.example.com:443", ForceTLS: true}}
+	if got, want := c.dialURL(), "wss://relay.example.com:443"+wsPath; got != want {
+		t.Errorf("dialURL() = %q, want %q", got, want)
+	}
+}
+
+// TestDialURL_NoForceTLSNoEnvVarStaysPlainWS proves ForceTLS defaulting to
+// false (every existing caller) keeps today's exact ws:// behavior.
+func TestDialURL_NoForceTLSNoEnvVarStaysPlainWS(t *testing.T) {
+	t.Setenv(tlsEnvVar, "")
+	c := &Client{opt: Options{HostPort: "relay.example.com:5555"}}
+	if got, want := c.dialURL(), "ws://relay.example.com:5555"+wsPath; got != want {
+		t.Errorf("dialURL() = %q, want %q", got, want)
+	}
+}

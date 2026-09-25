@@ -271,3 +271,46 @@ func TestRunApproveGlobal_NoSavedIdentityFailsClearly(t *testing.T) {
 		t.Errorf("expected a clear no-saved-identity error, got %q", errw.String())
 	}
 }
+
+// TestRunApproveGlobal_ReleaseBuildRejectsTokenNamingOtherHost proves the
+// second lockdown loophole (relay approve reading a join token's host
+// independently of globalDialTarget) is actually closed: an official
+// release binary (builtinServerURL set) refuses to dial a token naming any
+// host but its one builtin server, even though a saved identity exists.
+func TestRunApproveGlobal_ReleaseBuildRejectsTokenNamingOtherHost(t *testing.T) {
+	fs := &fakeGlobalServer{held: []wireMessageView{
+		{ID: "held-1", From: "alice", To: "bob", Kind: "task", Body: "please approve", State: "held", Detail: "awaiting approval", CreatedAt: time.Now()},
+	}}
+	srv := httptest.NewServer(fs.handler())
+	defer srv.Close()
+	hostPort := strings.TrimPrefix(srv.URL, "http://")
+
+	setBuiltinServerURL(t, "relay.example.com:443")
+
+	t.Setenv("RELAY_HOME", t.TempDir())
+	paths, err := relayhome.Resolve()
+	if err != nil {
+		t.Fatalf("relayhome.Resolve: %v", err)
+	}
+	if err := paths.Ensure(); err != nil {
+		t.Fatalf("paths.Ensure: %v", err)
+	}
+
+	token := globalid.Token{ULID: "01TESTSESSIONULID0000000A", HostPort: hostPort}
+	saveIdentityWithPolicy(paths, token.FileSafe(), "bob", "saved-token", "claude", true, false, false)
+
+	p := Parsed{
+		Kind: KindApprove, Sub: "accept", Words: []string{"all"},
+		SessionKind: SessionKindGlobalJoin, GlobalToken: token, Session: token.String(), Name: "bob",
+	}
+	var out, errw strings.Builder
+	if code := runApprove(p, nil, &out, &errw); code != 1 {
+		t.Fatalf("expected failure, got code=%d out=%q err=%q", code, out.String(), errw.String())
+	}
+	if len(fs.ops) != 0 {
+		t.Fatalf("must never dial the non-builtin server, got ops=%v", fs.ops)
+	}
+	if !strings.Contains(errw.String(), "not supported in this build") {
+		t.Errorf("expected the builtin-server rejection error, got %q", errw.String())
+	}
+}

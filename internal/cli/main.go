@@ -30,6 +30,10 @@ Run an agent (it looks and behaves exactly like the tool itself):
                        machine, same as always. A session token printed by "others join with"
                        (a bare ULID for local, "<ulid>@host:port" for global) is what --session
                        takes to join one.
+                       The officially distributed relay binary always uses its one built-in
+                       global session server; --server/$RELAY_SERVER and a join token's host
+                       only matter for a binary built from source (e.g. "make build"), which
+                       can point at any server you run yourself.
   --session=<id> --name=<name> auto-resumes a crashed/killed agent of that name if
                        a saved identity exists (nothing to opt into); --resume fails
                        loudly instead of silently registering fresh when none is found,

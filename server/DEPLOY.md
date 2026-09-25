@@ -92,10 +92,14 @@ relay.example.com {
 }
 ```
 
-Once a proxy terminates TLS in front of it, clients must dial `wss://` instead of `ws://`:
-set `RELAY_GLOBAL_TLS=1` in the environment of every `relay` CLI invocation that connects to
-this server (already-supported client-side switch in `internal/globallink`), and pass
-`--server=relay.example.com:443` (or whatever port Caddy listens on).
+Once a proxy terminates TLS in front of it, clients must dial `wss://` instead of `ws://`. The
+officially distributed `relay` binary already has this server's address and TLS baked in at
+release build time (via the `RELAY_BASE_URL` GitHub secret + GoReleaser ldflags - see
+`internal/cli/builtinserver.go`), so nothing needs to be set for it. Only someone running a
+`relay` CLI built from source (`make build`/`go build .`) against a self-hosted server needs
+`RELAY_GLOBAL_TLS=1` in the environment plus `--server=relay.example.com:443` (or whatever
+port Caddy listens on) - the source build has no server baked in and is free to point at any
+server, including this one.
 
 ## Out of scope
 

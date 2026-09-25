@@ -39,3 +39,4 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELAY_BASE_URL: ${{ secrets.RELAY_BASE_URL }}
