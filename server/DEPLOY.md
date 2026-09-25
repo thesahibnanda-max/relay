@@ -24,6 +24,7 @@ free-tier instance, for example) can be tuned without a rebuild.
 | `SWEEP_EVERY` | `30s` | How often the TTL-expiry + disconnect-reaper maintenance pass runs, per shard. |
 | `DISCONNECT_GRACE` | `15m` | How long a disconnected agent may stay offline before the sweep reaps it as gone for good (`exited`) and fails its pending mail to `undeliverable`. |
 | `POSTGRES_CACHE_TTL` | `10m` | How long the in-memory L1 cache of session-to-shard lookups stays valid before re-querying Postgres. The mapping never actually changes once assigned, so this is a defensive ceiling, not a correctness knob - useful to shorten on a fast local Postgres, or set to `0` to disable the cache entirely. |
+| `PING_CHECK_INTERVAL` | `5m30s` | How often a background job checks every configured Postgres and MongoDB connection is actually alive (not just cached as healthy) - catches an outage even during a quiet period with no real traffic to surface one on its own. Failures are logged, not otherwise acted on. |
 
 On a very small VM (1 shared vCPU, ~1GB RAM), lowering `RPC_RATE_LIMIT`/`MAX_INFLIGHT_RPCS`
 and raising `SWEEP_EVERY` (e.g. to `2m`) trades a little latency for less CPU/DB load; none

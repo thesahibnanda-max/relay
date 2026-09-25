@@ -8,6 +8,7 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/thesahibnanda-max/relay/server/package/config"
+	"github.com/thesahibnanda-max/relay/server/package/cron"
 	"github.com/thesahibnanda-max/relay/server/package/database/mongodb"
 	"github.com/thesahibnanda-max/relay/server/package/database/postgres"
 	"github.com/thesahibnanda-max/relay/server/package/database/repository"
@@ -33,5 +34,6 @@ var Module = fx.Module("server",
 		sharding.New,
 		session.New,
 		ws.New,
+		cron.New,
 	),
 )

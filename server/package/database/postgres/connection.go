@@ -5,6 +5,9 @@
 package postgres
 
 import (
+	"context"
+	"errors"
+
 	gormpostgres "gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
@@ -19,6 +22,11 @@ type Interface interface {
 	// builder repositories are expected to use - wrapping it again would
 	// just be a redundant layer, not real decoupling.
 	DB() *gorm.DB
+
+	// Ping reports whether this shard's control-plane database can actually
+	// serve a query, not just that a connection to it exists - see the
+	// implementation's own comment for why both checks are needed.
+	Ping(ctx context.Context) error
 }
 
 type impl struct {
@@ -39,3 +47,26 @@ func New(cfg config.Config) (Interface, error) {
 }
 
 func (i impl) DB() *gorm.DB { return i.db }
+
+// Ping checks both that a connection can be established (sqlDB.PingContext)
+// and that a real query actually executes (SELECT 1) - deliberately both,
+// not just one: this DSN goes through Supabase's session pooler, which can
+// report a healthy TCP-level connection while query execution is broken
+// (a stale pooled backend, an exhausted pool slot, etc.), so a bare ping
+// alone isn't a reliable health signal for a pooler-fronted database. "1" is
+// a constant, not real data, so it's a literal in the SQL rather than a
+// bound parameter - GORM's Raw() expects its own "?" placeholder style, and
+// a native "$1" placeholder silently breaks its argument encoding instead
+// (confirmed against the real database: it fails every time with "unable to
+// encode 1 into text format for text (OID 25)"). Both checks run against
+// the same ctx-bound session (ctxDB), so the whole call - not just the ping
+// half - honors the caller's timeout/cancellation.
+func (i impl) Ping(ctx context.Context) error {
+	ctxDB := i.db.WithContext(ctx)
+	sqlDB, err := ctxDB.DB()
+	if err != nil {
+		return err
+	}
+	var one int
+	return errors.Join(sqlDB.PingContext(ctx), ctxDB.Raw("SELECT 1").Scan(&one).Error)
+}

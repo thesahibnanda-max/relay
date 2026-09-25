@@ -31,6 +31,11 @@ type Interface interface {
 	// short-lived caller that constructs its own pool - a test, a one-off
 	// script - must, or it leaks a live connection per configured shard.
 	Close(ctx context.Context) error
+
+	// Ping checks every configured shard is reachable, not just one -
+	// see the implementation's own comment for why a partial failure still
+	// needs to surface correctly.
+	Ping(ctx context.Context) error
 }
 
 type impl struct {
@@ -70,5 +75,22 @@ func (i impl) Close(ctx context.Context) error {
 			errs = append(errs, err)
 		}
 	}
+	return errors.Join(errs...)
+}
+
+// Ping pings every configured shard, not just one, since a caller needs to
+// know if ANY shard is unreachable - a session already assigned to a
+// down shard would otherwise report healthy while actually being unusable.
+// Every result (including nil, on success) is appended unconditionally:
+// errors.Join discards nils and returns nil itself if every value is nil, so
+// this correctly reports success only when every shard pinged clean, and
+// otherwise joins exactly the shards that actually failed.
+func (i impl) Ping(ctx context.Context) error {
+	var errs []error
+
+	for _, client := range i.clients {
+		errs = append(errs, client.Ping(ctx, nil))
+	}
+
 	return errors.Join(errs...)
 }

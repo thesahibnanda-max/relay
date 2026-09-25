@@ -20,6 +20,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/thesahibnanda-max/relay/server/package/config"
+	"github.com/thesahibnanda-max/relay/server/package/cron"
 	"github.com/thesahibnanda-max/relay/server/package/database/mongodb"
 	"github.com/thesahibnanda-max/relay/server/package/database/postgres"
 	"github.com/thesahibnanda-max/relay/server/package/database/repository"
@@ -124,6 +125,89 @@ func TestMongoCollectionsCreatedIfMissing(t *testing.T) {
 		if !found {
 			t.Errorf("expected collection %q to exist after EnsureCollection, it does not", name)
 		}
+	}
+}
+
+// TestPostgresPing_SucceedsAgainstARealDatabase is the regression test for
+// the bug found reviewing this method by hand: Raw("SELECT $1", 1) fails
+// every time against the real driver ("unable to encode 1 into text format
+// for text (OID 25)"), since GORM's Raw() expects its own "?" placeholder
+// style, not a native "$1". Only a real database surfaces this - it's not
+// something a fake/mock of postgres.Interface could ever catch.
+func TestPostgresPing_SucceedsAgainstARealDatabase(t *testing.T) {
+	cfg := testConfig(t)
+	pg, err := postgres.New(cfg)
+	if err != nil {
+		t.Fatalf("postgres.New: %v", err)
+	}
+	if err := pg.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+}
+
+// TestPostgresPing_FailsFastOnACancelledContext is the regression test for
+// the other bug found reviewing this method: the SELECT half used to run
+// against a plain (non-context-bound) session, silently ignoring the
+// caller's own cancellation/timeout.
+func TestPostgresPing_FailsFastOnACancelledContext(t *testing.T) {
+	cfg := testConfig(t)
+	pg, err := postgres.New(cfg)
+	if err != nil {
+		t.Fatalf("postgres.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := pg.Ping(ctx); err == nil {
+		t.Fatal("expected Ping to fail on an already-cancelled context, got nil")
+	}
+}
+
+// TestMongoPoolPing_SucceedsAgainstEveryConfiguredShard proves Ping checks
+// every shard named in TEST_MONGO_URLS, not just the first - a pool with 3
+// shards (the real staging setup this was validated against) must exercise
+// all 3, not stop after the first success.
+func TestMongoPoolPing_SucceedsAgainstEveryConfiguredShard(t *testing.T) {
+	cfg := testConfig(t)
+	pool, err := mongodb.New(cfg)
+	if err != nil {
+		t.Fatalf("mongodb.New: %v", err)
+	}
+	if err := pool.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+}
+
+// TestCronPingJob_RunsAgainstRealConnections proves package cron's wiring -
+// New/Start/Stop, and the scheduled job actually calling both real Ping
+// methods - works end to end against genuine infrastructure, not just the
+// fakes package cron's own unit tests use.
+func TestCronPingJob_RunsAgainstRealConnections(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.PingCheckInterval = 50 * time.Millisecond
+
+	pg, err := postgres.New(cfg)
+	if err != nil {
+		t.Fatalf("postgres.New: %v", err)
+	}
+	pool, err := mongodb.New(cfg)
+	if err != nil {
+		t.Fatalf("mongodb.New: %v", err)
+	}
+
+	pingCron, err := cron.New(cfg, pool, pg)
+	if err != nil {
+		t.Fatalf("cron.New: %v", err)
+	}
+	if err := pingCron.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	time.Sleep(300 * time.Millisecond) // let at least one real tick happen
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := pingCron.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
 	}
 }
 
