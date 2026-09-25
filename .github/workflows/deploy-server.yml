@@ -1,0 +1,56 @@
+name: deploy-server
+
+on:
+  push:
+    branches: [main]
+    paths: ["server/**", ".github/workflows/deploy-server.yml"]
+  workflow_dispatch: {}
+
+concurrency: deploy-server
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.DEPLOY_SSH_HOST }}" >> ~/.ssh/known_hosts
+      - name: build and restart on the VM
+        env:
+          SQL_DSN: ${{ secrets.SQL_DSN }}
+          MONGO_URLS: ${{ secrets.MONGO_URLS }}
+          RELAY_PORT: ${{ secrets.RELAY_PORT }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o "SendEnv=SQL_DSN MONGO_URLS RELAY_PORT" \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" 'bash -s' <<'REMOTE'
+          set -euo pipefail
+          cd ~/relay
+          git fetch origin main
+          git reset --hard origin/main
+          git clean -fd
+          cd server
+          export PATH=$PATH:/usr/local/go/bin
+          go build -trimpath -ldflags "-s -w" -o /tmp/relay-server-new .
+          sudo mv /tmp/relay-server-new /usr/local/bin/relay-server
+          sudo chmod 755 /usr/local/bin/relay-server
+          sudo tee /etc/relay-server.env > /dev/null <<ENVFILE
+          PORT=${RELAY_PORT}
+          SQL_DSN=${SQL_DSN}
+          MONGO_URLS=${MONGO_URLS}
+          ENVFILE
+          sudo chmod 600 /etc/relay-server.env
+          sudo systemctl restart relay-server
+          for i in $(seq 1 30); do
+            if curl -fsS "http://localhost:${RELAY_PORT}/healthz" > /dev/null; then
+              echo "healthy after ${i}x2s"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "relay-server did not become healthy in time" >&2
+          sudo journalctl -u relay-server -n 40 --no-pager >&2
+          exit 1
+          REMOTE
