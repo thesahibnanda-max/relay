@@ -1,9 +1,17 @@
 package ws
 
-import "net/http"
+import (
+	"encoding/json"
+	"net/http"
+)
 
 // Path is the WebSocket upgrade endpoint agents connect to.
 const Path = "/v1/agent"
+
+// healthzResponse is the JSON body /healthz replies with.
+type healthzResponse struct {
+	Status string `json:"status"`
+}
 
 // NewHandler builds the HTTP handler that serves h's WebSocket endpoint plus
 // a bare health check, wrapped in a CORS middleware that allows every
@@ -15,7 +23,9 @@ func NewHandler(h Interface) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+Path, h.Accept)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(healthzResponse{Status: "healthy"})
 	})
 	return corsMiddleware(mux)
 }

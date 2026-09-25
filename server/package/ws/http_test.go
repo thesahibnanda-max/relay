@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -155,5 +156,33 @@ func TestCORS_PreflightWithNoRequestedHeadersFallsBackToStar(t *testing.T) {
 
 	if got := rec.Header().Get("Access-Control-Allow-Headers"); got != "*" {
 		t.Errorf("Access-Control-Allow-Headers: got %q, want %q", got, "*")
+	}
+}
+
+// TestHealthz_ReturnsJSONStatus proves /healthz is a real JSON status
+// endpoint, not just a bare 200 - useful for anything (a deploy script, a
+// monitoring check) that wants to distinguish "server answered" from
+// "server answered and says it's healthy."
+func TestHealthz_ReturnsJSONStatus(t *testing.T) {
+	handler := newTestHandler(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /healthz: got status %d, want 200", rec.Code)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("Content-Type: got %q, want %q", got, "application/json")
+	}
+	var body struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding /healthz body: %v", err)
+	}
+	if body.Status != "healthy" {
+		t.Errorf(`body.Status = %q, want "healthy"`, body.Status)
 	}
 }
