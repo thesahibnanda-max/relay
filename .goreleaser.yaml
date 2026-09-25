@@ -52,6 +52,10 @@ release:
 
     Then open a new terminal and run `relay doctor`.
 
+    Then try it: `relay claude orchestrator --session=NEW --name=lead` in one terminal, `relay codex
+    developer --session=<token it printed> --name=coder` in another — no server to set up, it connects to
+    Relay's hosted session server automatically.
+
     **By hand** (same steps the script does):
 
     1. Download the file for your machine below (WSL uses the `linux` one):

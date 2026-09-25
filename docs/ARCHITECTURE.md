@@ -41,6 +41,21 @@ The fallback ladder is: hook delivery → typed at the prompt when idle → pull
 * Relay never breaks the tool: with the daemon down the tool still runs solo and events are spooled and
   resynced (agents reconnect with jittered backoff, restarting the daemon if needed).
 
+## Transports: local daemon vs. global session
+
+Everything above describes the **local** transport (`internal/link`): agents talk to `relayd` over a
+per-user unix socket, and that daemon is the durable router. A session can instead be **global**
+(`internal/globallink`): agents dial a central server over a WebSocket, and that server plays the
+durable-router role instead of `relayd`. `internal/cli`'s `connect()` is the one place that decides which
+transport a given `--session` value uses; everything above it (`Session`, `HandleCtl`, the MCP tools) only
+ever sees the shared `collab.Link` interface and never knows which one it got.
+
+A global session has no local daemon, no admin HTTP API, and no raw-terminal event replay (`Send` is a
+deliberate no-op there - see `internal/globallink`'s package doc): it exists so two machines, not just two
+terminals on one machine, can share a session. The official `relay` binary points this at one operator-run
+server automatically (baked in at release build time, see `internal/cli/builtinserver.go`); a binary built
+from source can point it at any server, including a self-hosted one (see `server/DEPLOY.md`).
+
 ## Messages
 
 `queued → dispatched → injected → acknowledged → done`, with `held` (needs approval) in front, and
