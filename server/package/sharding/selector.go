@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/thesahibnanda-max/relay/server/package/config"
 	"github.com/thesahibnanda-max/relay/server/package/database/repository"
 )
 
@@ -24,19 +25,24 @@ type Interface interface {
 type selector struct {
 	shardMap  repository.ShardMapRepository
 	mongoURLs repository.MongoURLRepository
+	cache     *shardURLCache
 }
 
-func New(shardMap repository.ShardMapRepository, mongoURLs repository.MongoURLRepository) (Interface, error) {
+func New(cfg config.Config, shardMap repository.ShardMapRepository, mongoURLs repository.MongoURLRepository) (Interface, error) {
 	if shardMap == nil {
 		return nil, errors.New("sharding: shardMap repository is nil")
 	}
 	if mongoURLs == nil {
 		return nil, errors.New("sharding: mongoURLs repository is nil")
 	}
-	return selector{shardMap: shardMap, mongoURLs: mongoURLs}, nil
+	return selector{shardMap: shardMap, mongoURLs: mongoURLs, cache: newShardURLCache(cfg.PostgresCacheTTL)}, nil
 }
 
 func (s selector) ShardURLFor(ctx context.Context, sessionID string) (string, error) {
+	if url, ok := s.cache.get(sessionID); ok {
+		return url, nil
+	}
+
 	if existing, found, err := s.shardMap.GetBySessionID(ctx, sessionID); err != nil {
 		return "", err
 	} else if found {
@@ -44,9 +50,16 @@ func (s selector) ShardURLFor(ctx context.Context, sessionID string) (string, er
 		if err != nil {
 			return "", err
 		}
+		s.cache.set(sessionID, url.MongoURL)
 		return url.MongoURL, nil
 	}
 
+	// Deliberately NOT cached: ListOrderedByID/Count are only read on this
+	// brand-new-session path (at most once per session's whole lifetime,
+	// never repeated), and caching Count specifically would let concurrent
+	// new-session creations within the same TTL window all compute the same
+	// stale round-robin index - a real correctness regression the cache
+	// would introduce for zero benefit, since this path is never hot.
 	urls, err := s.mongoURLs.ListOrderedByID(ctx)
 	if err != nil {
 		return "", err
@@ -64,5 +77,6 @@ func (s selector) ShardURLFor(ctx context.Context, sessionID string) (string, er
 	if _, err := s.shardMap.Create(ctx, sessionID, chosen.ID); err != nil {
 		return "", fmt.Errorf("sharding: recording assignment for session %s: %w", sessionID, err)
 	}
+	s.cache.set(sessionID, chosen.MongoURL)
 	return chosen.MongoURL, nil
 }
