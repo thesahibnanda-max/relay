@@ -29,7 +29,7 @@ for (const width of WIDTHS) {
       test(`${scheme} demo screenshot fills the width, keeps its 2:1 shape and stays on screen`, async ({ page }) => {
         await page.emulateMedia({ colorScheme: scheme });
         await page.goto('/');
-        const frame = page.locator('.shot-frame:visible');
+        const frame = page.locator('#demo .shot-frame:visible');
         await frame.scrollIntoViewIfNeeded();
         const box = (await frame.boundingBox())!;
         expect(box.width / box.height).toBeCloseTo(2, 1);
@@ -41,6 +41,17 @@ for (const width of WIDTHS) {
           return els.filter((e) => { const r = e.getBoundingClientRect(); return r.left < f.left || r.right > f.right || r.top < f.top || r.bottom > f.bottom; }).length;
         });
         expect(bad).toBe(0);
+      });
+
+      test(`${scheme} cross-machine image fills the width, keeps its 2:1 shape and stays on screen`, async ({ page }) => {
+        await page.emulateMedia({ colorScheme: scheme });
+        await page.goto('/');
+        const frame = page.locator('#together .shot-frame:visible');
+        await frame.scrollIntoViewIfNeeded();
+        const box = (await frame.boundingBox())!;
+        expect(box.width / box.height).toBeCloseTo(2, 1);
+        expect(box.x).toBeGreaterThanOrEqual(0);
+        expect(box.x + box.width).toBeLessThanOrEqual(width);
       });
     }
 
