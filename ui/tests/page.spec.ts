@@ -194,3 +194,50 @@ test.describe('demo screenshot', () => {
     await expect(page.locator('video')).toHaveCount(0);
   });
 });
+
+test.describe('cross-machine image', () => {
+  for (const kind of ['dark', 'light'] as const) {
+    test(`${kind} version is a small WebP with a PNG fallback and a full-size link`, async ({ page }) => {
+      await page.goto('/');
+      const frame = page.locator(`#together .shot-${kind}`);
+      const img = frame.locator('img');
+      const alt = await img.getAttribute('alt');
+      expect(alt!.length).toBeGreaterThan(40);
+      await expect(img).toHaveAttribute('width', '1774');
+      await expect(img).toHaveAttribute('height', '887');
+      await expect(img).toHaveAttribute('loading', 'lazy');
+      const srcset = await frame.locator('picture source').getAttribute('srcset');
+      for (const url of srcset!.split(',').map((x) => x.trim().split(' ')[0])) {
+        const res = await page.request.get(url);
+        expect(res.status(), url).toBe(200);
+        expect(res.headers()['content-type'], url).toBe('image/webp');
+        expect((await res.body()).length, `${url} should stay light`).toBeLessThan(150_000);
+      }
+      const full = await page.request.get((await frame.getAttribute('href'))!);
+      expect(full.status()).toBe(200);
+      expect(full.headers()['content-type']).toBe('image/png');
+      await expect(frame).toHaveAttribute('rel', /noopener/);
+    });
+  }
+
+  test('the dark image shows in dark mode and the light one in light mode', async ({ page }) => {
+    await page.emulateMedia({ colorScheme: 'dark' });
+    await page.goto('/');
+    await expect(page.locator('#together .shot-dark')).toBeVisible();
+    await expect(page.locator('#together .shot-light')).toBeHidden();
+    await page.emulateMedia({ colorScheme: 'light' });
+    await expect(page.locator('#together .shot-light')).toBeVisible();
+    await expect(page.locator('#together .shot-dark')).toBeHidden();
+  });
+
+  test('actually renders, sharp, without stretching', async ({ page }) => {
+    await page.goto('/');
+    const img = page.locator('#together .shot-frame:visible img');
+    await img.scrollIntoViewIfNeeded();
+    await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
+    const m = await img.evaluate((el: HTMLImageElement) => ({ nw: el.naturalWidth, nh: el.naturalHeight, w: el.clientWidth, h: el.clientHeight, src: el.currentSrc }));
+    expect(m.src).toMatch(/\.webp$/);
+    expect(m.nw / m.nh).toBeCloseTo(2, 1);
+    expect(m.w / m.h).toBeCloseTo(2, 1);
+  });
+});

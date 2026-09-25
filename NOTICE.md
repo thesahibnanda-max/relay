@@ -15,13 +15,13 @@ Be aware of the difference between "built and tested" and "should work".
 |---|---|
 | **WSL** | The main test environment. Every feature has been run here, including live with real Claude Code and real Codex. |
 | **Linux (regular)** | Very likely fine, because WSL is Linux. Not yet run on a non-WSL Linux machine. |
-| **macOS** | It compiles and passes the code checks for macOS, but **it has never been run on a Mac**. It should work; treat the first run as a test. The macOS-specific part (checking who is on the other end of a connection) is untried. The automated CI is set up to test on macOS but has not run yet, because the project is not on GitHub. |
+| **macOS** | Automated CI runs and passes on macOS on every pull request. Real-machine use is newer than on WSL, so treat an early run as a test; the macOS-specific part (checking who is on the other end of a connection) has less real-world mileage than the Linux one. |
 | **Windows (native)** | Not supported. `relay` prints "use WSL" and exits. (The code still compiles for Windows so editors and tools do not show errors.) |
 
 Two more caveats:
 
 * **Tool versions.** Relay depends on how the tools behave: their hook formats, their log-file formats and
-  what their screens look like. It was built and verified against **Claude Code 2.1.278** and **Codex
+  what their screens look like. It was built and verified against **Claude Code 2.1.282** and **Codex
   0.155.1**. If a tool changes in an update, parts of Relay may need adjusting.
 * **Claude's permission prompts.** They were never seen on screen during testing, because the test machine's
   Claude runs in "bypass permissions" mode. Relay has protection for them, but it was only tested against
@@ -47,12 +47,14 @@ operator, and a logbook of what was said.
 ## How you use it
 
 ```
-relay claude orchestrator --session=NEW --name=lead     (terminal 1)
-relay codex developer --session=<id> --name=coder       (terminal 2)
+relay claude orchestrator --session=NEW --name=lead     (terminal 1, any machine)
+relay codex developer --session=<token> --name=coder    (terminal 2, same machine or a different one)
 ```
 
-* **Session**: a shared "room" that the assistants join. `NEW` creates one and prints an ID that others use
-  to join it.
+* **Session**: a shared "room" that the assistants join. `NEW` creates one and prints a token that others
+  use to join it, from this machine or a different one — the official `relay` you install already knows
+  which server to use, so nothing extra needs setting up. Want to guarantee it never leaves this one
+  machine? Use `NEW_LOCAL` instead.
 * **Name**: each assistant gets a name such as `lead` or `coder`. Leave it out and Relay makes one up (like
   `brave-fox`). Names are unique within a session, and a few words (`user`, `all`, `relay`, `me`, `self`,
   `none`, `new`) are reserved.
@@ -196,6 +198,10 @@ even if you uninstall Relay.
   messages.
 * **If an assistant vanishes** (its terminal is killed), people who message it are told it is not connected,
   and after 15 minutes it is marked gone so senders learn about it.
+* **A crashed assistant can be resumed**, not just restarted as a stranger: relaunch it with the same
+  `--session` and `--name` and it picks its own identity back up automatically (same messages, same reply
+  chains) — `--resume` fails loudly instead of silently starting fresh if that identity can't be found, and
+  `--fresh` skips this and always registers new on purpose.
 * **Slow or stuck connections are dropped** rather than freezing everything.
 * **Limits:** 32 assistants per session, a cap on request rate, a 32 KB size limit per message, and a size cap
   on stored terminal recordings (1 GB per assistant).
@@ -203,9 +209,12 @@ even if you uninstall Relay.
 
 ## Security in short
 
-Relay only listens on a private local channel (no network port, so websites cannot reach it) and rejects
-other users on the machine. Files are private to you. Message text is stripped of control characters so
-nobody can sneak commands into another terminal, and names and roles are limited to plain characters. See
+For a session kept on one machine (`NEW_LOCAL`, or a bare session id), Relay only listens on a private
+local channel — no network port, so websites cannot reach it — and rejects other users on the machine. A
+session started with `NEW` or joined by a token instead talks to a remote server over the network by
+design (that's how a second machine joins in); the official binary always does this over TLS. Files are
+private to you either way. Message text is stripped of control characters so nobody can sneak commands
+into another terminal, and names and roles are limited to plain characters. See
 [docs/SECURITY.md](docs/SECURITY.md).
 
 ---
@@ -228,11 +237,9 @@ nobody can sneak commands into another terminal, and names and roles are limited
 ## What it does not do, and known gaps
 
 * No dashboard or replay screen (planned as a later idea, not built).
-* A crashed assistant cannot be "resumed" by restarting it. A restarted one is a fresh assistant.
 * Recordings are not encrypted, and secret-hiding is pattern-based, so it can miss unusual secrets.
 * Disk-full situations are not tested.
 * Search inside a teammate's conversation is a simple text match, not a smart full-text search.
-* The project is **not in git yet**, so there is no history or backup of the work.
 * If your Claude runs in "bypass permissions" mode, a teammate's message could lead to commands running with
   no confirmation. Keep that in mind for sessions that matter, and consider running Claude with normal
   permission prompts for them.

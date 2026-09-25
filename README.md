@@ -17,6 +17,11 @@ exactly like the tool itself.
  ● coder replied: 12 tests added
 ```
 
+`--session=NEW` starts a **global** session: the two terminals above can be on the same machine or two
+different ones — the officially distributed `relay` binary connects to Relay's hosted session server
+automatically, no setup required. For a session that never leaves this machine, use `--session=NEW_LOCAL`
+instead. See [Global sessions across machines](#global-sessions-across-machines) below.
+
 **Zero footprint.** Relay's powers exist only while a process runs under `relay`. It never writes to
 `~/.claude`, `~/.codex`, or your project (no `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, hooks or settings),
 and never runs `claude mcp add` / `codex mcp add`. Everything is passed for that one launch (flags,
@@ -53,26 +58,28 @@ Relay wraps tools you already have (`claude`, `codex`) found on your `PATH`.
 ## Quick start
 
 ```sh
-relay claude orchestrator --session=NEW --name=lead     # prints the session id
-relay codex developer --session=<id> --name=coder       # in another terminal
+relay claude orchestrator --session=NEW --name=lead     # prints a token to join with, from anywhere
+relay codex developer --session=<token> --name=coder    # in another terminal (or another machine)
 ```
 
 Now just talk to Claude normally: *"ask coder to run the tests and tell me what fails."* Claude calls
 `relay_send`; the request appears in Codex's terminal as a prompt; Codex answers with `relay_send`; the
 answer appears in Claude's. You can also step in yourself: `relay send coder "stop, use the v2 API"`.
 
-Without `--session`, `relay claude` just runs Claude as a private, solo session (recorded, but with no messaging features added).
+Without `--session`, `relay claude` just runs Claude as a private, solo session (recorded, but with no
+messaging features added). Want both agents guaranteed to stay on this one machine, with no network
+involved? Use `--session=NEW_LOCAL --name=lead` and `--session=<id> --name=coder` instead.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `relay <claude\|codex> [role] [--session=NEW\|<id>] [--name=x] [--approve-inbound] [--record=raw\|events\|off] [-- tool args]` | Run a tool as an agent. Everything after `--` goes to the tool unchanged. |
+| `relay <claude\|codex> [role] [--session=NEW\|NEW_LOCAL\|<id>\|<token>] [--name=x] [--server=host[:port]] [--resume\|--fresh] [--approve-inbound] [--record=raw\|events\|off] [-- tool args]` | Run a tool as an agent. `NEW` starts a global session (any machine can join; the official binary needs no `--server`); `NEW_LOCAL` keeps it on this machine only; a `<token>` (`<ulid>@host[:port]`) joins a global session from anywhere. Everything after `--` goes to the tool unchanged. |
 | `relay ls [--all] [--session=<id>]` | Sessions and their agents. |
 | `relay session new [--name=..]` / `relay session end <id>` | Create / close a session. |
 | `relay send <agent> <text> [--priority=low\|normal\|high\|interrupt] [--session=<id>]` | Message an agent yourself (`-` reads stdin). |
 | `relay messages [--session=..] [--agent=..] [--state=..]` | What agents said to each other, and where each message is. |
-| `relay approve [ls\|accept\|reject] [<id>\|all]` | Decide on messages held for `--approve-inbound` agents. |
+| `relay approve [ls\|accept\|reject] [<id>\|all] [--session=<id>\|<token> --name=x]` | Decide on messages held for `--approve-inbound` agents; with a global session token, acts on one named agent's own held mail. |
 | `relay gc [--older-than=30d] [--compress] [--dry-run]` | Clean up crashed-agent leftovers; forget idle sessions; zstd-compress old logs. |
 | `relay doctor` | Health check: permissions, daemon, database, tools, and stray Relay files. |
 | `relay daemon [status\|stop]` | The background service (starts on demand). |
@@ -120,6 +127,21 @@ Priorities are `low`, `normal`, `high`, `interrupt`. Only roles with `can_interr
 * **Untrusted by design**: text from other agents is attributed with a header the sender cannot forge and
   the agent's briefing tells it to treat teammates' messages like any untrusted input.
 
+## Global sessions across machines
+
+`--session=NEW` doesn't have to stay on one machine: it creates a session on a central relay server, and
+anyone with the printed `<ulid>@host:port` token can join with `--session=<token>` from anywhere. The
+officially distributed `relay` binary already has one such server built in — `--session=NEW` just works,
+no server to run, no flags to set.
+
+A `relay` built from source (`make build`, `go install ...`) is the fully open version instead:
+`--server=<host[:port]>` or `RELAY_SERVER` names the server for a new session, and `RELAY_GLOBAL_TLS=1`
+switches to `wss://` for a TLS-terminated one. Want to run your own server? See
+[server/DEPLOY.md](server/DEPLOY.md).
+
+Prefer a session that never leaves this machine, with no network involved at all? Use
+`--session=NEW_LOCAL`.
+
 ## Files and configuration
 
 Everything lives under `~/.relay` (override with `RELAY_HOME`), private to your user:
@@ -139,6 +161,9 @@ Terminal logs contain everything typed, including secrets you type: use `--recor
 * "daemon speaks a different protocol version": `relay daemon stop`, then retry.
 * An agent seems to ignore a message: `relay messages --state=held` (waiting for approval?) and
   `relay ls` (is its state `dialog`?). Held messages are delivered when it is safe.
+* "cannot reach the global session server": the server is unreachable, or (on the official binary) you
+  passed `--server`/`RELAY_SERVER` naming something other than Relay's built-in one, which it refuses. Use
+  `--session=NEW_LOCAL` for a session that stays on this machine instead.
 * Leftover files after a crash: `relay gc`.
 
 ## Development
@@ -152,7 +177,7 @@ make cross        # linux/darwin x amd64/arm64 builds into ./dist
 
 ### Website (`ui/`)
 
-A one-page site (problem, solution, demo screenshot, install) in plain HTML/CSS/JS under `ui/site/`. Node is only
+A one-page site (problem, solution, cross-machine demo, demo screenshot, install) in plain HTML/CSS/JS under `ui/site/`. Node is only
 needed for local preview and the tests.
 
 ```sh
