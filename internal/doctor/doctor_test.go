@@ -180,6 +180,10 @@ func TestMissingToolsAndUnsupportedPlatform(t *testing.T) {
 		t.Fatalf("%+v", cs)
 	}
 	env.GOOS = "windows"
+	if c := find(Run(env), "platform"); c.Status != OK {
+		t.Fatalf("windows is a supported platform: %+v", c)
+	}
+	env.GOOS = "plan9"
 	if c := find(Run(env), "platform"); c.Status != Fail {
 		t.Fatalf("%+v", c)
 	}

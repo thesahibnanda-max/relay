@@ -82,7 +82,7 @@ func Main(argv []string) int {
 	}
 	out, errw := io.Writer(os.Stdout), io.Writer(os.Stderr)
 	if !supported && p.Kind != KindHelp && p.Kind != KindVersion {
-		fmt.Fprintln(errw, "relay: this platform is not supported. Relay runs on Linux, macOS and WSL (Windows Subsystem for Linux): install and run it inside WSL.")
+		fmt.Fprintln(errw, "relay: this platform is not supported. Relay runs on Linux, macOS, Windows and WSL (Windows Subsystem for Linux).")
 		return 1
 	}
 	switch p.Kind {

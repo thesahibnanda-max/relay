@@ -18,8 +18,11 @@ func PIDAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// OwnedByCurrentUser reports whether a file belongs to the user running relay.
-func OwnedByCurrentUser(st fs.FileInfo) bool {
+// OwnedByCurrentUser reports whether a file belongs to the user running
+// relay. path is unused here (Unix gets the owner uid straight from st) but
+// is part of the signature since Windows needs a fresh syscall against the
+// path to get an owner SID at all.
+func OwnedByCurrentUser(path string, st fs.FileInfo) bool {
 	if sys, ok := st.Sys().(*syscall.Stat_t); ok {
 		return int(sys.Uid) == os.Getuid()
 	}
