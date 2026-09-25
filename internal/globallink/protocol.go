@@ -132,12 +132,13 @@ type listAgentsResult struct {
 }
 
 type agentInfo struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Tool   string `json:"tool"`
-	Role   string `json:"role"`
-	Status string `json:"status"`
-	State  string `json:"state,omitempty"`
+	ID         string    `json:"id"`
+	Name       string    `json:"name"`
+	Tool       string    `json:"tool"`
+	Role       string    `json:"role"`
+	Status     string    `json:"status"`
+	State      string    `json:"state,omitempty"`
+	LastActive time.Time `json:"last_active"`
 }
 
 type approveArgs struct {
