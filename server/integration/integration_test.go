@@ -152,10 +152,23 @@ func buildStack(t *testing.T, mutators ...func(*config.Config)) testStack {
 	if err != nil {
 		t.Fatalf("postgres.New: %v", err)
 	}
+	t.Cleanup(func() {
+		if sqlDB, err := pg.DB().DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	})
 	mongoPool, err := mongodb.New(cfg)
 	if err != nil {
 		t.Fatalf("mongodb.New: %v", err)
 	}
+	// Every test builds its own pool (one *mongo.Client per configured shard,
+	// plus its own Postgres connection above) - against local Docker that's
+	// free to leak for the process's lifetime, but against a real,
+	// connection-limited Postgres/Mongo (a pooler's small connection cap, an
+	// Atlas free-tier cluster) it exhausts the ceiling after a handful of
+	// tests, and every connection after that fails fast instead of
+	// connecting - found running this suite against real staging credentials.
+	t.Cleanup(func() { _ = mongoPool.Close(context.Background()) })
 	mongoURLRepo, err := repository.NewMongoURLRepository(pg)
 	if err != nil {
 		t.Fatalf("NewMongoURLRepository: %v", err)

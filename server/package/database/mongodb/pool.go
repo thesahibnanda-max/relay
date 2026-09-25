@@ -6,6 +6,7 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -25,6 +26,11 @@ type Interface interface {
 	// Database returns the shard's database handle for mongoURL, which must
 	// be one of the URLs this pool was constructed with.
 	Database(mongoURL string) (*mongo.Database, error)
+	// Close disconnects every pooled client. The long-lived server process
+	// never calls this (its one pool lives for the whole process), but any
+	// short-lived caller that constructs its own pool - a test, a one-off
+	// script - must, or it leaks a live connection per configured shard.
+	Close(ctx context.Context) error
 }
 
 type impl struct {
@@ -55,4 +61,14 @@ func (i impl) Database(mongoURL string) (*mongo.Database, error) {
 		return nil, fmt.Errorf("mongo: no client configured for url %q", mongoURL)
 	}
 	return client.Database(databaseName), nil
+}
+
+func (i impl) Close(ctx context.Context) error {
+	var errs []error
+	for _, client := range i.clients {
+		if err := client.Disconnect(ctx); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
