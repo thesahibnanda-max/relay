@@ -25,6 +25,11 @@ type Config struct {
 	MessageTTL      time.Duration `env:"MESSAGE_TTL,default=1h"`
 	SweepEvery      time.Duration `env:"SWEEP_EVERY,default=30s"`
 	DisconnectGrace time.Duration `env:"DISCONNECT_GRACE,default=15m"`
+	// PostgresCacheTTL bounds the sharding package's in-memory L1 cache of
+	// session -> shard-URL lookups (see package sharding) - a defensive
+	// ceiling, not a correctness requirement, since that mapping never
+	// actually changes once assigned. Zero (or negative) disables the cache.
+	PostgresCacheTTL time.Duration `env:"POSTGRES_CACHE_TTL,default=10m"`
 }
 
 // New reads Config from the environment. It is the root of the dependency

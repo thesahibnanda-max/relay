@@ -32,6 +32,7 @@ func TestNew_DefaultsMatchLocalDaemonNumbers(t *testing.T) {
 		{"MessageTTL", c.MessageTTL, time.Hour},
 		{"SweepEvery", c.SweepEvery, 30 * time.Second},
 		{"DisconnectGrace", c.DisconnectGrace, 15 * time.Minute},
+		{"PostgresCacheTTL", c.PostgresCacheTTL, 10 * time.Minute},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -45,6 +46,7 @@ func TestNew_KnobsAreOverridable(t *testing.T) {
 	t.Setenv("PAIR_RATE_LIMIT", "5")
 	t.Setenv("MESSAGE_TTL", "10m")
 	t.Setenv("SWEEP_EVERY", "1s")
+	t.Setenv("POSTGRES_CACHE_TTL", "0")
 	c, err := New()
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -57,5 +59,8 @@ func TestNew_KnobsAreOverridable(t *testing.T) {
 	}
 	if c.SweepEvery != time.Second {
 		t.Errorf("SweepEvery = %v, want 1s", c.SweepEvery)
+	}
+	if c.PostgresCacheTTL != 0 {
+		t.Errorf("PostgresCacheTTL = %v, want 0 (disables the cache)", c.PostgresCacheTTL)
 	}
 }

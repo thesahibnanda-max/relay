@@ -194,7 +194,7 @@ func buildStack(t *testing.T, mutators ...func(*config.Config)) testStack {
 	if err != nil {
 		t.Fatalf("NewMessageRepository: %v", err)
 	}
-	selector, err := sharding.New(shardMapRepo, mongoURLRepo)
+	selector, err := sharding.New(cfg, shardMapRepo, mongoURLRepo)
 	if err != nil {
 		t.Fatalf("sharding.New: %v", err)
 	}
