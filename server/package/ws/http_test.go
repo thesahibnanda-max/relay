@@ -3,13 +3,18 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/mongo"
+	"gorm.io/gorm"
+
 	"github.com/thesahibnanda-max/relay/server/package/config"
 	"github.com/thesahibnanda-max/relay/server/package/database/mongodb"
+	"github.com/thesahibnanda-max/relay/server/package/database/postgres"
 	"github.com/thesahibnanda-max/relay/server/package/session"
 )
 
@@ -88,13 +93,39 @@ func (fakeSessionService) Sweep(ctx context.Context, shardURL string) error {
 
 var _ session.Interface = fakeSessionService{}
 
+// fakePostgresPinger and fakeMongoPinger are controllable stand-ins for
+// postgres.Interface/mongodb.Interface, just enough to drive /healthz's
+// two independent outcomes without a real database.
+type fakePostgresPinger struct{ err error }
+
+func (f fakePostgresPinger) DB() *gorm.DB               { return nil }
+func (f fakePostgresPinger) Ping(context.Context) error { return f.err }
+
+type fakeMongoPinger struct{ err error }
+
+func (f fakeMongoPinger) Database(mongoURL string) (*mongo.Database, error) {
+	return nil, errors.New("fakeMongoPinger: Database is not used by these tests")
+}
+func (f fakeMongoPinger) Close(context.Context) error { return nil }
+func (f fakeMongoPinger) Ping(context.Context) error  { return f.err }
+
+var (
+	_ postgres.Interface = fakePostgresPinger{}
+	_ mongodb.Interface  = fakeMongoPinger{}
+)
+
 func newTestHandler(t *testing.T) http.Handler {
+	t.Helper()
+	return newTestHandlerWithPings(t, nil, nil)
+}
+
+func newTestHandlerWithPings(t *testing.T, sqlErr, noSQLErr error) http.Handler {
 	t.Helper()
 	hub, err := New(testConfig(), fakeSessionService{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return NewHandler(hub)
+	return NewHandler(hub, fakePostgresPinger{err: sqlErr}, fakeMongoPinger{err: noSQLErr})
 }
 
 // TestCORS_AllowsAnyOriginOnAPlainRequest is the plan's "manual CORS check,"
@@ -159,30 +190,101 @@ func TestCORS_PreflightWithNoRequestedHeadersFallsBackToStar(t *testing.T) {
 	}
 }
 
-// TestHealthz_ReturnsJSONStatus proves /healthz is a real JSON status
-// endpoint, not just a bare 200 - useful for anything (a deploy script, a
-// monitoring check) that wants to distinguish "server answered" from
-// "server answered and says it's healthy."
-func TestHealthz_ReturnsJSONStatus(t *testing.T) {
-	handler := newTestHandler(t)
+type healthzBody struct {
+	Status string `json:"status"`
+	SQL    string `json:"sql"`
+	NoSQL  string `json:"no-sql"`
+}
 
+func getHealthz(t *testing.T, handler http.Handler) (int, healthzBody) {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("GET /healthz: got status %d, want 200", rec.Code)
-	}
 	if got := rec.Header().Get("Content-Type"); got != "application/json" {
 		t.Errorf("Content-Type: got %q, want %q", got, "application/json")
 	}
-	var body struct {
-		Status string `json:"status"`
-	}
+	var body healthzBody
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decoding /healthz body: %v", err)
 	}
-	if body.Status != "healthy" {
-		t.Errorf(`body.Status = %q, want "healthy"`, body.Status)
+	return rec.Code, body
+}
+
+// TestHealthz_ReturnsJSONStatus proves /healthz is a real JSON status
+// endpoint, not just a bare 200 - useful for anything (a deploy script, a
+// monitoring check) that wants to distinguish "server answered" from
+// "server answered and says it's healthy," and that it actually pings both
+// databases (all fields "healthy" here, since both fakes succeed).
+func TestHealthz_ReturnsJSONStatus(t *testing.T) {
+	handler := newTestHandler(t)
+
+	code, body := getHealthz(t, handler)
+	if code != http.StatusOK {
+		t.Fatalf("GET /healthz: got status %d, want 200", code)
+	}
+	if body != (healthzBody{Status: "healthy", SQL: "healthy", NoSQL: "healthy"}) {
+		t.Errorf("unexpected body: %+v", body)
+	}
+}
+
+// TestHealthz_ReportsSQLFailureWithoutMaskingIt proves a failing Postgres
+// ping surfaces as an overall-unhealthy 503 with the exact error text in
+// "sql", not just a generic "something's wrong" - and that a Mongo failure
+// (below) doesn't get confused with a SQL one, or vice versa.
+func TestHealthz_ReportsSQLFailureWithoutMaskingIt(t *testing.T) {
+	handler := newTestHandlerWithPings(t, errors.New("connection refused"), nil)
+
+	code, body := getHealthz(t, handler)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /healthz: got status %d, want 503", code)
+	}
+	if body.Status != "unhealthy" {
+		t.Errorf(`Status = %q, want "unhealthy"`, body.Status)
+	}
+	if want := "unhealthy: connection refused"; body.SQL != want {
+		t.Errorf("SQL = %q, want %q", body.SQL, want)
+	}
+	if body.NoSQL != "healthy" {
+		t.Errorf(`NoSQL = %q, want "healthy" (Mongo never failed)`, body.NoSQL)
+	}
+}
+
+// TestHealthz_ReportsMongoFailureWithoutMaskingIt is
+// TestHealthz_ReportsSQLFailureWithoutMaskingIt's mirror image for the
+// MongoDB side.
+func TestHealthz_ReportsMongoFailureWithoutMaskingIt(t *testing.T) {
+	handler := newTestHandlerWithPings(t, nil, errors.New("server selection timeout"))
+
+	code, body := getHealthz(t, handler)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /healthz: got status %d, want 503", code)
+	}
+	if body.Status != "unhealthy" {
+		t.Errorf(`Status = %q, want "unhealthy"`, body.Status)
+	}
+	if body.SQL != "healthy" {
+		t.Errorf(`SQL = %q, want "healthy" (Postgres never failed)`, body.SQL)
+	}
+	if want := "unhealthy: server selection timeout"; body.NoSQL != want {
+		t.Errorf("NoSQL = %q, want %q", body.NoSQL, want)
+	}
+}
+
+// TestHealthz_ReportsBothFailuresIndependently proves the two checks are
+// genuinely independent - both bad at once still reports each one's own
+// distinct error, not just the first one found.
+func TestHealthz_ReportsBothFailuresIndependently(t *testing.T) {
+	handler := newTestHandlerWithPings(t, errors.New("sql is down"), errors.New("mongo is down"))
+
+	code, body := getHealthz(t, handler)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /healthz: got status %d, want 503", code)
+	}
+	if want := "unhealthy: sql is down"; body.SQL != want {
+		t.Errorf("SQL = %q, want %q", body.SQL, want)
+	}
+	if want := "unhealthy: mongo is down"; body.NoSQL != want {
+		t.Errorf("NoSQL = %q, want %q", body.NoSQL, want)
 	}
 }

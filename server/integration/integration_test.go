@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/thesahibnanda-max/relay/server/package/config"
+	"github.com/thesahibnanda-max/relay/server/package/cron"
 	"github.com/thesahibnanda-max/relay/server/package/database/mongodb"
 	"github.com/thesahibnanda-max/relay/server/package/database/postgres"
 	"github.com/thesahibnanda-max/relay/server/package/database/repository"
@@ -127,6 +129,89 @@ func TestMongoCollectionsCreatedIfMissing(t *testing.T) {
 	}
 }
 
+// TestPostgresPing_SucceedsAgainstARealDatabase is the regression test for
+// the bug found reviewing this method by hand: Raw("SELECT $1", 1) fails
+// every time against the real driver ("unable to encode 1 into text format
+// for text (OID 25)"), since GORM's Raw() expects its own "?" placeholder
+// style, not a native "$1". Only a real database surfaces this - it's not
+// something a fake/mock of postgres.Interface could ever catch.
+func TestPostgresPing_SucceedsAgainstARealDatabase(t *testing.T) {
+	cfg := testConfig(t)
+	pg, err := postgres.New(cfg)
+	if err != nil {
+		t.Fatalf("postgres.New: %v", err)
+	}
+	if err := pg.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+}
+
+// TestPostgresPing_FailsFastOnACancelledContext is the regression test for
+// the other bug found reviewing this method: the SELECT half used to run
+// against a plain (non-context-bound) session, silently ignoring the
+// caller's own cancellation/timeout.
+func TestPostgresPing_FailsFastOnACancelledContext(t *testing.T) {
+	cfg := testConfig(t)
+	pg, err := postgres.New(cfg)
+	if err != nil {
+		t.Fatalf("postgres.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := pg.Ping(ctx); err == nil {
+		t.Fatal("expected Ping to fail on an already-cancelled context, got nil")
+	}
+}
+
+// TestMongoPoolPing_SucceedsAgainstEveryConfiguredShard proves Ping checks
+// every shard named in TEST_MONGO_URLS, not just the first - a pool with 3
+// shards (the real staging setup this was validated against) must exercise
+// all 3, not stop after the first success.
+func TestMongoPoolPing_SucceedsAgainstEveryConfiguredShard(t *testing.T) {
+	cfg := testConfig(t)
+	pool, err := mongodb.New(cfg)
+	if err != nil {
+		t.Fatalf("mongodb.New: %v", err)
+	}
+	if err := pool.Ping(context.Background()); err != nil {
+		t.Fatalf("Ping: %v", err)
+	}
+}
+
+// TestCronPingJob_RunsAgainstRealConnections proves package cron's wiring -
+// New/Start/Stop, and the scheduled job actually calling both real Ping
+// methods - works end to end against genuine infrastructure, not just the
+// fakes package cron's own unit tests use.
+func TestCronPingJob_RunsAgainstRealConnections(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.PingCheckInterval = 50 * time.Millisecond
+
+	pg, err := postgres.New(cfg)
+	if err != nil {
+		t.Fatalf("postgres.New: %v", err)
+	}
+	pool, err := mongodb.New(cfg)
+	if err != nil {
+		t.Fatalf("mongodb.New: %v", err)
+	}
+
+	pingCron, err := cron.New(cfg, pool, pg)
+	if err != nil {
+		t.Fatalf("cron.New: %v", err)
+	}
+	if err := pingCron.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	time.Sleep(300 * time.Millisecond) // let at least one real tick happen
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := pingCron.Stop(stopCtx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
 // testStack is the full wired-up server, plus every repository/service piece
 // a test might want to assert against directly (DB state, not just what
 // comes back over the wire).
@@ -135,6 +220,8 @@ type testStack struct {
 	agentRepo repository.AgentRepository
 	svc       session.Interface
 	hub       ws.Interface
+	pg        postgres.Interface
+	mongoPool mongodb.Interface
 }
 
 // buildStack wires the full server against the real docker-compose stack.
@@ -206,14 +293,46 @@ func buildStack(t *testing.T, mutators ...func(*config.Config)) testStack {
 	if err != nil {
 		t.Fatalf("ws.New: %v", err)
 	}
-	return testStack{shards: selector, agentRepo: agentRepo, svc: svc, hub: hub}
+	return testStack{shards: selector, agentRepo: agentRepo, svc: svc, hub: hub, pg: pg, mongoPool: mongoPool}
 }
 
-func startServer(t *testing.T, hub ws.Interface) string {
+func startServer(t *testing.T, stack testStack) string {
 	t.Helper()
-	srv := httptest.NewServer(ws.NewHandler(hub))
+	srv := httptest.NewServer(ws.NewHandler(stack.hub, stack.pg, stack.mongoPool))
 	t.Cleanup(srv.Close)
 	return "ws" + strings.TrimPrefix(srv.URL, "http") + ws.Path
+}
+
+type healthzBody struct {
+	Status string `json:"status"`
+	SQL    string `json:"sql"`
+	NoSQL  string `json:"no-sql"`
+}
+
+// TestHealthzEndpoint_ReflectsRealDatabaseConnectivity proves the fully
+// wired-up handler (not the fakes package ws's own unit tests use) reports
+// healthy against the real Postgres/Mongo docker-compose stack - the actual
+// code path a deploy script or external monitor hits.
+func TestHealthzEndpoint_ReflectsRealDatabaseConnectivity(t *testing.T) {
+	stack := buildStack(t)
+	srv := httptest.NewServer(ws.NewHandler(stack.hub, stack.pg, stack.mongoPool))
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("GET /healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET /healthz: got status %d, want 200", resp.StatusCode)
+	}
+	var body healthzBody
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decoding /healthz body: %v", err)
+	}
+	if want := (healthzBody{Status: "healthy", SQL: "healthy", NoSQL: "healthy"}); body != want {
+		t.Errorf("unexpected body: %+v, want %+v", body, want)
+	}
 }
 
 // TestEndToEndTwoAgentsOneSession dials the WS server twice, joining the
@@ -222,7 +341,7 @@ func startServer(t *testing.T, hub ws.Interface) string {
 // the plan's stated end-to-end acceptance check.
 func TestEndToEndTwoAgentsOneSession(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -271,7 +390,7 @@ func TestEndToEndTwoAgentsOneSession(t *testing.T) {
 // connection must flip the agent's stored status.
 func TestDisconnectMarksAgentDisconnected(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -309,7 +428,7 @@ func TestDisconnectMarksAgentDisconnected(t *testing.T) {
 // Phase 1's at-least-once, crash-survives-delivery guarantee.
 func TestMessageRedeliveredOnReconnect(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -356,7 +475,7 @@ func TestMessageRedeliveredOnReconnect(t *testing.T) {
 // silently share one agent identity.
 func TestResumeRejectsStillConnectedIdentity(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -399,7 +518,7 @@ func TestResumeRejectsStillConnectedIdentity(t *testing.T) {
 // once one arrives.
 func TestWaitReturnsReply(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -435,7 +554,7 @@ func TestWaitReturnsReply(t *testing.T) {
 // blocking forever.
 func TestWaitTimesOut(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -467,7 +586,7 @@ func TestWaitTimesOut(t *testing.T) {
 // equivalent returns an agent's recent message history in order.
 func TestGetContextReturnsMessageHistory(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -545,7 +664,7 @@ func TestServerRestartMarksAllConnectedDisconnected(t *testing.T) {
 // since the recipient is online.
 func TestApproveInboundHoldsThenApproveDelivers(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -596,7 +715,7 @@ func TestApproveInboundHoldsThenApproveDelivers(t *testing.T) {
 // only the approving agent's own connection gets a live push right now).
 func TestRejectNotifiesSender(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -685,7 +804,7 @@ func TestHopLimitReHoldsEveryEighthReply(t *testing.T) {
 // of creating a new one.
 func TestDedupCoalescesRecentIdenticalSend(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -720,7 +839,7 @@ func TestDedupCoalescesRecentIdenticalSend(t *testing.T) {
 // rejected outright (no DB write, no queue) rather than merely delayed.
 func TestRateLimitRejectsSendsOverThePairLimit(t *testing.T) {
 	stack := buildStack(t, func(c *config.Config) { c.PairRateLimit = 1 })
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -879,7 +998,7 @@ func TestSweepReapsGoneAgentsAndFailsPendingMail(t *testing.T) {
 // another agent's list_agents call while the reporter is connected.
 func TestListAgentsShowsLiveAgentState(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -925,7 +1044,7 @@ func TestListAgentsShowsLiveAgentState(t *testing.T) {
 // recipient report what it actually did with a message it received.
 func TestMsgStateAdvancesToInjectedThenDone(t *testing.T) {
 	stack := buildStack(t)
-	wsURL := startServer(t, stack.hub)
+	wsURL := startServer(t, stack)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

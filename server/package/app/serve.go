@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,6 +11,9 @@ import (
 	"go.uber.org/fx"
 
 	"github.com/thesahibnanda-max/relay/server/package/config"
+	"github.com/thesahibnanda-max/relay/server/package/cron"
+	"github.com/thesahibnanda-max/relay/server/package/database/mongodb"
+	"github.com/thesahibnanda-max/relay/server/package/database/postgres"
 	"github.com/thesahibnanda-max/relay/server/package/database/repository"
 	"github.com/thesahibnanda-max/relay/server/package/session"
 	"github.com/thesahibnanda-max/relay/server/package/ws"
@@ -24,10 +28,10 @@ import (
 // begins listening; OnStop shuts the HTTP server down cleanly. *http.Server
 // is the standard library's own type - an unavoidable pointer, like
 // *gorm.DB and *mongo.Client elsewhere in this module.
-func Serve(lc fx.Lifecycle, cfg config.Config, mongoURLs repository.MongoURLRepository, agents repository.AgentRepository, sessions session.Interface, handler ws.Interface) {
+func Serve(lc fx.Lifecycle, cfg config.Config, mongoURLs repository.MongoURLRepository, agents repository.AgentRepository, sessions session.Interface, handler ws.Interface, pingCron cron.Interface, pg postgres.Interface, mongoPool mongodb.Interface) {
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.PORT),
-		Handler: ws.NewHandler(handler),
+		Handler: ws.NewHandler(handler, pg, mongoPool),
 	}
 	sweepStop := make(chan struct{})
 
@@ -50,11 +54,14 @@ func Serve(lc fx.Lifecycle, cfg config.Config, mongoURLs repository.MongoURLRepo
 			// it here in this skeleton.
 			go func() { _ = srv.Serve(ln) }()
 			go runSweeps(sweepStop, cfg, sessions)
+			if err := pingCron.Start(ctx); err != nil {
+				return fmt.Errorf("app: starting ping cron: %w", err)
+			}
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
 			close(sweepStop)
-			return srv.Shutdown(ctx)
+			return errors.Join(pingCron.Stop(ctx), srv.Shutdown(ctx))
 		},
 	})
 }

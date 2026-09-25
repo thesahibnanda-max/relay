@@ -30,6 +30,11 @@ type Config struct {
 	// ceiling, not a correctness requirement, since that mapping never
 	// actually changes once assigned. Zero (or negative) disables the cache.
 	PostgresCacheTTL time.Duration `env:"POSTGRES_CACHE_TTL,default=10m"`
+	// PingCheckInterval governs package cron's periodic Postgres+Mongo
+	// liveness check - independent of PostgresCacheTTL (that's about
+	// avoiding redundant *reads*; this is about actively detecting an
+	// outage even when nothing else happens to be querying the DB).
+	PingCheckInterval time.Duration `env:"PING_CHECK_INTERVAL,default=5m30s"`
 }
 
 // New reads Config from the environment. It is the root of the dependency
