@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/term"
 
 	"github.com/thesahibnanda-max/relay/internal/adaptor"
 	"github.com/thesahibnanda-max/relay/internal/agent"
@@ -25,7 +28,7 @@ import (
 	"github.com/thesahibnanda-max/relay/internal/roles"
 )
 
-func runAgent(p Parsed, factory *adaptor.AdaptorFactory, errw io.Writer) int {
+func runAgent(p Parsed, factory *adaptor.AdaptorFactory, in io.Reader, errw io.Writer) int {
 	a, _ := factory.ByName(p.Tool)
 
 	bin, err := adaptor.ResolveBinary(a.Binary())
@@ -83,6 +86,16 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, errw io.Writer) int {
 			}
 			fmt.Fprintf(errw, "relay: session %s · %s\nrelay: others join with: relay <claude|codex> [role] --session=%s\n",
 				id.Session.ID, who, id.Session.ID)
+			// The tool switches the terminal to its own alternate screen right
+			// after this, hiding the lines above for good (see issue #41) - a
+			// fixed delay would just be guessing how long is long enough, so
+			// this waits for an explicit acknowledgment instead. Skipped
+			// entirely when stdin isn't a real terminal (a pipe, /dev/null, a
+			// script) or $RELAY_SKIP_SESSION_PROMPT is set, so nothing that
+			// already pipes into relay starts hanging.
+			if shouldPauseForBannerAck(in) {
+				waitForBannerAck(in, errw)
+			}
 		}
 	}
 
@@ -136,6 +149,34 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, errw io.Writer) int {
 		fmt.Fprintf(errw, "relay: %v\n", err)
 	}
 	return code
+}
+
+// sessionBannerAckEnvVar lets an advanced/scripted interactive user skip the
+// "press Enter" pause below even on a real terminal.
+const sessionBannerAckEnvVar = "RELAY_SKIP_SESSION_PROMPT"
+
+// shouldPauseForBannerAck reports whether runAgent should block for an
+// explicit acknowledgment after printing the "others join with" banner: only
+// when in is a genuine interactive terminal - never a pipe, /dev/null, or a
+// test's plain io.Reader, all of which must never hang - and the escape
+// hatch isn't set.
+func shouldPauseForBannerAck(in io.Reader) bool {
+	if os.Getenv(sessionBannerAckEnvVar) != "" {
+		return false
+	}
+	f, ok := in.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(f.Fd()))
+}
+
+// waitForBannerAck blocks until the user presses Enter, discarding whatever
+// they typed - this is the only chance they get to copy the session/join
+// line just printed before the tool takes over the screen (issue #41).
+func waitForBannerAck(in io.Reader, out io.Writer) {
+	fmt.Fprint(out, "relay: press Enter once you've copied the line above - the tool takes over the screen right after\n")
+	_, _ = bufio.NewReader(in).ReadString('\n')
 }
 
 // connect is the one place that decides local vs global: everything above

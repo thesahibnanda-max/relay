@@ -146,7 +146,35 @@ type relayProc struct {
 	done    chan struct{}
 }
 
+// sharedSessionArgs reports whether args requests any shared session
+// (--session=NEW, NEW_LOCAL, a bare id, or a global token) - every one of
+// them makes relay pause after printing the "others join with" banner,
+// waiting for an explicit acknowledgment before handing the terminal to the
+// tool (see issue #41).
+func sharedSessionArgs(args []string) bool {
+	for _, a := range args {
+		if strings.HasPrefix(a, "--session=") {
+			return true
+		}
+	}
+	return false
+}
+
 func (w *world) start(tool string, args ...string) *relayProc {
+	w.t.Helper()
+	return w.startWithAck(tool, sharedSessionArgs(args), args...)
+}
+
+// startWithoutAck starts relay exactly like start, but never sends the
+// session-banner acknowledgment even for a shared session - the only way to
+// test that the pause introduced for issue #41 genuinely blocks, rather than
+// trusting the harness's own auto-acknowledgment to prove nothing.
+func (w *world) startWithoutAck(tool string, args ...string) *relayProc {
+	w.t.Helper()
+	return w.startWithAck(tool, false, args...)
+}
+
+func (w *world) startWithAck(tool string, ack bool, args ...string) *relayProc {
 	w.t.Helper()
 	a := &relayProc{t: w.t, logPath: filepath.Join(w.t.TempDir(), tool+".jsonl"), done: make(chan struct{})}
 	a.cmd = exec.Command(filepath.Join(w.bin, "relay"), append([]string{tool}, args...)...)
@@ -156,6 +184,16 @@ func (w *world) start(tool string, args ...string) *relayProc {
 	a.pty, err = pty.StartWithSize(a.cmd, &pty.Winsize{Rows: 30, Cols: 100})
 	if err != nil {
 		w.t.Skip("no pty:", err)
+	}
+	if ack {
+		// A real user presses Enter to dismiss the session banner pause;
+		// this immediately supplies that same keystroke so every test below
+		// isn't waiting on a human. It's queued in the PTY regardless of
+		// whether relay has reached the read yet, the same way typing ahead
+		// of a slow prompt works on any real terminal.
+		if _, err := a.pty.Write([]byte("\n")); err != nil {
+			w.t.Fatalf("acknowledging the session banner: %v", err)
+		}
 	}
 	go func() {
 		buf := make([]byte, 4096)
@@ -946,4 +984,42 @@ func TestGCRetentionCommandsReportAndNeverTouchLiveSessions(t *testing.T) {
 	if _, errs, code := w.runRelay("gc", "--older-than=abc"); code != 2 || !strings.Contains(errs, "--older-than") {
 		t.Fatalf("bad duration: %d %q", code, errs)
 	}
+}
+
+// TestSessionBannerPausesForAcknowledgmentBeforeHandingOffToTheTool is the
+// direct regression test for issue #41: after printing the "others join
+// with" banner, relay must genuinely block until an explicit acknowledgment
+// is given, not race ahead and hand the terminal to the tool - which would
+// make the banner text unrecoverable (the tool switches to its own alternate
+// screen) before anyone has a real chance to copy it.
+func TestSessionBannerPausesForAcknowledgmentBeforeHandingOffToTheTool(t *testing.T) {
+	w := newWorld(t)
+	alice := w.startWithoutAck("claude", "orchestrator", "--session=NEW_LOCAL", "--name=alice")
+
+	session, name := alice.identity()
+	if name != "alice" {
+		t.Fatalf("name %q", name)
+	}
+	if !strings.Contains(alice.output(), "press Enter") {
+		t.Fatalf("expected the banner-acknowledgment prompt, got:\n%s", alice.output())
+	}
+
+	// The agent is already registered with the daemon by the time the banner
+	// prints (Identity() needs that to already be true) - but prepareLaunch,
+	// which creates the per-agent run directory, only runs *after* the
+	// acknowledgment. So the directory's absence is proof relay is genuinely
+	// still blocked, not just slow.
+	agentID := w.agents(session)["alice"].ID
+	agentDir := w.agentDir(agentID)
+	time.Sleep(300 * time.Millisecond)
+	if _, err := os.Stat(agentDir); err == nil {
+		t.Fatalf("relay proceeded past the banner pause before an acknowledgment was given: %s exists", agentDir)
+	}
+
+	if _, err := alice.pty.Write([]byte("\n")); err != nil {
+		t.Fatalf("sending the acknowledgment: %v", err)
+	}
+
+	// Now it must proceed normally, exactly like every other launch.
+	waitForFile(t, filepath.Join(agentDir, "agent.json"))
 }

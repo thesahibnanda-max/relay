@@ -1,8 +1,13 @@
 package cli
 
 import (
+	"io"
+	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/creack/pty"
 
 	"github.com/thesahibnanda-max/relay/internal/globalid"
 	"github.com/thesahibnanda-max/relay/internal/proto"
@@ -103,5 +108,72 @@ func TestGlobalDialTarget_ReleaseBuildJoinTokenNamingBuiltinHostSucceeds(t *test
 	}
 	if hostPort != "relay.example.com:443" || sessionValue != tok.ULID || !forceTLS {
 		t.Errorf("got hostPort=%q sessionValue=%q forceTLS=%v", hostPort, sessionValue, forceTLS)
+	}
+}
+
+// TestShouldPauseForBannerAck_FalseForNonFileReader proves a plain
+// (non-*os.File) reader - what every test harness that doesn't spawn a real
+// terminal uses, and what a pipe/`< /dev/null` looks like in practice - never
+// triggers the pause. This is the guard that keeps issue #41's fix from
+// hanging any non-interactive caller.
+func TestShouldPauseForBannerAck_FalseForNonFileReader(t *testing.T) {
+	if shouldPauseForBannerAck(strings.NewReader("")) {
+		t.Error("a non-*os.File reader must never trigger the pause")
+	}
+}
+
+// TestShouldPauseForBannerAck_TrueForARealTerminalFalseOtherwise uses a real
+// PTY (the same mechanism internal/agent.Run and the e2e test harness use) to
+// prove both branches for real: a genuine terminal triggers the pause, and
+// the $RELAY_SKIP_SESSION_PROMPT escape hatch suppresses it even then -
+// exercising the actual isatty check, not just the reader-type guard above.
+func TestShouldPauseForBannerAck_TrueForARealTerminalFalseOtherwise(t *testing.T) {
+	_, tty, err := pty.Open()
+	if err != nil {
+		t.Skipf("no PTY available in this environment: %v", err)
+	}
+	defer tty.Close()
+
+	if !shouldPauseForBannerAck(tty) {
+		t.Error("a real terminal should trigger the pause")
+	}
+
+	t.Setenv(sessionBannerAckEnvVar, "1")
+	if shouldPauseForBannerAck(tty) {
+		t.Error("RELAY_SKIP_SESSION_PROMPT should suppress the pause even on a real terminal")
+	}
+}
+
+// TestWaitForBannerAck_ReturnsAsSoonAsEnterIsPressed proves the block is
+// genuinely lifted by input, not by a timer - and that whatever was typed
+// before Enter is simply discarded, not interpreted.
+func TestWaitForBannerAck_ReturnsAsSoonAsEnterIsPressed(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer r.Close()
+
+	done := make(chan struct{})
+	go func() {
+		waitForBannerAck(r, io.Discard)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("waitForBannerAck returned before anything was written")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	if _, err := w.Write([]byte("anything at all\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	w.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("waitForBannerAck did not return after Enter was pressed")
 	}
 }
