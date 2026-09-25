@@ -56,6 +56,11 @@ terminals on one machine, can share a session. The official `relay` binary point
 server automatically (baked in at release build time, see `internal/cli/builtinserver.go`); a binary built
 from source can point it at any server, including a self-hosted one (see `server/DEPLOY.md`).
 
+Unlike a local session, a global session also isn't kept forever: the server runs a periodic idle-session
+cleanup job (`server/package/cron`, alongside the existing TTL-expiry/disconnect-reaper sweep) that
+permanently deletes a session - and every one of its agents and messages, in one transaction - once it's
+been idle for `SESSION_MAX_AGE` (default 24h). See `server/DEPLOY.md`'s "Data retention" section.
+
 ## Messages
 
 `queued → dispatched → injected → acknowledged → done`, with `held` (needs approval) in front, and

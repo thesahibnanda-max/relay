@@ -54,6 +54,42 @@ func testConfig(t *testing.T) config.Config {
 	return cfg
 }
 
+// newIntegrationSessionService builds a real session.Interface the same way
+// production does, for tests (like the cron ones) that need a genuine
+// session.Interface but aren't themselves testing session behavior.
+func newIntegrationSessionService(t *testing.T, cfg config.Config, pool mongodb.Interface, pg postgres.Interface) session.Interface {
+	t.Helper()
+	mongoURLRepo, err := repository.NewMongoURLRepository(pg)
+	if err != nil {
+		t.Fatalf("NewMongoURLRepository: %v", err)
+	}
+	shardMapRepo, err := repository.NewShardMapRepository(pg)
+	if err != nil {
+		t.Fatalf("NewShardMapRepository: %v", err)
+	}
+	sessionRepo, err := repository.NewSessionRepository(pool)
+	if err != nil {
+		t.Fatalf("NewSessionRepository: %v", err)
+	}
+	agentRepo, err := repository.NewAgentRepository(pool)
+	if err != nil {
+		t.Fatalf("NewAgentRepository: %v", err)
+	}
+	messageRepo, err := repository.NewMessageRepository(pool)
+	if err != nil {
+		t.Fatalf("NewMessageRepository: %v", err)
+	}
+	selector, err := sharding.New(cfg, shardMapRepo, mongoURLRepo)
+	if err != nil {
+		t.Fatalf("sharding.New: %v", err)
+	}
+	svc, err := session.New(cfg, selector, sessionRepo, agentRepo, messageRepo, shardMapRepo, pool)
+	if err != nil {
+		t.Fatalf("session.New: %v", err)
+	}
+	return svc
+}
+
 func TestPostgresAutoMigrationCreatesTables(t *testing.T) {
 	cfg := testConfig(t)
 
@@ -196,7 +232,8 @@ func TestCronPingJob_RunsAgainstRealConnections(t *testing.T) {
 		t.Fatalf("mongodb.New: %v", err)
 	}
 
-	pingCron, err := cron.New(cfg, pool, pg)
+	sessions := newIntegrationSessionService(t, cfg, pool, pg)
+	pingCron, err := cron.New(cfg, pool, pg, sessions)
 	if err != nil {
 		t.Fatalf("cron.New: %v", err)
 	}

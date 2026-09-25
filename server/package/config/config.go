@@ -35,6 +35,19 @@ type Config struct {
 	// avoiding redundant *reads*; this is about actively detecting an
 	// outage even when nothing else happens to be querying the DB).
 	PingCheckInterval time.Duration `env:"PING_CHECK_INTERVAL,default=5m30s"`
+	// SessionMaxAge is how long an idle global session (no connected agent,
+	// no activity) is kept before it's permanently deleted - session,
+	// agents and messages all removed together (see
+	// session.Interface.DeleteSessionsOlderThan). This is a single
+	// server-wide default; a per-session override is tracked as a future
+	// enhancement (see the project's issue tracker), not yet implemented.
+	SessionMaxAge time.Duration `env:"SESSION_MAX_AGE,default=24h"`
+	// SessionCleanupInterval is how often the idle-session cleanup job runs -
+	// deliberately its own, much less frequent schedule than SweepEvery:
+	// Sweep only transitions message/agent states (cheap, latency-sensitive),
+	// while cleanup permanently deletes data, which has no reason to run
+	// every few seconds.
+	SessionCleanupInterval time.Duration `env:"SESSION_CLEANUP_INTERVAL,default=30m"`
 }
 
 // New reads Config from the environment. It is the root of the dependency

@@ -29,6 +29,10 @@ It does not defend against another process running as *your own user* (which cou
   operator-run server (`internal/cli/builtinserver.go`); a self-hosted server should terminate TLS too (see
   `server/DEPLOY.md`). If you don't want any of this, `--session=NEW_LOCAL` never leaves the unix-socket
   boundary above.
+* **Global session data doesn't live forever.** An idle global session (no connected agent, no activity)
+  is permanently deleted from the server - the session, its agents and its messages, all at once - after
+  `SESSION_MAX_AGE` (default 24h; see `server/DEPLOY.md`'s "Data retention" section). A local session
+  (`--session=NEW_LOCAL`) has no such limit and is retained until you remove it yourself.
 * **Private files.** `~/.relay` is 0700; database, logs and raw terminal logs are 0600. Per-launch
   directories are created and verified (owned by you, not a symlink, mode 0700) before use.
 * **Agents act only as themselves.** Identity comes from the connection, not from message fields. A
