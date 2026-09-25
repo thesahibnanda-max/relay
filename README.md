@@ -2,10 +2,10 @@
 
 # Relay
 
-Relay lets AI coding agents in separate terminals work as one team. Run Claude Code and Codex
-(or several of each) side by side, and one can hand work to another (*"tell codex to fix the failing
-test"*), ask what another has done, and answer back, while every terminal still looks and behaves
-exactly like the tool itself.
+Relay lets AI coding agents in separate terminals work as one team. Run Claude Code, Codex and
+GitHub Copilot CLI (or several of each) side by side, and one can hand work to another (*"tell codex
+to fix the failing test"*), ask what another has done, and answer back, while every terminal still
+looks and behaves exactly like the tool itself.
 
 ```
  terminal A                       terminal B
@@ -23,10 +23,11 @@ automatically, no setup required. For a session that never leaves this machine, 
 instead. See [Global sessions across machines](#global-sessions-across-machines) below.
 
 **Zero footprint.** Relay's powers exist only while a process runs under `relay`. It never writes to
-`~/.claude`, `~/.codex`, or your project (no `.mcp.json`, `CLAUDE.md`, `AGENTS.md`, hooks or settings),
-and never runs `claude mcp add` / `codex mcp add`. Everything is passed for that one launch (flags,
-`-c` overrides, temp files in `~/.relay/run/<agent>/` that are deleted on exit). Run plain `claude` or
-`codex` afterwards, or after uninstalling Relay, and they behave exactly as before.
+`~/.claude`, `~/.codex`, `~/.copilot`, or your project (no `.mcp.json`, `CLAUDE.md`, `AGENTS.md`,
+hooks or settings), and never runs `claude mcp add` / `codex mcp add` / `copilot mcp add`. Everything
+is passed for that one launch (flags, `-c` overrides, temp files in `~/.relay/run/<agent>/` that are
+deleted on exit). Run plain `claude`, `codex` or `copilot` afterwards, or after uninstalling Relay,
+and they behave exactly as before.
 `relay doctor` checks this, and an automated test enforces it.
 
 Linux, macOS and WSL only (native Windows is not supported: `relay` says so and exits). The code still compiles on every platform so editors and tools stay clean. One static binary, no cgo.
@@ -53,7 +54,7 @@ Then open a new terminal and run `relay doctor` to verify the installation.
 * **Remove it:** delete `~/.local/bin/relay` and the `# added by relay installer` line in your shell startup file.
 * **From source** (needs Go): `go install github.com/thesahibnanda-max/relay@latest`, or `make build` for `./bin/relay`.
 
-Relay wraps tools you already have (`claude`, `codex`) found on your `PATH`.
+Relay wraps tools you already have (`claude`, `codex`, `copilot`) found on your `PATH`.
 
 ## Quick start
 
@@ -74,7 +75,7 @@ involved? Use `--session=NEW_LOCAL --name=lead` and `--session=<id> --name=coder
 
 | Command | What it does |
 |---|---|
-| `relay <claude\|codex> [role] [--session=NEW\|NEW_LOCAL\|<id>\|<token>] [--name=x] [--server=host[:port]] [--resume\|--fresh] [--approve-inbound] [--record=raw\|events\|off] [-- tool args]` | Run a tool as an agent. `NEW` starts a global session (any machine can join; the official binary needs no `--server`); `NEW_LOCAL` keeps it on this machine only; a `<token>` (`<ulid>@host[:port]`) joins a global session from anywhere. Everything after `--` goes to the tool unchanged. |
+| `relay <claude\|codex\|copilot> [role] [--session=NEW\|NEW_LOCAL\|<id>\|<token>] [--name=x] [--server=host[:port]] [--resume\|--fresh] [--approve-inbound] [--record=raw\|events\|off] [-- tool args]` | Run a tool as an agent. `NEW` starts a global session (any machine can join; the official binary needs no `--server`); `NEW_LOCAL` keeps it on this machine only; a `<token>` (`<ulid>@host[:port]`) joins a global session from anywhere. Everything after `--` goes to the tool unchanged. |
 | `relay ls [--all] [--session=<id>]` | Sessions and their agents. |
 | `relay session new [--name=..]` / `relay session end <id>` | Create / close a session. |
 | `relay send <agent> <text> [--priority=low\|normal\|high\|interrupt] [--session=<id>]` | Message an agent yourself (`-` reads stdin). |
@@ -88,8 +89,8 @@ involved? Use `--session=NEW_LOCAL --name=lead` and `--session=<id> --name=coder
 (with optional frontmatter: `can_interrupt`, `can_broadcast`). A role is delivered to the model once,
 at launch, as part of its system prompt.
 
-**Shim mode.** Symlink `claude` or `codex` to `relay` earlier on your `PATH` and typing `claude` runs
-it under Relay, solo, with all arguments passed straight through.
+**Shim mode.** Symlink `claude`, `codex` or `copilot` to `relay` earlier on your `PATH` and typing
+`claude` runs it under Relay, solo, with all arguments passed straight through.
 
 ## What the agents get
 

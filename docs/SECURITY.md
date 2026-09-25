@@ -8,11 +8,12 @@ Relay runs as your user, on your machine, and connects terminals **you** started
 2. **Web pages** in your browser reaching the daemon.
 3. **A misbehaving or prompt-injected agent** abusing the messaging channel to attack another agent, you, or
    the tool's configuration.
-4. **Relay changing how Claude/Codex behave** outside a Relay session.
+4. **Relay changing how Claude/Codex/Copilot CLI behave** outside a Relay session.
 5. **A global session's server** (Relay's own hosted one, or a self-hosted alternative) seeing message
    traffic — relevant only if you use `--session=NEW` or a join token instead of `--session=NEW_LOCAL`.
 
-It does not defend against another process running as *your own user* (which could read `~/.claude` too).
+It does not defend against another process running as *your own user* (which could read `~/.claude`,
+`~/.codex` or `~/.copilot` too).
 
 ## Boundaries and protections
 

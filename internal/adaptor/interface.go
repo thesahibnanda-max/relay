@@ -8,6 +8,7 @@ import (
 
 	internalclaude "github.com/thesahibnanda-max/relay/internal/adaptor/internal/claude"
 	internalcodex "github.com/thesahibnanda-max/relay/internal/adaptor/internal/codex"
+	internalcopilot "github.com/thesahibnanda-max/relay/internal/adaptor/internal/copilot"
 )
 
 // Adaptor holds the per-tool knowledge Relay needs to wrap a CLI.
@@ -61,6 +62,7 @@ func NewAdaptorFactory() AdaptorFactory { // no need of ptr here
 		factory: []Adaptor{
 			&internalclaude.ClaudeAdaptor{},
 			&internalcodex.CodexAdaptor{},
+			&internalcopilot.CopilotAdaptor{},
 		},
 	}
 }

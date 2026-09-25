@@ -53,7 +53,7 @@ func buildBinaries(t *testing.T) string {
 			}
 		}
 		// the fake tool is installed under the names of the real ones
-		for _, name := range []string{"claude", "codex"} {
+		for _, name := range []string{"claude", "codex", "copilot"} {
 			if err := os.Symlink(filepath.Join(binDir, "fakeagent"), filepath.Join(binDir, name)); err != nil {
 				buildErr = err
 				return
@@ -92,17 +92,18 @@ func newWorld(t *testing.T) *world {
 	t.Cleanup(func() { os.RemoveAll(root) })
 	w := &world{t: t, home: filepath.Join(root, "home"), relay: filepath.Join(root, "r"), bin: bin}
 	for path, content := range map[string]string{
-		".claude/settings.json": `{"theme":"dark"}`,
-		".claude/CLAUDE.md":     "my notes",
-		".codex/config.toml":    "model = \"x\"\n",
-		".mcp.json":             `{"mcpServers":{}}`,
+		".claude/settings.json":    `{"theme":"dark"}`,
+		".claude/CLAUDE.md":        "my notes",
+		".codex/config.toml":       "model = \"x\"\n",
+		".copilot/mcp-config.json": `{"mcpServers":{}}`,
+		".mcp.json":                `{"mcpServers":{}}`,
 	} {
 		full := filepath.Join(w.home, path)
 		os.MkdirAll(filepath.Dir(full), 0o755)
 		os.WriteFile(full, []byte(content), 0o644)
 	}
 	w.env = append(os.Environ(),
-		"HOME="+w.home, "CODEX_HOME="+filepath.Join(w.home, ".codex"),
+		"HOME="+w.home, "CODEX_HOME="+filepath.Join(w.home, ".codex"), "COPILOT_HOME="+filepath.Join(w.home, ".copilot"),
 		"RELAY_HOME="+w.relay, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"RELAY_ACTIVE=", // never inherit the nesting marker from an outer relay
 	)
@@ -964,6 +965,54 @@ func TestCodexRolloutDrivesStateAndPlanHold(t *testing.T) {
 	line("event_msg", map[string]any{"type": "task_started", "turn_id": "t2"})
 	line("event_msg", map[string]any{"type": "task_complete", "turn_id": "t2", "last_agent_message": "done"})
 	coder.waitSubmit("ping during plan decision")
+}
+
+// field names below are provisional in the sense that Copilot's events.jsonl
+// is explicitly undocumented and unstable upstream (see the issue #17
+// plan's live-verification phase) - they were captured from a real,
+// authenticated copilot 1.0.88 session, not guessed, but may need updating
+// after a future Copilot CLI upgrade.
+func TestCopilotEventsJSONLDrivesState(t *testing.T) {
+	w := newWorld(t)
+	alice := w.start("claude", "--session=NEW_LOCAL", "--name=alice")
+	session, _ := alice.identity()
+	coder := w.start("copilot", "--session="+session, "--name=coder")
+	coder.identity()
+	agents := w.agents(session)
+	as := w.shim(w.agentDir(agents["alice"].ID))
+	time.Sleep(1500 * time.Millisecond)
+
+	// Copilot creates its session-state directory at the first message; its
+	// typed bootstrap briefing names our agent (Copilot has no flag to
+	// deliver it any other way - see impl.go).
+	sid := "test-session-id"
+	dir := filepath.Join(w.home, ".copilot", "session-state", sid)
+	os.MkdirAll(dir, 0o755)
+	path := filepath.Join(dir, "events.jsonl")
+	f, _ := os.Create(path)
+	defer f.Close()
+	line := func(typ string, data map[string]any) {
+		b, _ := json.Marshal(map[string]any{"type": typ, "data": data, "timestamp": time.Now().UTC().Format(time.RFC3339Nano)})
+		f.Write(append(b, '\n'))
+	}
+	line("session.start", map[string]any{"sessionId": sid, "context": map[string]any{"cwd": coder.cmd.Dir}})
+	line("user.message", map[string]any{"content": `You are "coder", working in a Relay session (id ` + session + `) alongside...`})
+	line("assistant.turn_start", map[string]any{"turnId": "0"})
+
+	waitFor(t, "state busy from events.jsonl", func() bool { return w.peerState(as, "coder") == "busy" })
+
+	// a permission dialog is awaiting the user's decision: nothing may be typed meanwhile
+	line("tool.execution_start", map[string]any{"toolCallId": "c1", "toolName": "shell"})
+	line("permission.requested", map[string]any{"requestId": "r1"})
+	waitFor(t, "dialog state while a permission prompt is pending", func() bool { return w.peerState(as, "coder") == "dialog" })
+	as.call("relay_send", map[string]any{"to": "coder", "body": "ping during permission dialog"})
+	coder.notSubmitted("ping during permission dialog", 2*time.Second)
+
+	// the dialog resolves: work resumes, then the turn ends
+	line("permission.completed", map[string]any{"requestId": "r1"})
+	line("assistant.turn_end", map[string]any{"turnId": "0"})
+	waitFor(t, "state idle after the turn ends", func() bool { return w.peerState(as, "coder") == "idle" })
+	coder.waitSubmit("ping during permission dialog")
 }
 
 func TestGCRetentionCommandsReportAndNeverTouchLiveSessions(t *testing.T) {

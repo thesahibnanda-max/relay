@@ -1,8 +1,8 @@
 // Package transcript reads the tools' own conversation logs (Claude's
-// ~/.claude/projects/**.jsonl, Codex's ~/.codex/sessions/**/rollout-*.jsonl).
-// They are the ground truth for what happened: precise turn boundaries,
-// tool calls, and proof that a message reached the model. Relay only ever
-// READS them.
+// ~/.claude/projects/**.jsonl, Codex's ~/.codex/sessions/**/rollout-*.jsonl,
+// Copilot CLI's ~/.copilot/session-state/*/events.jsonl). They are the
+// ground truth for what happened: precise turn boundaries, tool calls, and
+// proof that a message reached the model. Relay only ever READS them.
 package transcript
 
 import (
@@ -56,13 +56,15 @@ func clip(s string) string {
 	return s[:cut] + "…[truncated]"
 }
 
-// ForTool returns the parser for a tool name ("claude", "codex").
+// ForTool returns the parser for a tool name ("claude", "codex", "copilot").
 func ForTool(tool string) Parser {
 	switch tool {
 	case "claude":
 		return ClaudeParser{}
 	case "codex":
 		return CodexParser{}
+	case "copilot":
+		return CopilotParser{}
 	}
 	return nil
 }

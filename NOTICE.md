@@ -13,7 +13,7 @@ Be aware of the difference between "built and tested" and "should work".
 
 | Platform | Status |
 |---|---|
-| **WSL** | The main test environment. Every feature has been run here, including live with real Claude Code and real Codex. |
+| **WSL** | The main test environment. Every feature has been run here, including live with real Claude Code, real Codex and real GitHub Copilot CLI: a full Relay session with a real, authenticated Copilot CLI has been run end-to-end, including the MCP tools working with no permission prompt, the briefing arriving correctly, and a teammate's message being correctly held (not typed) while Copilot's own dialogs were open. |
 | **Linux (regular)** | Very likely fine, because WSL is Linux. Not yet run on a non-WSL Linux machine. |
 | **macOS** | Automated CI runs and passes on macOS on every pull request. Real-machine use is newer than on WSL, so treat an early run as a test; the macOS-specific part (checking who is on the other end of a connection) has less real-world mileage than the Linux one. |
 | **Windows (native)** | Not supported. `relay` prints "use WSL" and exits. (The code still compiles for Windows so editors and tools do not show errors.) |
@@ -21,17 +21,20 @@ Be aware of the difference between "built and tested" and "should work".
 Two more caveats:
 
 * **Tool versions.** Relay depends on how the tools behave: their hook formats, their log-file formats and
-  what their screens look like. It was built and verified against **Claude Code 2.1.282** and **Codex
-  0.155.1**. If a tool changes in an update, parts of Relay may need adjusting.
+  what their screens look like. It was built and verified against **Claude Code 2.1.282**, **Codex 0.155.1**
+  and **GitHub Copilot CLI 1.0.88**. If a tool changes in an update, parts of Relay may need adjusting -
+  Copilot CLI in particular ships near-daily updates, and its per-session event log is explicitly
+  undocumented and unstable upstream, so re-verify after upgrading it.
 * **Claude's permission prompts.** They were never seen on screen during testing, because the test machine's
   Claude runs in "bypass permissions" mode. Relay has protection for them, but it was only tested against
-  Codex's real prompts.
+  Codex's and Copilot's real prompts.
 
 ---
 
 ## What Relay is
 
-Normally you run Claude in one terminal and Codex in another, and they cannot talk to each other.
+Normally you run Claude in one terminal, Codex in another, and Copilot CLI in a third, and they cannot
+talk to each other.
 **Relay is a layer that lets AI coding assistants in separate terminals work like a team.**
 
 You launch each assistant through `relay`, and each terminal looks and behaves exactly as before. The
@@ -64,8 +67,8 @@ relay codex developer --session=<token> --name=coder    (terminal 2, same machin
   everyone.
 * **Without a session**: `relay claude` just runs Claude normally, as a private session that is recorded but
   has no messaging features.
-* **Passing options to the tool**: anything after `--` goes to Claude or Codex unchanged, for example
-  `relay claude -- --model sonnet`.
+* **Passing options to the tool**: anything after `--` goes to the tool unchanged, for example
+  `relay claude -- --model sonnet` or `relay copilot -- --model gpt-5.4`.
 
 Then you talk to your assistant normally: *"Ask coder to run the tests and tell me what fails."* It handles
 the rest.
@@ -104,7 +107,7 @@ moment:
   * *High priority* messages are slipped in right after its next step, as extra context.
   * *Normal and low* messages are delivered just as it finishes, so it simply keeps going instead of having a
     new prompt typed. (Claude labels these "Stop hook error" in its screen. That is only its wording.)
-* **If it is busy (Codex)**, the message waits until the current task ends.
+* **If it is busy (Codex, Copilot)**, the message waits until the current task ends.
 * **Interrupt priority** presses Escape first, then delivers. Only roles that are allowed to interrupt can do
   this; otherwise the message is downgraded to "high".
 * **It never types into a permission question** ("Allow this command?") or into a plan that is waiting for
@@ -114,8 +117,8 @@ moment:
 * Messages are **never lost, only delayed.** Priorities are low, normal, high and interrupt. Messages that
   wait a long time gradually move up in priority. Several "low" notes are bundled into one.
 
-Relay knows what an assistant is doing from the tool's own signals (Claude's "hooks" and Codex's log file),
-backed up by reading the screen and noticing whether output is flowing.
+Relay knows what an assistant is doing from the tool's own signals (Claude's "hooks", and Codex's and
+Copilot's own log files), backed up by reading the screen and noticing whether output is flowing.
 
 Each message moves through visible stages: queued, delivered to the assistant's scheduler, typed in, seen by
 the model (confirmed from the tool's own transcript), done. It can also end as rejected, expired or
@@ -159,18 +162,19 @@ undeliverable, and the sender is told when that happens.
 
 ## The "zero footprint" promise
 
-Relay's abilities exist **only while a process runs under `relay`**. It never edits your Claude or Codex
-settings, never adds files to your projects, and never runs commands like `claude mcp add`. Everything is
-handed over for that one launch and deleted afterwards. Plain `claude` or `codex` behaves exactly as before,
-even if you uninstall Relay.
+Relay's abilities exist **only while a process runs under `relay`**. It never edits your Claude, Codex or
+Copilot settings, never adds files to your projects, and never runs commands like `claude mcp add`.
+Everything is handed over for that one launch and deleted afterwards. Plain `claude`, `codex` or `copilot`
+behaves exactly as before, even if you uninstall Relay.
 
 * An automated test enforces it, `relay doctor` checks it, and it was confirmed against a real configuration.
 * If you pass your own system-prompt or settings options to the tool, Relay does not override them. It falls
-  back to a gentler method and tells you.
-* For non-interactive commands (`claude -p`, `codex exec`, `mcp list`, and similar), Relay steps aside
-  entirely.
-* The tools' own history (Claude transcripts, Codex logs) will of course contain what happened during a Relay
-  session. That is the tool's own record, not a Relay setting.
+  back to a gentler method and tells you. Copilot CLI has no system-prompt option at all, so for it this
+  gentler method (typing the briefing as a first message) is always what happens.
+* For non-interactive commands (`claude -p`, `codex exec`, `copilot -p`, `mcp list`, and similar), Relay
+  steps aside entirely.
+* The tools' own history (Claude transcripts, Codex logs, Copilot's session events) will of course contain
+  what happened during a Relay session. That is the tool's own record, not a Relay setting.
 
 ---
 
@@ -178,7 +182,7 @@ even if you uninstall Relay.
 
 | Command | What it does |
 |---|---|
-| `relay claude ...` / `relay codex ...` | Run an assistant (see above). |
+| `relay claude ...` / `relay codex ...` / `relay copilot ...` | Run an assistant (see above). |
 | `relay ls` | Show sessions and who is in them. |
 | `relay session new` / `relay session end <id>` | Create or close a session. |
 | `relay send <name> <text>` | Send a message yourself (`-` reads the text from input). |
@@ -188,7 +192,7 @@ even if you uninstall Relay.
 | `relay doctor` | Health check: permissions, background service, database, tools installed, and a scan for stray Relay files. |
 | `relay daemon status` / `relay daemon stop` | Control the background service (it starts itself when needed). |
 | `relay version` | Show the version. |
-| Shim mode | Symlink `claude` or `codex` to `relay` earlier on your PATH and typing `claude` runs it under Relay, on its own. |
+| Shim mode | Symlink `claude`, `codex` or `copilot` to `relay` earlier on your PATH and typing `claude` runs it under Relay, on its own. |
 
 ---
 
@@ -243,6 +247,7 @@ into another terminal, and names and roles are limited to plain characters. See
 * Recordings are not encrypted, and secret-hiding is pattern-based, so it can miss unusual secrets.
 * Disk-full situations are not tested.
 * Search inside a teammate's conversation is a simple text match, not a smart full-text search.
-* If your Claude runs in "bypass permissions" mode, a teammate's message could lead to commands running with
-  no confirmation. Keep that in mind for sessions that matter, and consider running Claude with normal
+* If your Claude, Codex or Copilot runs with permissions bypassed (Claude's "bypass permissions" mode,
+  Codex's `--full-auto`, Copilot's `--allow-all`/`--yolo`), a teammate's message could lead to commands
+  running with no confirmation. Keep that in mind for sessions that matter, and consider running with normal
   permission prompts for them.

@@ -155,7 +155,7 @@ func runSession(p Parsed, out, errw io.Writer) int {
 			return 1
 		}
 		fmt.Fprintln(out, s.ID) // stdout is just the id, so it composes: relay claude --session=$(relay session new)
-		fmt.Fprintf(errw, "join with: relay <claude|codex> [role] --session=%s\n", s.ID)
+		fmt.Fprintf(errw, "join with: relay <claude|codex|copilot> [role] --session=%s\n", s.ID)
 	case KindSessionEnd:
 		resp, err := c.Post("http://relay/v1/admin/sessions/"+p.Target+"/end", "application/json", nil)
 		if err != nil {
