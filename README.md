@@ -142,6 +142,11 @@ switches to `wss://` for a TLS-terminated one. Want to run your own server? See
 Prefer a session that never leaves this machine, with no network involved at all? Use
 `--session=NEW_LOCAL`.
 
+A global session isn't kept forever: one left idle (no connected agent, no activity) for 24
+hours is automatically and permanently deleted from the server - the session, its agents and
+its messages, all at once. See [server/DEPLOY.md](server/DEPLOY.md#data-retention) for the exact
+knobs if you're running your own server.
+
 ## Files and configuration
 
 Everything lives under `~/.relay` (override with `RELAY_HOME`), private to your user:

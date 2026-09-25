@@ -75,6 +75,11 @@ type JoinResult struct {
 	Resumed   bool
 }
 
+// DeleteReport is what one DeleteSessionsOlderThan pass actually removed.
+type DeleteReport struct {
+	Sessions, Agents, Messages int
+}
+
 // Interface is the session service every WebSocket connection's RPCs go
 // through.
 type Interface interface {
@@ -129,14 +134,27 @@ type Interface interface {
 	// shard - every session living there - not one session at a time).
 	// Called periodically per configured shard from app.Serve's OnStart.
 	Sweep(ctx context.Context, shardURL string) error
+	// DeleteSessionsOlderThan permanently removes every session on shardURL
+	// that is idle (no connected agent, no agent activity) and has had no
+	// activity since cutoff: the session document, every one of its agents,
+	// every one of its messages, and its Postgres shard-map row. Each
+	// session's Mongo data is removed in one real transaction (messages,
+	// then agents, then the session document - all three or none: see
+	// mongodb.Interface.WithTransaction), so a mid-failure can never leave a
+	// partial session behind. The shard-map row is removed as a best-effort
+	// second step per ShardMapRepository.DeleteBySessionID's contract. Not
+	// called from anywhere yet.
+	DeleteSessionsOlderThan(ctx context.Context, shardURL string, cutoff time.Time) (DeleteReport, error)
 }
 
 type service struct {
-	cfg      config.Config
-	shards   sharding.Interface
-	sessions repository.SessionRepository
-	agents   repository.AgentRepository
-	messages repository.MessageRepository
+	cfg       config.Config
+	shards    sharding.Interface
+	sessions  repository.SessionRepository
+	agents    repository.AgentRepository
+	messages  repository.MessageRepository
+	shardMap  repository.ShardMapRepository
+	mongoPool mongodb.Interface
 }
 
 func New(
@@ -145,6 +163,8 @@ func New(
 	sessions repository.SessionRepository,
 	agents repository.AgentRepository,
 	messages repository.MessageRepository,
+	shardMap repository.ShardMapRepository,
+	mongoPool mongodb.Interface,
 ) (Interface, error) {
 	if shards == nil {
 		return nil, errors.New("session: shards is nil")
@@ -158,7 +178,16 @@ func New(
 	if messages == nil {
 		return nil, errors.New("session: messages repository is nil")
 	}
-	return service{cfg: cfg, shards: shards, sessions: sessions, agents: agents, messages: messages}, nil
+	if shardMap == nil {
+		return nil, errors.New("session: shard map repository is nil")
+	}
+	if mongoPool == nil {
+		return nil, errors.New("session: mongo pool is nil")
+	}
+	return service{
+		cfg: cfg, shards: shards, sessions: sessions, agents: agents, messages: messages,
+		shardMap: shardMap, mongoPool: mongoPool,
+	}, nil
 }
 
 func (s service) Join(ctx context.Context, req JoinRequest) (JoinResult, error) {
@@ -571,6 +600,65 @@ func (s service) Sweep(ctx context.Context, shardURL string) error {
 		}
 	}
 	return nil
+}
+
+// DeleteSessionsOlderThan is the transactional counterpart to Sweep: where
+// Sweep only ever transitions message/agent states, this permanently removes
+// whole sessions. See the Interface doc comment for the full contract.
+func (s service) DeleteSessionsOlderThan(ctx context.Context, shardURL string, cutoff time.Time) (DeleteReport, error) {
+	var rep DeleteReport
+	candidates, err := s.sessions.ListOlderThan(ctx, shardURL, cutoff)
+	if err != nil {
+		return rep, fmt.Errorf("session: listing old sessions: %w", err)
+	}
+
+	for _, sess := range candidates {
+		agents, err := s.agents.ListBySession(ctx, shardURL, sess.ID)
+		if err != nil {
+			return rep, fmt.Errorf("session: listing agents for %s: %w", sess.ID, err)
+		}
+		if !idleSince(agents, cutoff) {
+			continue // a connected agent, or one active since cutoff: not actually idle
+		}
+
+		var messagesDeleted int64
+		err = s.mongoPool.WithTransaction(ctx, shardURL, func(sessCtx context.Context) error {
+			n, err := s.messages.DeleteBySession(sessCtx, shardURL, sess.ID)
+			if err != nil {
+				return err
+			}
+			messagesDeleted = n
+			if _, err := s.agents.DeleteBySession(sessCtx, shardURL, sess.ID); err != nil {
+				return err
+			}
+			return s.sessions.Delete(sessCtx, shardURL, sess.ID)
+		})
+		if err != nil {
+			return rep, fmt.Errorf("session: deleting session %s: %w", sess.ID, err)
+		}
+		rep.Sessions++
+		rep.Agents += len(agents)
+		rep.Messages += int(messagesDeleted)
+
+		// Best-effort second step, deliberately outside the Mongo
+		// transaction above and never allowed to undo it - see
+		// ShardMapRepository.DeleteBySessionID's doc comment.
+		_ = s.shardMap.DeleteBySessionID(ctx, sess.ID)
+	}
+	return rep, nil
+}
+
+// idleSince reports whether every agent in agents is safe to delete: none
+// currently connected, and none active at or after cutoff. A session with no
+// agents at all is idle by definition (gated by ListOlderThan's own cutoff
+// check instead).
+func idleSince(agents []mongodb.Agent, cutoff time.Time) bool {
+	for _, a := range agents {
+		if a.Status == "connected" || !a.UpdatedAt.Before(cutoff) {
+			return false
+		}
+	}
+	return true
 }
 
 // notifySender creates a synthetic notify-kind message back to a message's

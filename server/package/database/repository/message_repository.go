@@ -104,6 +104,10 @@ type MessageRepository interface {
 	// (so the caller can notify each sender) - called once an agent is
 	// reaped as gone for good.
 	FailPendingFor(ctx context.Context, mongoURL, agentID string) ([]mongodb.Message, error)
+	// DeleteBySession removes every message document for sessionID and
+	// reports how many were removed - see SessionRepository.Delete's doc
+	// comment for the ordering/atomicity contract this must be called under.
+	DeleteBySession(ctx context.Context, mongoURL, sessionID string) (deleted int64, err error)
 }
 
 type messageRepository struct {
@@ -359,4 +363,16 @@ func (r messageRepository) findAndTransition(ctx context.Context, db *mongo.Data
 		return nil, err
 	}
 	return due, nil
+}
+
+func (r messageRepository) DeleteBySession(ctx context.Context, mongoURL, sessionID string) (int64, error) {
+	db, err := r.pool.Database(mongoURL)
+	if err != nil {
+		return 0, err
+	}
+	res, err := db.Collection(mongodb.CollectionMessages).DeleteMany(ctx, bson.M{"session_id": sessionID})
+	if err != nil {
+		return 0, err
+	}
+	return res.DeletedCount, nil
 }

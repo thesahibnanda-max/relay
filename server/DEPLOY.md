@@ -21,8 +21,10 @@ free-tier instance, for example) can be tuned without a rebuild.
 | `MAX_INFLIGHT_RPCS` | `16` | Concurrent in-flight RPCs a single connection may have outstanding. |
 | `DEDUP_WINDOW` | `30s` | An identical (from, to, kind, body) retry within this window coalesces into the existing message instead of creating a new one. |
 | `MESSAGE_TTL` | `1h` | How long an undelivered message lives before the sweep expires it. |
-| `SWEEP_EVERY` | `30s` | How often the TTL-expiry + disconnect-reaper maintenance pass runs, per shard. |
+| `SWEEP_EVERY` | `30s` | How often the TTL-expiry + disconnect-reaper maintenance pass runs, per shard. This never deletes anything - it only transitions message/agent states. |
 | `DISCONNECT_GRACE` | `15m` | How long a disconnected agent may stay offline before the sweep reaps it as gone for good (`exited`) and fails its pending mail to `undeliverable`. |
+| `SESSION_MAX_AGE` | `24h` | How long an idle global session (no connected agent, no activity) is kept before it's **permanently deleted** - the session, every one of its agents, and every one of its messages, removed together in one transaction. This is a single server-wide default; a per-session override is planned (see the project's issue tracker) but not yet implemented. |
+| `SESSION_CLEANUP_INTERVAL` | `30m` | How often the idle-session deletion pass runs, per shard. Deliberately its own, much less frequent schedule than `SWEEP_EVERY`: sweeping is cheap and latency-sensitive, permanent deletion isn't something that needs to run every few seconds. |
 | `POSTGRES_CACHE_TTL` | `10m` | How long the in-memory L1 cache of session-to-shard lookups stays valid before re-querying Postgres. The mapping never actually changes once assigned, so this is a defensive ceiling, not a correctness knob - useful to shorten on a fast local Postgres, or set to `0` to disable the cache entirely. |
 | `PING_CHECK_INTERVAL` | `5m30s` | How often a background job checks every configured Postgres and MongoDB connection is actually alive (not just cached as healthy) - catches an outage even during a quiet period with no real traffic to surface one on its own. Failures are logged, not otherwise acted on. |
 
@@ -100,6 +102,23 @@ release build time (via the `RELAY_BASE_URL` GitHub secret + GoReleaser ldflags 
 `RELAY_GLOBAL_TLS=1` in the environment plus `--server=relay.example.com:443` (or whatever
 port Caddy listens on) - the source build has no server baked in and is free to point at any
 server, including this one.
+
+## Data retention
+
+Global sessions aren't kept forever. Two independent, periodic background jobs (both scheduled
+on the same supervised `cron` service as the DB liveness check - see `server/package/cron`, so
+a panic or a hang in one can never silently take the others down with it) run per configured
+shard:
+
+* **Sweep** (`SWEEP_EVERY`, default `30s`): expires overdue messages and reaps agents that have
+  been disconnected longer than `DISCONNECT_GRACE`. State transitions only - nothing is deleted.
+* **Idle-session cleanup** (`SESSION_CLEANUP_INTERVAL`, default `30m`): permanently deletes any
+  session with no connected agent and no activity for `SESSION_MAX_AGE` (default `24h`) - the
+  session document, every one of its agents, and every one of its messages, removed together in
+  one real database transaction (all or nothing, never a partial delete).
+
+Both are single server-wide settings today; there is no way to give one particular session a
+longer or shorter lifetime yet (tracked as a future enhancement in the project's issue tracker).
 
 ## Out of scope
 

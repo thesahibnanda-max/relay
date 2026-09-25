@@ -39,6 +39,10 @@ type AgentRepository interface {
 	// might still reconnect) and returns the reaped agents, so the caller
 	// can fail their pending mail.
 	ReapGone(ctx context.Context, mongoURL string, cutoff time.Time) ([]mongodb.Agent, error)
+	// DeleteBySession removes every agent document for sessionID and reports
+	// how many were removed - see SessionRepository.Delete's doc comment for
+	// the ordering/atomicity contract this must be called under.
+	DeleteBySession(ctx context.Context, mongoURL, sessionID string) (deleted int64, err error)
 }
 
 type agentRepository struct {
@@ -196,4 +200,16 @@ func (r agentRepository) ReapGone(ctx context.Context, mongoURL string, cutoff t
 		return nil, err
 	}
 	return gone, nil
+}
+
+func (r agentRepository) DeleteBySession(ctx context.Context, mongoURL, sessionID string) (int64, error) {
+	db, err := r.pool.Database(mongoURL)
+	if err != nil {
+		return 0, err
+	}
+	res, err := db.Collection(mongodb.CollectionAgents).DeleteMany(ctx, bson.M{"session_id": sessionID})
+	if err != nil {
+		return 0, err
+	}
+	return res.DeletedCount, nil
 }

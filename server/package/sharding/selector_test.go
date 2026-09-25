@@ -102,6 +102,18 @@ func (f *fakeShardMapRepo) Create(ctx context.Context, sessionID string, mongoUR
 	return row, nil
 }
 
+func (f *fakeShardMapRepo) DeleteBySessionID(ctx context.Context, sessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, row := range f.rows {
+		if row.SessionID == sessionID {
+			f.rows = append(f.rows[:i], f.rows[i+1:]...)
+			return nil
+		}
+	}
+	return nil
+}
+
 func (f *fakeShardMapRepo) calls() (getBySessionID int) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

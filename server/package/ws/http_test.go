@@ -91,6 +91,10 @@ func (fakeSessionService) Sweep(ctx context.Context, shardURL string) error {
 	return nil
 }
 
+func (fakeSessionService) DeleteSessionsOlderThan(ctx context.Context, shardURL string, cutoff time.Time) (session.DeleteReport, error) {
+	return session.DeleteReport{}, nil
+}
+
 var _ session.Interface = fakeSessionService{}
 
 // fakePostgresPinger and fakeMongoPinger are controllable stand-ins for
@@ -108,6 +112,9 @@ func (f fakeMongoPinger) Database(mongoURL string) (*mongo.Database, error) {
 }
 func (f fakeMongoPinger) Close(context.Context) error { return nil }
 func (f fakeMongoPinger) Ping(context.Context) error  { return f.err }
+func (f fakeMongoPinger) WithTransaction(ctx context.Context, mongoURL string, fn func(sessCtx context.Context) error) error {
+	return errors.New("fakeMongoPinger: WithTransaction is not used by these tests")
+}
 
 var (
 	_ postgres.Interface = fakePostgresPinger{}

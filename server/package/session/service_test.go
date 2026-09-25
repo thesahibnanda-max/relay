@@ -10,8 +10,11 @@ import (
 	"testing"
 	"time"
 
+	mongodriver "go.mongodb.org/mongo-driver/v2/mongo"
+
 	"github.com/thesahibnanda-max/relay/server/package/config"
 	"github.com/thesahibnanda-max/relay/server/package/database/mongodb"
+	"github.com/thesahibnanda-max/relay/server/package/database/postgres"
 	"github.com/thesahibnanda-max/relay/server/package/database/repository"
 	"github.com/thesahibnanda-max/relay/server/package/sharding"
 )
@@ -53,6 +56,25 @@ func (f *fakeSessions) Get(ctx context.Context, mongoURL, sessionID string) (mon
 	defer f.mu.Unlock()
 	s, ok := f.sessions[sessionID]
 	return s, ok, nil
+}
+
+func (f *fakeSessions) Delete(ctx context.Context, mongoURL, sessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.sessions, sessionID)
+	return nil
+}
+
+func (f *fakeSessions) ListOlderThan(ctx context.Context, mongoURL string, cutoff time.Time) ([]mongodb.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []mongodb.Session
+	for _, s := range f.sessions {
+		if s.UpdatedAt.Before(cutoff) {
+			out = append(out, s)
+		}
+	}
+	return out, nil
 }
 
 var _ repository.SessionRepository = (*fakeSessions)(nil)
@@ -155,6 +177,19 @@ func (f *fakeAgents) ReapGone(ctx context.Context, mongoURL string, cutoff time.
 		}
 	}
 	return gone, nil
+}
+
+func (f *fakeAgents) DeleteBySession(ctx context.Context, mongoURL, sessionID string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var n int64
+	for id, a := range f.agents {
+		if a.SessionID == sessionID {
+			delete(f.agents, id)
+			n++
+		}
+	}
+	return n, nil
 }
 
 var _ repository.AgentRepository = (*fakeAgents)(nil)
@@ -360,6 +395,19 @@ func (f *fakeMessages) ListForAgent(ctx context.Context, mongoURL, sessionID, ag
 	return out, nil
 }
 
+func (f *fakeMessages) DeleteBySession(ctx context.Context, mongoURL, sessionID string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var n int64
+	for id, m := range f.messages {
+		if m.SessionID == sessionID {
+			delete(f.messages, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
 var _ repository.MessageRepository = (*fakeMessages)(nil)
 
 // testConfig mirrors config.New's own defaults, so tests exercise the same
@@ -381,7 +429,7 @@ func newTestServiceWithConfig(t *testing.T, cfg config.Config) (Interface, *fake
 	t.Helper()
 	agents := newFakeAgents()
 	messages := newFakeMessages()
-	svc, err := New(cfg, fakeShards{}, newFakeSessions(), agents, messages)
+	svc, err := New(cfg, fakeShards{}, newFakeSessions(), agents, messages, newFakeShardMap(), &fakeMongoPool{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -896,5 +944,242 @@ func TestSweep_ReapsGoneAgentsAndFailsPendingMail(t *testing.T) {
 	}
 	if stored.State != mongodb.MessageStateUndeliverable {
 		t.Fatalf("expected undeliverable, got %q", stored.State)
+	}
+}
+
+// fakeShardMap is an in-memory stand-in for repository.ShardMapRepository,
+// only used by the DeleteSessionsOlderThan tests below - Count/GetBySessionID
+// aren't exercised by that code path but must exist to satisfy the interface.
+type fakeShardMap struct {
+	mu   sync.Mutex
+	rows map[string]bool // sessionID -> exists
+}
+
+func newFakeShardMap() *fakeShardMap { return &fakeShardMap{rows: map[string]bool{}} }
+
+func (f *fakeShardMap) Count(ctx context.Context) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return int64(len(f.rows)), nil
+}
+
+func (f *fakeShardMap) GetBySessionID(ctx context.Context, sessionID string) (postgres.SessionShardMap, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.rows[sessionID] {
+		return postgres.SessionShardMap{SessionID: sessionID}, true, nil
+	}
+	return postgres.SessionShardMap{}, false, nil
+}
+
+func (f *fakeShardMap) Create(ctx context.Context, sessionID string, mongoURLID uint) (postgres.SessionShardMap, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rows[sessionID] = true
+	return postgres.SessionShardMap{SessionID: sessionID, MongoURLID: mongoURLID}, nil
+}
+
+func (f *fakeShardMap) DeleteBySessionID(ctx context.Context, sessionID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.rows, sessionID)
+	return nil
+}
+
+var _ repository.ShardMapRepository = (*fakeShardMap)(nil)
+
+// fakeMongoPool is an in-memory stand-in for mongodb.Interface, only used by
+// the DeleteSessionsOlderThan tests below - it runs WithTransaction's fn
+// directly against the given ctx (no real session/rollback), since proving
+// genuine ACID atomicity is the real-DB integration test's job (see
+// server/integration); this fake exists to unit-test the orchestration logic
+// (the idle check, the delete-ordering, the report) fast and without a
+// database. Database/Close/Ping aren't exercised by that code path.
+type fakeMongoPool struct {
+	mu          sync.Mutex
+	txnCalls    int
+	failWithErr error // if set, WithTransaction returns this without calling fn
+}
+
+func (f *fakeMongoPool) Database(mongoURL string) (*mongodriver.Database, error) {
+	return nil, errors.New("session test: Database is not used by these tests")
+}
+
+func (f *fakeMongoPool) Close(ctx context.Context) error { return nil }
+
+func (f *fakeMongoPool) Ping(ctx context.Context) error { return nil }
+
+func (f *fakeMongoPool) WithTransaction(ctx context.Context, mongoURL string, fn func(sessCtx context.Context) error) error {
+	f.mu.Lock()
+	f.txnCalls++
+	failErr := f.failWithErr
+	f.mu.Unlock()
+	if failErr != nil {
+		return failErr
+	}
+	return fn(ctx)
+}
+
+var _ mongodb.Interface = (*fakeMongoPool)(nil)
+
+// newTestServiceForDelete builds a service with direct access to every fake
+// DeleteSessionsOlderThan touches - kept separate from newTestServiceWithConfig
+// (used by every other test in this file) so those ~25 call sites never need
+// to change for a capability only these new tests exercise.
+func newTestServiceForDelete(t *testing.T) (svc Interface, sessions *fakeSessions, agents *fakeAgents, messages *fakeMessages, shardMap *fakeShardMap, mongoPool *fakeMongoPool) {
+	t.Helper()
+	sessions = newFakeSessions()
+	agents = newFakeAgents()
+	messages = newFakeMessages()
+	shardMap = newFakeShardMap()
+	mongoPool = &fakeMongoPool{}
+	svc, err := New(testConfig(), fakeShards{}, sessions, agents, messages, shardMap, mongoPool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return svc, sessions, agents, messages, shardMap, mongoPool
+}
+
+func TestDeleteSessionsOlderThan_RemovesFullyIdleSessionAtomically(t *testing.T) {
+	svc, sessions, agents, messages, shardMap, mongoPool := newTestServiceForDelete(t)
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	cutoff := time.Now().UTC().Add(-time.Hour)
+
+	sess, _ := sessions.Create(ctx, testShardURL, mongodb.Session{ID: "sess-1", UpdatedAt: old})
+	agent, _ := agents.Create(ctx, testShardURL, mongodb.Agent{ID: "agent-1", SessionID: sess.ID, Status: "disconnected"})
+	agents.mu.Lock()
+	a := agents.agents[agent.ID]
+	a.UpdatedAt = old
+	agents.agents[agent.ID] = a
+	agents.mu.Unlock()
+	messages.Create(ctx, testShardURL, mongodb.Message{ID: "msg-1", SessionID: sess.ID})
+	shardMap.Create(ctx, sess.ID, 1)
+
+	rep, err := svc.DeleteSessionsOlderThan(ctx, testShardURL, cutoff)
+	if err != nil {
+		t.Fatalf("DeleteSessionsOlderThan: %v", err)
+	}
+	if rep.Sessions != 1 || rep.Agents != 1 || rep.Messages != 1 {
+		t.Fatalf("unexpected report: %+v", rep)
+	}
+	if mongoPool.txnCalls != 1 {
+		t.Fatalf("expected exactly 1 transaction, got %d", mongoPool.txnCalls)
+	}
+	if _, found, _ := sessions.Get(ctx, testShardURL, sess.ID); found {
+		t.Error("session should be gone")
+	}
+	if _, found, _ := shardMap.GetBySessionID(ctx, sess.ID); found {
+		t.Error("shard map row should be gone")
+	}
+}
+
+func TestDeleteSessionsOlderThan_SkipsSessionWithAConnectedAgent(t *testing.T) {
+	svc, sessions, agents, _, _, mongoPool := newTestServiceForDelete(t)
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	cutoff := time.Now().UTC().Add(-time.Hour)
+
+	sess, _ := sessions.Create(ctx, testShardURL, mongodb.Session{ID: "sess-2", UpdatedAt: old})
+	agent, _ := agents.Create(ctx, testShardURL, mongodb.Agent{ID: "agent-2", SessionID: sess.ID, Status: "connected"})
+	agents.mu.Lock()
+	a := agents.agents[agent.ID]
+	a.UpdatedAt = old
+	agents.agents[agent.ID] = a
+	agents.mu.Unlock()
+
+	rep, err := svc.DeleteSessionsOlderThan(ctx, testShardURL, cutoff)
+	if err != nil {
+		t.Fatalf("DeleteSessionsOlderThan: %v", err)
+	}
+	if rep.Sessions != 0 {
+		t.Fatalf("a session with a connected agent must survive, got report %+v", rep)
+	}
+	if mongoPool.txnCalls != 0 {
+		t.Fatalf("no transaction should have been attempted, got %d", mongoPool.txnCalls)
+	}
+	if _, found, _ := sessions.Get(ctx, testShardURL, sess.ID); !found {
+		t.Error("session should still exist")
+	}
+}
+
+func TestDeleteSessionsOlderThan_SkipsSessionWithRecentAgentActivity(t *testing.T) {
+	svc, sessions, agents, _, _, _ := newTestServiceForDelete(t)
+	ctx := context.Background()
+	sessionLooksOld := time.Now().UTC().Add(-2 * time.Hour)
+	cutoff := time.Now().UTC().Add(-time.Hour)
+
+	// The session document itself looks old, but its one agent was active
+	// after cutoff - proves the session's own (stale-by-design) UpdatedAt
+	// alone would have been wrong, and the per-agent check is load-bearing.
+	sess, _ := sessions.Create(ctx, testShardURL, mongodb.Session{ID: "sess-3", UpdatedAt: sessionLooksOld})
+	agents.Create(ctx, testShardURL, mongodb.Agent{ID: "agent-3", SessionID: sess.ID, Status: "disconnected"})
+	// fakeAgents.Create already stamps UpdatedAt to time.Now(), i.e. recent.
+
+	rep, err := svc.DeleteSessionsOlderThan(ctx, testShardURL, cutoff)
+	if err != nil {
+		t.Fatalf("DeleteSessionsOlderThan: %v", err)
+	}
+	if rep.Sessions != 0 {
+		t.Fatalf("a session with a recently-active agent must survive, got report %+v", rep)
+	}
+	if _, found, _ := sessions.Get(ctx, testShardURL, sess.ID); !found {
+		t.Error("session should still exist")
+	}
+}
+
+func TestDeleteSessionsOlderThan_HandlesASessionWithNoAgentsAtAll(t *testing.T) {
+	svc, sessions, _, _, _, mongoPool := newTestServiceForDelete(t)
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	cutoff := time.Now().UTC().Add(-time.Hour)
+
+	sess, _ := sessions.Create(ctx, testShardURL, mongodb.Session{ID: "sess-4", UpdatedAt: old})
+
+	rep, err := svc.DeleteSessionsOlderThan(ctx, testShardURL, cutoff)
+	if err != nil {
+		t.Fatalf("DeleteSessionsOlderThan: %v", err)
+	}
+	if rep.Sessions != 1 {
+		t.Fatalf("an ancient, agent-less session should be deleted by age alone, got report %+v", rep)
+	}
+	if mongoPool.txnCalls != 1 {
+		t.Fatalf("expected exactly 1 transaction, got %d", mongoPool.txnCalls)
+	}
+	if _, found, _ := sessions.Get(ctx, testShardURL, sess.ID); found {
+		t.Error("session should be gone")
+	}
+}
+
+// TestDeleteSessionsOlderThan_PropagatesTransactionErrorsWithoutTouchingState
+// proves the orchestration layer surfaces a failed transaction as an error
+// rather than swallowing it or reporting a partial success - it does NOT
+// prove real cross-collection ACID rollback (this fake has no real
+// transaction to roll back); that's server/integration's job, against the
+// real driver and a real replica set.
+func TestDeleteSessionsOlderThan_PropagatesTransactionErrorsWithoutTouchingState(t *testing.T) {
+	svc, sessions, agents, _, _, mongoPool := newTestServiceForDelete(t)
+	ctx := context.Background()
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	cutoff := time.Now().UTC().Add(-time.Hour)
+
+	sess, _ := sessions.Create(ctx, testShardURL, mongodb.Session{ID: "sess-5", UpdatedAt: old})
+	agent, _ := agents.Create(ctx, testShardURL, mongodb.Agent{ID: "agent-5", SessionID: sess.ID, Status: "disconnected"})
+	agents.mu.Lock()
+	a := agents.agents[agent.ID]
+	a.UpdatedAt = old
+	agents.agents[agent.ID] = a
+	agents.mu.Unlock()
+
+	mongoPool.failWithErr = errors.New("simulated transaction failure")
+	_, err := svc.DeleteSessionsOlderThan(ctx, testShardURL, cutoff)
+	if err == nil {
+		t.Fatal("expected an error from the failed transaction")
+	}
+	if _, found, _ := sessions.Get(ctx, testShardURL, sess.ID); !found {
+		t.Error("session should NOT have been deleted: the transaction never committed")
+	}
+	if _, found, _ := agents.Get(ctx, testShardURL, agent.ID); !found {
+		t.Error("agent should NOT have been deleted: the transaction never committed")
 	}
 }

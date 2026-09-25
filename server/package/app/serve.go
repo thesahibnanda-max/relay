@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"time"
 
 	"go.uber.org/fx"
 
@@ -15,7 +14,6 @@ import (
 	"github.com/thesahibnanda-max/relay/server/package/database/mongodb"
 	"github.com/thesahibnanda-max/relay/server/package/database/postgres"
 	"github.com/thesahibnanda-max/relay/server/package/database/repository"
-	"github.com/thesahibnanda-max/relay/server/package/session"
 	"github.com/thesahibnanda-max/relay/server/package/ws"
 )
 
@@ -28,12 +26,17 @@ import (
 // begins listening; OnStop shuts the HTTP server down cleanly. *http.Server
 // is the standard library's own type - an unavoidable pointer, like
 // *gorm.DB and *mongo.Client elsewhere in this module.
-func Serve(lc fx.Lifecycle, cfg config.Config, mongoURLs repository.MongoURLRepository, agents repository.AgentRepository, sessions session.Interface, handler ws.Interface, pingCron cron.Interface, pg postgres.Interface, mongoPool mongodb.Interface) {
+//
+// Every periodic background task (DB liveness ping, session sweep/cleanup)
+// runs on backgroundCron - one supervised scheduler (see package cron) -
+// rather than a bare goroutine loop of this package's own: a panic or a
+// silent hang in an unsupervised goroutine is invisible until someone
+// notices the symptom, not the cause.
+func Serve(lc fx.Lifecycle, cfg config.Config, mongoURLs repository.MongoURLRepository, agents repository.AgentRepository, handler ws.Interface, backgroundCron cron.Interface, pg postgres.Interface, mongoPool mongodb.Interface) {
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.PORT),
 		Handler: ws.NewHandler(handler, pg, mongoPool),
 	}
-	sweepStop := make(chan struct{})
 
 	lc.Append(fx.Hook{
 		OnStart: func(ctx context.Context) error {
@@ -53,35 +56,13 @@ func Serve(lc fx.Lifecycle, cfg config.Config, mongoURLs repository.MongoURLRepo
 			// on a graceful OnStop shutdown - nothing actionable to do with
 			// it here in this skeleton.
 			go func() { _ = srv.Serve(ln) }()
-			go runSweeps(sweepStop, cfg, sessions)
-			if err := pingCron.Start(ctx); err != nil {
-				return fmt.Errorf("app: starting ping cron: %w", err)
+			if err := backgroundCron.Start(ctx); err != nil {
+				return fmt.Errorf("app: starting background cron: %w", err)
 			}
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
-			close(sweepStop)
-			return errors.Join(pingCron.Stop(ctx), srv.Shutdown(ctx))
+			return errors.Join(backgroundCron.Stop(ctx), srv.Shutdown(ctx))
 		},
 	})
-}
-
-// runSweeps runs one TTL-expiry + disconnect-reaper pass (session.Sweep) per
-// configured shard on cfg.SweepEvery, until stop is closed - the periodic
-// maintenance pass that earns the expired/undeliverable terminal states.
-func runSweeps(stop <-chan struct{}, cfg config.Config, sessions session.Interface) {
-	ticker := time.NewTicker(cfg.SweepEvery)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case <-ticker.C:
-			for _, url := range cfg.MongoURLs {
-				sctx, cancel := context.WithTimeout(context.Background(), cfg.SweepEvery)
-				_ = sessions.Sweep(sctx, url)
-				cancel()
-			}
-		}
-	}
 }

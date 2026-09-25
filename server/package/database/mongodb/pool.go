@@ -36,6 +36,17 @@ type Interface interface {
 	// see the implementation's own comment for why a partial failure still
 	// needs to surface correctly.
 	Ping(ctx context.Context) error
+
+	// WithTransaction runs fn within a real multi-document ACID transaction
+	// against mongoURL's shard: every write fn makes through sessCtx commits
+	// together if fn returns nil, or every one of them is rolled back if fn
+	// returns an error - never a partial result. fn may run more than once
+	// (the driver retries transient transaction errors), so it must be
+	// idempotent. Requires the shard to be a replica set (or mongos); a
+	// standalone MongoDB instance fails this with a clear driver error - see
+	// server/docker-compose.yml's mongo1/mongo2 (--replSet) and
+	// server/DEPLOY.md for anyone self-hosting.
+	WithTransaction(ctx context.Context, mongoURL string, fn func(sessCtx context.Context) error) error
 }
 
 type impl struct {
@@ -93,4 +104,20 @@ func (i impl) Ping(ctx context.Context) error {
 	}
 
 	return errors.Join(errs...)
+}
+
+func (i impl) WithTransaction(ctx context.Context, mongoURL string, fn func(sessCtx context.Context) error) error {
+	client, ok := i.clients[mongoURL]
+	if !ok {
+		return fmt.Errorf("mongo: no client configured for url %q", mongoURL)
+	}
+	sess, err := client.StartSession()
+	if err != nil {
+		return fmt.Errorf("mongo: starting session for %s: %w", mongoURL, err)
+	}
+	defer sess.EndSession(ctx)
+	_, err = sess.WithTransaction(ctx, func(sessCtx context.Context) (any, error) {
+		return nil, fn(sessCtx)
+	})
+	return err
 }

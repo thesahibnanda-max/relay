@@ -11,21 +11,83 @@ services:
     volumes:
       - relay_postgres_data:/var/lib/postgresql/data
 
+  # Each of mongo1/mongo2 is its own single-node replica set (not a member of
+  # the other's) - required for multi-document transactions
+  # (mongodb.Interface.WithTransaction / session.DeleteSessionsOlderThan) to
+  # work at all: a plain standalone mongod rejects them outright. A one-node
+  # set needs no quorum and behaves exactly like standalone mongod otherwise.
+  # Production (MongoDB Atlas) is always a replica set already, even on the
+  # free tier - this only matters for local/CI.
   mongo1:
     image: mongo:7
     restart: unless-stopped
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
     ports:
       - "27017:27017"
     volumes:
       - relay_mongo1_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
 
+  mongo1-init:
+    image: mongo:7
+    restart: "no"
+    depends_on:
+      mongo1:
+        condition: service_healthy
+    # rs.initiate() only needs to succeed once per data volume; "already
+    # initialized" on every later `docker compose up` is expected, not an
+    # error. The member host is set explicitly to localhost:27017 (the
+    # published port every client - tests, the app - actually connects
+    # through): left to its default, MongoDB advertises the container's own
+    # hostname (its container ID), which resolves inside the Docker network
+    # but not from the host machine, and the driver's topology monitor keeps
+    # trying to reach that unreachable address forever ("ReplicaSetNoPrimary
+    # ... no such host") even though the initial connection succeeded.
+    entrypoint: >
+      bash -c "mongosh --host mongo1 --quiet --eval '
+        try { rs.initiate({_id: \"rs0\", members: [{_id: 0, host: \"localhost:27017\"}]}); print(\"initiated\"); }
+        catch (e) { if (String(e).includes(\"already initialized\")) { print(\"already initialized\"); } else { throw e; } }
+      '"
+
+  # mongo2 listens on 27018 INSIDE the container too (not just on the
+  # published host port), and 27018:27018 is a 1:1 mapping - not remapped
+  # like plain mongo:7 defaults would be. MongoDB validates that a replica
+  # config's advertised host:port actually matches a port the node itself is
+  # bound to; mongo1 and mongo2 are otherwise identical images, so if both
+  # listened on the same internal 27017 there'd be no way to tell mongo2
+  # "you are localhost:27018" - it would see the port number wasn't its own
+  # and reject the config as "no host maps to this node."
   mongo2:
     image: mongo:7
     restart: unless-stopped
+    command: ["mongod", "--replSet", "rs0", "--bind_ip_all", "--port", "27018"]
     ports:
-      - "27018:27017"
+      - "27018:27018"
     volumes:
       - relay_mongo2_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--port", "27018", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  mongo2-init:
+    image: mongo:7
+    restart: "no"
+    depends_on:
+      mongo2:
+        condition: service_healthy
+    # See mongo1-init's comment - localhost:27018 is this shard's own
+    # published port, and now also its own internal port (see mongo2 above).
+    entrypoint: >
+      bash -c "mongosh --host mongo2 --port 27018 --quiet --eval '
+        try { rs.initiate({_id: \"rs0\", members: [{_id: 0, host: \"localhost:27018\"}]}); print(\"initiated\"); }
+        catch (e) { if (String(e).includes(\"already initialized\")) { print(\"already initialized\"); } else { throw e; } }
+      '"
 
 volumes:
   relay_postgres_data:

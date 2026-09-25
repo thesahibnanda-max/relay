@@ -151,6 +151,9 @@ undeliverable, and the sender is told when that happens.
   text, and `--record=off` keeps almost nothing (and turns off the conversation sharing described above).
 * **Warning:** recordings include anything typed, including passwords you type into the terminal. They are
   **not encrypted**. Use `--record=off` for sensitive work.
+* A **global session** (`NEW`, or a token) also isn't kept on the server forever: one left idle for 24
+  hours — no assistant connected, nothing happening — is automatically and permanently deleted, messages
+  and all. A session kept on one machine (`NEW_LOCAL`) has no such limit; it's yours until you remove it.
 
 ---
 
