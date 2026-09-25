@@ -137,41 +137,29 @@ func checkPlatform(env Env) []Check {
 
 // ---- home directory ------------------------------------------------------------
 
-func mode(path string) (fs.FileMode, error) {
-	st, err := os.Lstat(path)
-	if err != nil {
-		return 0, err
-	}
-	return st.Mode().Perm(), nil
-}
-
 func checkHome(env Env) []Check {
 	p := env.Paths
 	if _, err := os.Stat(p.Root); err != nil {
 		return []Check{{Name: "relay home", Status: Info, Detail: p.Root + " does not exist yet (created on first use)"}}
 	}
 	var bad []string
+	check := func(path string) {
+		if ok, detail := privateEnough(path); !ok {
+			bad = append(bad, detail)
+		}
+		if st, err := os.Lstat(path); err == nil && !relayhome.OwnedByCurrentUser(path, st) {
+			bad = append(bad, path+" belongs to another user")
+		}
+	}
 	for _, d := range []string{p.Root, p.RunDir(), p.DataDir(), p.RawDir(), p.LogDir(), p.SessionsDir()} {
-		if m, err := mode(d); err == nil && m&0o077 != 0 {
-			bad = append(bad, fmt.Sprintf("%s is %#o", d, m))
-		}
-		if st, err := os.Lstat(d); err == nil {
-			if !relayhome.OwnedByCurrentUser(d, st) {
-				bad = append(bad, d+" belongs to another user")
-			}
-		}
+		check(d)
 	}
-	for _, f := range []string{p.DBPath(), p.DaemonLog()} {
-		if m, err := mode(f); err == nil && m&0o077 != 0 {
-			bad = append(bad, fmt.Sprintf("%s is %#o", f, m))
-		}
-	}
-	if m, err := mode(p.SocketPath()); err == nil && m&0o077 != 0 {
-		bad = append(bad, fmt.Sprintf("%s is %#o", p.SocketPath(), m))
+	for _, f := range []string{p.DBPath(), p.DaemonLog(), p.SocketPath()} {
+		check(f)
 	}
 	if len(bad) > 0 {
 		return []Check{{Name: "relay home", Status: Fail, Detail: "other users could read Relay's data: " + strings.Join(bad, "; "),
-			Fix: "chmod -R go-rwx " + p.Root + "  (relay repairs directories itself on next start)"}}
+			Fix: fixHint(p.Root)}}
 	}
 	return []Check{{Name: "relay home", Status: OK, Detail: p.Root + " (private)"}}
 }
