@@ -1,4 +1,4 @@
-//go:build unix
+//go:build windows
 
 package daemon
 
@@ -12,9 +12,10 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/thesahibnanda-max/relay/internal/proto"
 	"github.com/thesahibnanda-max/relay/internal/relayhome"
@@ -27,23 +28,30 @@ var (
 
 const maxLogSize = 10 << 20
 
-// flock takes an exclusive advisory lock, returning the held file. The lock is
-// released when the file is closed or the process dies, so a crashed daemon
-// never leaves a stale lock behind.
-func flock(path string, wait time.Duration) (*os.File, error) {
+// winLock is an exclusive lock on a whole file, released automatically on
+// process exit/crash exactly like a Unix flock - the Windows equivalent used
+// for both the daemon's single-instance lock and the spawn-serialising lock.
+type winLock struct {
+	f  *os.File
+	ov windows.Overlapped
+}
+
+func flock(path string, wait time.Duration) (*winLock, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, err
 	}
+	l := &winLock{f: f}
 	deadline := time.Now().Add(wait)
 	for {
-		err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err := windows.LockFileEx(windows.Handle(f.Fd()),
+			windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &l.ov)
 		if err == nil {
-			return f, nil
+			return l, nil
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) || time.Now().After(deadline) {
+		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) || time.Now().After(deadline) {
 			f.Close()
-			if errors.Is(err, syscall.EWOULDBLOCK) {
+			if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
 				return nil, ErrAlreadyRunning
 			}
 			return nil, err
@@ -52,7 +60,13 @@ func flock(path string, wait time.Duration) (*os.File, error) {
 	}
 }
 
-// OpenLog opens the daemon log (0600), rotating it once if it grew too large.
+func (l *winLock) Close() error {
+	_ = windows.UnlockFileEx(windows.Handle(l.f.Fd()), 0, 1, 0, &l.ov)
+	return l.f.Close()
+}
+
+// OpenLog opens the daemon log (hardened with a real ACL, since 0600 does
+// nothing on Windows), rotating it once if it grew too large.
 func OpenLog(paths relayhome.Paths) (*os.File, error) {
 	if err := paths.Ensure(); err != nil {
 		return nil, err
@@ -61,11 +75,19 @@ func OpenLog(paths relayhome.Paths) (*os.File, error) {
 	if st, err := os.Stat(p); err == nil && st.Size() > maxLogSize {
 		_ = os.Rename(p, p+".1")
 	}
-	return os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	_ = relayhome.SetPrivateACL(p)
+	return f, nil
 }
 
 // Run is the body of `relay daemon`: it takes the single-instance lock,
-// listens on the private socket and serves until ctx is cancelled.
+// listens on the private socket and serves until ctx is cancelled or a
+// POST /v1/admin/shutdown RPC arrives (Windows has no SIGTERM to send a
+// detached process, so lifecycle.Stop uses that RPC instead - see Stop below
+// and server.go's Options.OnShutdownRequested).
 func Run(ctx context.Context, paths relayhome.Paths, version string, log *slog.Logger) error {
 	if err := paths.Ensure(); err != nil {
 		return err
@@ -75,31 +97,33 @@ func Run(ctx context.Context, paths relayhome.Paths, version string, log *slog.L
 		return err
 	}
 	defer lock.Close()
+	if err := relayhome.SetPrivateACL(paths.LockPath()); err != nil {
+		log.Warn("could not harden lock file ACL", "err", err)
+	}
 
 	if removed, err := paths.GC(nil); err == nil && len(removed) > 0 {
 		log.Info("removed stale agent run directories", "count", len(removed))
 	}
 
 	sock := paths.SocketPath()
-	_ = os.Remove(sock) // stale socket from a crashed daemon; we hold the lock so it is safe
+	_ = os.Remove(sock)
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		return fmt.Errorf("listen %s: %w", sock, err)
 	}
-	if err := os.Chmod(sock, 0o600); err != nil {
+	if err := relayhome.SetPrivateACL(sock); err != nil {
 		ln.Close()
-		return err
+		return fmt.Errorf("harden socket ACL: %w", err)
 	}
 	if err := os.WriteFile(paths.PidPath(), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
 		ln.Close()
 		return err
 	}
+	if err := relayhome.SetPrivateACL(paths.PidPath()); err != nil {
+		log.Warn("could not harden pid file ACL", "err", err)
+	}
 	defer os.Remove(paths.PidPath())
 
-	// runCtx additionally lets an RPC (Windows' Stop, which has no signal to
-	// send a detached process) trigger the same shutdown path a SIGTERM does
-	// here via ctx: on Unix this is a no-op wrapper around ctx, since Stop
-	// still uses SIGTERM unchanged.
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -118,8 +142,8 @@ func Run(ctx context.Context, paths relayhome.Paths, version string, log *slog.L
 	case err = <-errc:
 		log.Error("server stopped", "err", err)
 	}
-	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer scancel()
 	serr := srv.Shutdown(sctx)
 	os.Remove(sock)
 	log.Info("relayd stopped")
@@ -179,7 +203,9 @@ func Ensure(ctx context.Context, paths relayhome.Paths, exe string) (*proto.Stat
 	cmd := exec.Command(exe, "daemon")
 	cmd.Env = os.Environ()
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, devnull, devnull
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // survive this terminal closing
+	// The Windows substitute for Setsid: detach from this console (survive
+	// it closing) and give the daemon its own process group.
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS | windows.CREATE_NEW_PROCESS_GROUP}
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start daemon: %w", err)
 	}
@@ -199,26 +225,25 @@ func Ensure(ctx context.Context, paths relayhome.Paths, exe string) (*proto.Stat
 	return nil, fmt.Errorf("daemon did not start; see %s", paths.DaemonLog())
 }
 
-// Stop asks the running daemon to exit and waits for it.
+// Stop asks the running daemon to exit over the same admin API every other
+// admin command uses, and waits for it: Windows has no polite process-
+// external signal deliverable to a detached process (confirmed: syscall.Kill
+// has no Windows implementation, and even taskkill without /F refuses to
+// signal a console-less process) - see server.go's handleShutdown, which
+// triggers the identical internal shutdown path Unix's SIGTERM does. No
+// escalation to a hard kill if the daemon does not stop in time, for exact
+// parity with Unix's own Stop, which does not escalate either.
 func Stop(paths relayhome.Paths) error {
-	data, err := os.ReadFile(paths.PidPath())
+	if _, err := Query(paths); err != nil {
+		return errors.New("relay daemon is not running")
+	}
+	c := proto.HTTPClient(paths.SocketPath())
+	c.Timeout = 5 * time.Second
+	resp, err := c.Post("http://relay/v1/admin/shutdown", "application/json", nil)
 	if err != nil {
-		if _, qerr := Query(paths); qerr != nil {
-			return errors.New("relay daemon is not running")
-		}
-		return fmt.Errorf("daemon is running but %s is unreadable: %w", paths.PidPath(), err)
+		return fmt.Errorf("asking the daemon to stop: %w", err)
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 1 {
-		return fmt.Errorf("bad pid file %s", paths.PidPath())
-	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
-			os.Remove(paths.PidPath())
-			return errors.New("relay daemon is not running")
-		}
-		return err
-	}
+	resp.Body.Close()
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := Query(paths); err != nil {
@@ -226,5 +251,5 @@ func Stop(paths relayhome.Paths) error {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return fmt.Errorf("daemon (pid %d) did not stop in time", pid)
+	return fmt.Errorf("daemon did not stop in time")
 }

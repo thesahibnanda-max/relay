@@ -51,6 +51,14 @@ type Options struct {
 	DisconnectGrace     time.Duration // an agent gone this long is treated as exited (default 15 min)
 	PairLimit           int           // messages per sender->target pair per minute (default 20)
 	SenderLimit         int           // messages per sender per minute (default 60)
+
+	// OnShutdownRequested, if set, is called by POST /v1/admin/shutdown to
+	// begin graceful shutdown - the RPC-triggered equivalent of Run's ctx
+	// being cancelled by a signal. Windows has no SIGTERM to send a detached
+	// daemon, so lifecycle_windows.go's Stop calls this endpoint instead;
+	// registering it is harmless on every platform (Unix's Stop still uses
+	// SIGTERM, unchanged).
+	OnShutdownRequested context.CancelFunc
 }
 
 type Server struct {
@@ -157,6 +165,7 @@ func New(opt Options) (*Server, error) {
 	mux.HandleFunc("GET /v1/admin/sessions/{id}", s.handleGetSession)
 	mux.HandleFunc("POST /v1/admin/sessions/{id}/end", s.handleEndSession)
 	mux.HandleFunc("POST /v1/admin/gc", s.handleGC)
+	mux.HandleFunc("POST /v1/admin/shutdown", s.handleShutdown)
 	s.routeAdminMessages(mux)
 	s.http = &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	return s, nil
@@ -584,6 +593,17 @@ func (s *Server) sessionInfo(ctx context.Context, sess store.Session, withExited
 		})
 	}
 	return info, nil
+}
+
+// handleShutdown begins the same shutdown path Run's ctx.Done() triggers -
+// not a separate ad-hoc mechanism, so Windows and Unix daemons stop through
+// identical internal code, differing only in how the trigger is delivered
+// (a signal cancelling ctx directly, vs. this RPC calling OnShutdownRequested).
+func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusAccepted)
+	if s.opt.OnShutdownRequested != nil {
+		s.opt.OnShutdownRequested()
+	}
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
