@@ -25,6 +25,16 @@ type ShardMapRepository interface {
 	// most once per session (enforced by the table's unique index on
 	// session_id), right after PickShardFor decides where a new session goes.
 	Create(ctx context.Context, sessionID string, mongoURLID uint) (postgres.SessionShardMap, error)
+	// DeleteBySessionID removes sessionID's shard assignment row. Called
+	// AFTER its Mongo data is already fully deleted (see session.Interface's
+	// DeleteSessionsOlderThan) - Postgres and MongoDB are two separate
+	// databases with no shared transaction, so this is a deliberate
+	// best-effort second step. If it fails after the Mongo delete already
+	// committed, the result is a harmless orphaned shard-map row pointing at
+	// nothing - cheap to notice and clean up later. The reverse ordering is
+	// never acceptable: a missing shard-map row must never be allowed to
+	// strand real, undeleted session data with no record of where it lives.
+	DeleteBySessionID(ctx context.Context, sessionID string) error
 }
 
 type shardMapRepository struct {
@@ -64,4 +74,8 @@ func (r shardMapRepository) Create(ctx context.Context, sessionID string, mongoU
 		return postgres.SessionShardMap{}, err
 	}
 	return row, nil
+}
+
+func (r shardMapRepository) DeleteBySessionID(ctx context.Context, sessionID string) error {
+	return r.db.DB().WithContext(ctx).Where("session_id = ?", sessionID).Delete(&postgres.SessionShardMap{}).Error
 }

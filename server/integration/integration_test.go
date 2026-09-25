@@ -9,6 +9,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -285,7 +286,7 @@ func buildStack(t *testing.T, mutators ...func(*config.Config)) testStack {
 	if err != nil {
 		t.Fatalf("sharding.New: %v", err)
 	}
-	svc, err := session.New(cfg, selector, sessionRepo, agentRepo, messageRepo)
+	svc, err := session.New(cfg, selector, sessionRepo, agentRepo, messageRepo, shardMapRepo, mongoPool)
 	if err != nil {
 		t.Fatalf("session.New: %v", err)
 	}
@@ -1183,5 +1184,278 @@ func readTyped[T any](t *testing.T, ctx context.Context, c *gorilla.Conn, wantTy
 			t.Fatalf("unmarshal %s payload: %v", wantType, err)
 		}
 		return out
+	}
+}
+
+// deleteTestDeps is every piece TestDeleteSessionsOlderThan_*/TestWithTransaction_*
+// need direct access to, beyond what testStack exposes (raw session/message/
+// shard-map repositories, to seed data with exact, backdated timestamps that
+// going through session.Interface's own Join/Send can't control).
+type deleteTestDeps struct {
+	mongoPool  mongodb.Interface
+	sessions   repository.SessionRepository
+	agents     repository.AgentRepository
+	messages   repository.MessageRepository
+	shardMap   repository.ShardMapRepository
+	svc        session.Interface
+	shardURL   string
+	mongoURLID uint
+}
+
+func newDeleteTestDeps(t *testing.T) deleteTestDeps {
+	t.Helper()
+	cfg := testConfig(t)
+	pg, err := postgres.New(cfg)
+	if err != nil {
+		t.Fatalf("postgres.New: %v", err)
+	}
+	t.Cleanup(func() {
+		if sqlDB, err := pg.DB().DB(); err == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	mongoPool, err := mongodb.New(cfg)
+	if err != nil {
+		t.Fatalf("mongodb.New: %v", err)
+	}
+	t.Cleanup(func() { _ = mongoPool.Close(context.Background()) })
+
+	mongoURLRepo, err := repository.NewMongoURLRepository(pg)
+	if err != nil {
+		t.Fatalf("NewMongoURLRepository: %v", err)
+	}
+	shardURL := cfg.MongoURLs[0]
+	mongoURLRow, err := mongoURLRepo.EnsureURL(context.Background(), shardURL)
+	if err != nil {
+		t.Fatalf("EnsureURL: %v", err)
+	}
+	shardMapRepo, err := repository.NewShardMapRepository(pg)
+	if err != nil {
+		t.Fatalf("NewShardMapRepository: %v", err)
+	}
+	sessionRepo, err := repository.NewSessionRepository(mongoPool)
+	if err != nil {
+		t.Fatalf("NewSessionRepository: %v", err)
+	}
+	agentRepo, err := repository.NewAgentRepository(mongoPool)
+	if err != nil {
+		t.Fatalf("NewAgentRepository: %v", err)
+	}
+	messageRepo, err := repository.NewMessageRepository(mongoPool)
+	if err != nil {
+		t.Fatalf("NewMessageRepository: %v", err)
+	}
+	if err := sessionRepo.EnsureCollection(context.Background(), shardURL); err != nil {
+		t.Fatalf("sessions.EnsureCollection: %v", err)
+	}
+	if err := agentRepo.EnsureCollection(context.Background(), shardURL); err != nil {
+		t.Fatalf("agents.EnsureCollection: %v", err)
+	}
+	if err := messageRepo.EnsureCollection(context.Background(), shardURL); err != nil {
+		t.Fatalf("messages.EnsureCollection: %v", err)
+	}
+	selector, err := sharding.New(cfg, shardMapRepo, mongoURLRepo)
+	if err != nil {
+		t.Fatalf("sharding.New: %v", err)
+	}
+	svc, err := session.New(cfg, selector, sessionRepo, agentRepo, messageRepo, shardMapRepo, mongoPool)
+	if err != nil {
+		t.Fatalf("session.New: %v", err)
+	}
+
+	return deleteTestDeps{
+		mongoPool: mongoPool, sessions: sessionRepo, agents: agentRepo, messages: messageRepo,
+		shardMap: shardMapRepo, svc: svc, shardURL: shardURL, mongoURLID: mongoURLRow.ID,
+	}
+}
+
+// backdateAgent forces agentID's updated_at directly, bypassing every
+// repository method (which always stamps "now") - the only way to construct
+// an agent that genuinely looks idle since some time in the past.
+func backdateAgent(t *testing.T, deps deleteTestDeps, agentID string, when time.Time) {
+	t.Helper()
+	db, err := deps.mongoPool.Database(deps.shardURL)
+	if err != nil {
+		t.Fatalf("Database: %v", err)
+	}
+	if _, err := db.Collection(mongodb.CollectionAgents).UpdateOne(context.Background(),
+		map[string]any{"_id": agentID}, map[string]any{"$set": map[string]any{"updated_at": when}}); err != nil {
+		t.Fatalf("backdating agent %s: %v", agentID, err)
+	}
+}
+
+func backdateSession(t *testing.T, deps deleteTestDeps, sessionID string, when time.Time) {
+	t.Helper()
+	db, err := deps.mongoPool.Database(deps.shardURL)
+	if err != nil {
+		t.Fatalf("Database: %v", err)
+	}
+	if _, err := db.Collection(mongodb.CollectionSessions).UpdateOne(context.Background(),
+		map[string]any{"_id": sessionID}, map[string]any{"$set": map[string]any{"updated_at": when}}); err != nil {
+		t.Fatalf("backdating session %s: %v", sessionID, err)
+	}
+}
+
+// TestWithTransaction_RollsBackAllWritesOnError is the single most important
+// test in this file: it proves mongodb.Interface.WithTransaction gives real
+// ACID atomicity against the actual driver and a real (single-node) replica
+// set - not just "looks fine in the happy path." A write is made, then the
+// callback returns an error; the write must not be visible afterward.
+func TestWithTransaction_RollsBackAllWritesOnError(t *testing.T) {
+	deps := newDeleteTestDeps(t)
+	ctx := context.Background()
+	sessionID := ulid.Make().String()
+
+	wantErr := errors.New("deliberate failure to force a rollback")
+	err := deps.mongoPool.WithTransaction(ctx, deps.shardURL, func(sessCtx context.Context) error {
+		if _, err := deps.sessions.Create(sessCtx, deps.shardURL, mongodb.Session{ID: sessionID, Status: "active"}); err != nil {
+			return err
+		}
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("WithTransaction error = %v, want %v", err, wantErr)
+	}
+
+	if _, found, err := deps.sessions.Get(ctx, deps.shardURL, sessionID); err != nil {
+		t.Fatalf("Get: %v", err)
+	} else if found {
+		t.Error("the session must NOT exist: its only write happened inside a transaction that was rolled back")
+	}
+}
+
+// TestDeleteSessionsOlderThan_RemovesFullyIdleSessionAtomically is the real-DB
+// counterpart to package session's fake-based unit test of the same name:
+// proves the whole thing - the coarse ListOlderThan filter, the per-agent
+// idle check, the real cross-collection transaction, and the Postgres
+// shard-map cleanup - works end to end against genuine infrastructure.
+func TestDeleteSessionsOlderThan_RemovesFullyIdleSessionAtomically(t *testing.T) {
+	deps := newDeleteTestDeps(t)
+	ctx := context.Background()
+	sessionID, agentID, messageID := ulid.Make().String(), ulid.Make().String(), ulid.Make().String()
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	cutoff := time.Now().UTC().Add(-time.Hour)
+
+	if _, err := deps.sessions.Create(ctx, deps.shardURL, mongodb.Session{ID: sessionID, Status: "active"}); err != nil {
+		t.Fatalf("sessions.Create: %v", err)
+	}
+	backdateSession(t, deps, sessionID, old)
+	if _, err := deps.agents.Create(ctx, deps.shardURL, mongodb.Agent{ID: agentID, SessionID: sessionID, Name: "a", Status: "disconnected"}); err != nil {
+		t.Fatalf("agents.Create: %v", err)
+	}
+	backdateAgent(t, deps, agentID, old)
+	if _, err := deps.messages.Create(ctx, deps.shardURL, mongodb.Message{ID: messageID, SessionID: sessionID, ToAgentID: agentID, Kind: "task", Body: "hi"}); err != nil {
+		t.Fatalf("messages.Create: %v", err)
+	}
+	if _, err := deps.shardMap.Create(ctx, sessionID, deps.mongoURLID); err != nil {
+		t.Fatalf("shardMap.Create: %v", err)
+	}
+
+	rep, err := deps.svc.DeleteSessionsOlderThan(ctx, deps.shardURL, cutoff)
+	if err != nil {
+		t.Fatalf("DeleteSessionsOlderThan: %v", err)
+	}
+	if rep.Sessions < 1 {
+		t.Fatalf("expected at least the seeded session to be reported deleted, got %+v", rep)
+	}
+
+	if _, found, err := deps.sessions.Get(ctx, deps.shardURL, sessionID); err != nil {
+		t.Fatalf("Get: %v", err)
+	} else if found {
+		t.Error("session should be gone")
+	}
+	if agents, err := deps.agents.ListBySession(ctx, deps.shardURL, sessionID); err != nil {
+		t.Fatalf("ListBySession: %v", err)
+	} else if len(agents) != 0 {
+		t.Errorf("expected no agents left, got %d", len(agents))
+	}
+	if msgs, err := deps.messages.ListForAgent(ctx, deps.shardURL, sessionID, agentID, 10); err != nil {
+		t.Fatalf("ListForAgent: %v", err)
+	} else if len(msgs) != 0 {
+		t.Errorf("expected no messages left, got %d", len(msgs))
+	}
+	if _, found, err := deps.shardMap.GetBySessionID(ctx, sessionID); err != nil {
+		t.Fatalf("GetBySessionID: %v", err)
+	} else if found {
+		t.Error("shard map row should be gone")
+	}
+}
+
+func TestDeleteSessionsOlderThan_SkipsSessionWithAConnectedAgent(t *testing.T) {
+	deps := newDeleteTestDeps(t)
+	ctx := context.Background()
+	sessionID, agentID := ulid.Make().String(), ulid.Make().String()
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	cutoff := time.Now().UTC().Add(-time.Hour)
+
+	if _, err := deps.sessions.Create(ctx, deps.shardURL, mongodb.Session{ID: sessionID, Status: "active"}); err != nil {
+		t.Fatalf("sessions.Create: %v", err)
+	}
+	backdateSession(t, deps, sessionID, old)
+	if _, err := deps.agents.Create(ctx, deps.shardURL, mongodb.Agent{ID: agentID, SessionID: sessionID, Name: "a", Status: "connected"}); err != nil {
+		t.Fatalf("agents.Create: %v", err)
+	}
+	backdateAgent(t, deps, agentID, old)
+
+	if _, err := deps.svc.DeleteSessionsOlderThan(ctx, deps.shardURL, cutoff); err != nil {
+		t.Fatalf("DeleteSessionsOlderThan: %v", err)
+	}
+	if _, found, err := deps.sessions.Get(ctx, deps.shardURL, sessionID); err != nil {
+		t.Fatalf("Get: %v", err)
+	} else if !found {
+		t.Error("a session with a connected agent must survive")
+	}
+}
+
+func TestDeleteSessionsOlderThan_SkipsSessionWithRecentAgentActivity(t *testing.T) {
+	deps := newDeleteTestDeps(t)
+	ctx := context.Background()
+	sessionID, agentID := ulid.Make().String(), ulid.Make().String()
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	cutoff := time.Now().UTC().Add(-time.Hour)
+
+	if _, err := deps.sessions.Create(ctx, deps.shardURL, mongodb.Session{ID: sessionID, Status: "active"}); err != nil {
+		t.Fatalf("sessions.Create: %v", err)
+	}
+	backdateSession(t, deps, sessionID, old)
+	// Agent created "now" (via Create's own timestamping) - i.e. active
+	// after cutoff, even though the session document itself looks old.
+	if _, err := deps.agents.Create(ctx, deps.shardURL, mongodb.Agent{ID: agentID, SessionID: sessionID, Name: "a", Status: "disconnected"}); err != nil {
+		t.Fatalf("agents.Create: %v", err)
+	}
+
+	if _, err := deps.svc.DeleteSessionsOlderThan(ctx, deps.shardURL, cutoff); err != nil {
+		t.Fatalf("DeleteSessionsOlderThan: %v", err)
+	}
+	if _, found, err := deps.sessions.Get(ctx, deps.shardURL, sessionID); err != nil {
+		t.Fatalf("Get: %v", err)
+	} else if !found {
+		t.Error("a session with a recently-active agent must survive - this is what proves the per-agent check is load-bearing, not just the session document's own (stale-by-design) updated_at")
+	}
+}
+
+func TestDeleteSessionsOlderThan_HandlesASessionWithNoAgentsAtAll(t *testing.T) {
+	deps := newDeleteTestDeps(t)
+	ctx := context.Background()
+	sessionID := ulid.Make().String()
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	cutoff := time.Now().UTC().Add(-time.Hour)
+
+	if _, err := deps.sessions.Create(ctx, deps.shardURL, mongodb.Session{ID: sessionID, Status: "active"}); err != nil {
+		t.Fatalf("sessions.Create: %v", err)
+	}
+	backdateSession(t, deps, sessionID, old)
+
+	rep, err := deps.svc.DeleteSessionsOlderThan(ctx, deps.shardURL, cutoff)
+	if err != nil {
+		t.Fatalf("DeleteSessionsOlderThan: %v", err)
+	}
+	if rep.Sessions < 1 {
+		t.Fatalf("an ancient, agent-less session should be deleted by age alone, got %+v", rep)
+	}
+	if _, found, err := deps.sessions.Get(ctx, deps.shardURL, sessionID); err != nil {
+		t.Fatalf("Get: %v", err)
+	} else if found {
+		t.Error("session should be gone")
 	}
 }

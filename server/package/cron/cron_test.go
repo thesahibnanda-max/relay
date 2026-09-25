@@ -32,6 +32,10 @@ func (f *fakeMongoPool) Database(mongoURL string) (*mongo.Database, error) {
 
 func (f *fakeMongoPool) Close(ctx context.Context) error { return nil }
 
+func (f *fakeMongoPool) WithTransaction(ctx context.Context, mongoURL string, fn func(sessCtx context.Context) error) error {
+	return errors.New("cron: WithTransaction is not used by this package")
+}
+
 func (f *fakeMongoPool) Ping(ctx context.Context) error {
 	f.mu.Lock()
 	f.pingCalls++
