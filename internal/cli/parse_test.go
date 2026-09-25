@@ -276,10 +276,13 @@ func TestMessagingCommands(t *testing.T) {
 			t.Errorf("%v should be rejected", bad)
 		}
 	}
-	for in, want := range map[string]time.Duration{"90m": 90 * time.Minute, "12h": 12 * time.Hour, "30d": 720 * time.Hour, "2w": 336 * time.Hour} {
+	for in, want := range map[string]time.Duration{"90s": 90 * time.Second, "90m": 90 * time.Minute, "12h": 12 * time.Hour, "30d": 720 * time.Hour, "2w": 336 * time.Hour} {
 		if got, err := ParseAge(in); err != nil || got != want {
 			t.Errorf("ParseAge(%q) = %v %v", in, got, err)
 		}
+	}
+	if p, err := parse("gc", "--older-than=1s"); err != nil || p.OlderThan != time.Second {
+		t.Fatalf("gc --older-than=1s should be accepted: %+v %v", p, err)
 	}
 }
 

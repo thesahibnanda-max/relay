@@ -587,20 +587,20 @@ func parseHook(args []string) (Parsed, error) {
 	return p, nil
 }
 
-// ParseAge reads "90m", "12h", "30d" or "2w".
+// ParseAge reads "90s", "90m", "12h", "30d" or "2w".
 func ParseAge(v string) (time.Duration, error) {
 	v = strings.TrimSpace(strings.ToLower(v))
 	if v == "" {
 		return 0, fmt.Errorf("empty duration")
 	}
-	unit := map[byte]time.Duration{'m': time.Minute, 'h': time.Hour, 'd': 24 * time.Hour, 'w': 7 * 24 * time.Hour}
+	unit := map[byte]time.Duration{'s': time.Second, 'm': time.Minute, 'h': time.Hour, 'd': 24 * time.Hour, 'w': 7 * 24 * time.Hour}
 	mult, ok := unit[v[len(v)-1]]
 	if !ok {
-		return 0, fmt.Errorf("%q: use a number with m, h, d or w (e.g. 30d)", v)
+		return 0, fmt.Errorf("%q: use a number with s, m, h, d or w (e.g. 30d)", v)
 	}
 	n, err := strconv.Atoi(v[:len(v)-1])
 	if err != nil || n <= 0 {
-		return 0, fmt.Errorf("%q: use a positive number with m, h, d or w (e.g. 30d)", v)
+		return 0, fmt.Errorf("%q: use a positive number with s, m, h, d or w (e.g. 30d)", v)
 	}
 	return time.Duration(n) * mult, nil
 }

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,6 +84,20 @@ func (s *Store) Close() error {
 	return e2
 }
 
+// migrationVersion returns a migration's version number from its filename's
+// own zero-padded numeric prefix (e.g. "001_init.sql" -> 1), rather than its
+// position in the file list. This matters because a migration's version, once
+// ever recorded in a real database's PRAGMA user_version, is retired forever -
+// see SchemaVersion's comment and 006_drop_legacy_mesh_tables.sql for why
+// versions 3-5 can never be reused by a positionally-numbered new migration.
+func migrationVersion(name string) (int, error) {
+	prefix, _, ok := strings.Cut(name, "_")
+	if !ok {
+		return 0, fmt.Errorf("migration filename %q has no _ separator", name)
+	}
+	return strconv.Atoi(prefix)
+}
+
 func (s *Store) migrate() error {
 	var cur int
 	if err := s.w.QueryRow(`PRAGMA user_version`).Scan(&cur); err != nil {
@@ -96,9 +111,12 @@ func (s *Store) migrate() error {
 	for _, e := range entries {
 		names = append(names, e.Name())
 	}
-	sort.Strings(names)
-	for i, name := range names {
-		version := i + 1
+	sort.Strings(names) // zero-padded numeric prefixes sort in execution order
+	for _, name := range names {
+		version, err := migrationVersion(name)
+		if err != nil {
+			return err
+		}
 		if version <= cur {
 			continue
 		}
@@ -663,10 +681,21 @@ func QuickCheck(path string) (string, error) {
 	return res, nil
 }
 
-// SchemaVersion is the number of migrations this build knows about.
+// SchemaVersion is the highest migration version this build knows about -
+// each migration's own filename prefix, not the count of migration files:
+// this project once had a "mesh" feature (migrations 003-005) that was fully
+// reverted, and those version numbers are permanently retired (any real
+// database that ran them recorded that in its own PRAGMA user_version, which
+// migrate() never reuses) - see 006_drop_legacy_mesh_tables.sql.
 func SchemaVersion() int {
 	entries, _ := migrationsFS.ReadDir("migrations")
-	return len(entries)
+	max := 0
+	for _, e := range entries {
+		if v, err := migrationVersion(e.Name()); err == nil && v > max {
+			max = v
+		}
+	}
+	return max
 }
 
 // StoredSchemaVersion reads the version recorded in an existing database.
