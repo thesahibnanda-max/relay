@@ -5,6 +5,9 @@ package cli
 import (
 	"os"
 	"os/exec"
+	"syscall"
+
+	"github.com/thesahibnanda-max/relay/internal/agent"
 )
 
 // supported is whether relay can run agents on this platform.
@@ -18,7 +21,16 @@ const supported = true
 // prints and reports as an error): a running/finished child, however it
 // exited, always calls os.Exit here instead of returning to the caller.
 func execReplace(bin string, argv, env []string) error {
-	cmd := exec.Command(bin, argv[1:]...)
+	var cmd *exec.Cmd
+	if agent.IsBatchFile(bin) {
+		// bin is a .cmd/.bat shim: see agent.WrapForCmdExe for why a plain
+		// argv (correct for a real .exe) is not safe here.
+		cmdExe, cmdLine := agent.WrapForCmdExe(bin, argv[1:])
+		cmd = exec.Command(cmdExe)
+		cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: cmdLine}
+	} else {
+		cmd = exec.Command(bin, argv[1:]...)
+	}
 	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	if err := cmd.Run(); err != nil {
