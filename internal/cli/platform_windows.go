@@ -22,14 +22,19 @@ const supported = true
 // exited, always calls os.Exit here instead of returning to the caller.
 func execReplace(bin string, argv, env []string) error {
 	var cmd *exec.Cmd
-	if agent.IsBatchFile(bin) {
-		// bin is a .cmd/.bat shim: see agent.WrapForCmdExe for why a plain
-		// argv (correct for a real .exe) is not safe here.
-		cmdExe, cmdLine := agent.WrapForCmdExe(bin, argv[1:])
-		cmd = exec.Command(cmdExe)
-		cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: cmdLine}
-	} else {
+	switch {
+	case !agent.IsBatchFile(bin):
 		cmd = exec.Command(bin, argv[1:]...)
+	default:
+		// bin is a .cmd/.bat shim: see agent.ParseNpmCmdShim's doc comment
+		// for why a plain argv (correct for a real .exe) is not safe here.
+		if nodeExe, script, ok := agent.ParseNpmCmdShim(bin); ok {
+			cmd = exec.Command(nodeExe, append([]string{script}, argv[1:]...)...)
+		} else {
+			cmdExe, cmdLine := agent.WrapForCmdExe(bin, argv[1:])
+			cmd = exec.Command(cmdExe)
+			cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: cmdLine}
+		}
 	}
 	cmd.Env = env
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
