@@ -18,6 +18,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/thesahibnanda-max/relay/internal/adaptor"
 	"github.com/thesahibnanda-max/relay/internal/ctl"
 	"github.com/thesahibnanda-max/relay/internal/daemon"
 	"github.com/thesahibnanda-max/relay/internal/doctor"
@@ -359,7 +360,11 @@ func runGC(p Parsed, out, errw io.Writer) int {
 		for _, d := range removed {
 			fmt.Fprintln(out, "removed", d)
 		}
-		if len(removed) == 0 && p.OlderThan == 0 && !p.Compress {
+		removedAgy, _ := adaptor.AgySweepStale(paths)
+		for _, name := range removedAgy {
+			fmt.Fprintln(out, "removed stale agy MCP server", name)
+		}
+		if len(removed) == 0 && len(removedAgy) == 0 && p.OlderThan == 0 && !p.Compress {
 			fmt.Fprintln(out, "Nothing to clean up.")
 		}
 	}

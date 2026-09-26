@@ -167,6 +167,43 @@ func TestFootprintScanFindsRelayRegistrations(t *testing.T) {
 	}
 }
 
+func TestFootprintScanFindsStaleAgyRegistration(t *testing.T) {
+	env, home := testEnv(t)
+	geminiConfig := filepath.Join(home, ".gemini", "config")
+	os.MkdirAll(geminiConfig, 0o755)
+	os.WriteFile(filepath.Join(geminiConfig, "mcp_config.json"), []byte(`{"mcpServers":{}}`), 0o644)
+	if c := find(Run(env), "zero footprint"); c.Status != OK {
+		t.Fatalf("an empty agy config must not be flagged: %+v", c)
+	}
+	os.WriteFile(filepath.Join(geminiConfig, "mcp_config.json"),
+		[]byte(`{"mcpServers":{"relay-01M2XRVN1PVQZQC09VYHGYKKMQ":{"command":"/opt/relay/relay","args":["mcp","--dir","/x"],"disabled":false}}}`), 0o644)
+	c := find(Run(env), "zero footprint")
+	if c.Status != Warn || !strings.Contains(c.Detail, "relay-01M2XRVN1PVQZQC09VYHGYKKMQ") {
+		t.Fatalf("a stale agy MCP server entry must be flagged: %+v", c)
+	}
+	if !strings.Contains(c.Fix, "relay gc") {
+		t.Fatalf("the fix must point at relay gc, which can remove it directly: %+v", c)
+	}
+}
+
+func TestFootprintScanNeverFlagsAnotherAdaptorsBareRelayEntryAsAgyStale(t *testing.T) {
+	env, home := testEnv(t)
+	geminiConfig := filepath.Join(home, ".gemini", "config")
+	os.MkdirAll(geminiConfig, 0o755)
+	// The bare "relay" name belongs to Claude/Codex/Copilot's own per-launch,
+	// ephemeral config style, never agy's - if it ever showed up inside agy's
+	// own config (e.g. a user's own unrelated server named "relay"), it must
+	// still be flagged (something is registered), but not with the
+	// agy-specific "relay gc can remove this" fix, since relay's own gc sweep
+	// only ever touches "relay-<id>"-prefixed entries.
+	os.WriteFile(filepath.Join(geminiConfig, "mcp_config.json"),
+		[]byte(`{"mcpServers":{"relay":{"command":"/usr/bin/something-unrelated","args":[],"disabled":false}}}`), 0o644)
+	c := find(Run(env), "zero footprint")
+	if c.Status != Warn || strings.Contains(c.Fix, "relay gc") {
+		t.Fatalf("%+v", c)
+	}
+}
+
 func TestFootprintScanCoversCopilotHooksGlob(t *testing.T) {
 	env, home := testEnv(t)
 	os.MkdirAll(filepath.Join(home, ".copilot", "hooks"), 0o755)

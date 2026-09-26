@@ -284,11 +284,20 @@ func checkFootprint(env Env) []Check {
 	if copilotHome == "" {
 		copilotHome = filepath.Join(env.Home, ".copilot")
 	}
+	// Not confirmed to be honored by the real agy binary itself (unlike
+	// CODEX_HOME/COPILOT_HOME, which the real Codex/Copilot binaries do
+	// honor) - checked anyway, on the same "cheap and harmless if wrong"
+	// basis as every other entry here, and to match this package's own tests.
+	geminiHome := env.Getenv("GEMINI_HOME")
+	if geminiHome == "" {
+		geminiHome = filepath.Join(env.Home, ".gemini")
+	}
 	files := []string{
 		filepath.Join(claudeHome, "settings.json"), filepath.Join(claudeHome, "settings.local.json"),
 		filepath.Join(claudeHome, "CLAUDE.md"), filepath.Join(env.Home, ".claude.json"),
 		filepath.Join(codexHome, "config.toml"), filepath.Join(codexHome, "AGENTS.md"),
 		filepath.Join(copilotHome, "mcp-config.json"), filepath.Join(copilotHome, "config.json"), filepath.Join(copilotHome, "settings.json"),
+		filepath.Join(geminiHome, "config", "mcp_config.json"),
 		filepath.Join(env.Cwd, ".mcp.json"), filepath.Join(env.Cwd, ".claude", "settings.json"), filepath.Join(env.Cwd, ".claude", "settings.local.json"),
 		filepath.Join(env.Cwd, "CLAUDE.md"), filepath.Join(env.Cwd, "AGENTS.md"), filepath.Join(env.Cwd, ".codex", "config.toml"),
 	}
@@ -298,6 +307,7 @@ func checkFootprint(env Env) []Check {
 		files = append(files, matches...)
 	}
 	var found []string
+	staleAgy := false
 	scanned := 0
 	for _, f := range files {
 		data, err := os.ReadFile(f)
@@ -312,46 +322,67 @@ func checkFootprint(env Env) []Check {
 				break
 			}
 		}
-		if strings.HasSuffix(f, ".json") && hasRelayMCPServer(data) && !strings.Contains(strings.Join(found, ";"), f) {
-			found = append(found, fmt.Sprintf("%s registers an MCP server named \"relay\"", f))
+		if strings.HasSuffix(f, ".json") && !strings.Contains(strings.Join(found, ";"), f) {
+			if name, ok := hasRelayMCPServer(data); ok {
+				if strings.HasPrefix(name, "relay-") {
+					// agy's own naming (see the agy adaptor's EntryName): a
+					// stale one is dead but not yet swept - relay gc removes
+					// it directly, unlike every other match here.
+					staleAgy = true
+					found = append(found, fmt.Sprintf("%s registers a stale agy MCP server %q", f, name))
+				} else {
+					found = append(found, fmt.Sprintf("%s registers an MCP server named %q", f, name))
+				}
+			}
 		}
 	}
 	if len(found) > 0 {
-		return []Check{{Name: "zero footprint", Status: Warn, Detail: strings.Join(found, "; "),
-			Fix: "Relay never writes these files; remove the entry (it may have been added by hand or by another tool) so plain claude/codex behave as before"}}
+		fix := "Relay never writes these files; remove the entry (it may have been added by hand or by another tool) so plain claude/codex behave as before"
+		if staleAgy {
+			fix = "run `relay gc` to remove the stale agy MCP server(s); " + fix
+		}
+		return []Check{{Name: "zero footprint", Status: Warn, Detail: strings.Join(found, "; "), Fix: fix}}
 	}
 	return []Check{{Name: "zero footprint", Status: OK, Detail: fmt.Sprintf("no Relay registrations in the %d tool config/project files checked", scanned)}}
 }
 
 // hasRelayMCPServer reports whether a JSON document has an mcpServers table
-// with an entry called "relay" at any depth (~/.claude.json keeps them per project).
-func hasRelayMCPServer(data []byte) bool {
+// with an entry relay itself would have registered, at any depth
+// (~/.claude.json keeps them per project): either the bare name "relay"
+// (Claude/Codex/Copilot's one, per-launch, ephemeral entry) or a
+// "relay-<id>"-prefixed name (agy's own naming - see the agy adaptor's
+// EntryName - needed because agy's config is one file shared by every
+// concurrently launched agy agent, so a fixed name would collide). Returns
+// the matched name so the caller can tell the two cases apart.
+func hasRelayMCPServer(data []byte) (name string, found bool) {
 	var v any
 	if json.Unmarshal(data, &v) != nil {
-		return false
+		return "", false
 	}
-	var walk func(any) bool
-	walk = func(n any) bool {
+	var walk func(any) (string, bool)
+	walk = func(n any) (string, bool) {
 		switch x := n.(type) {
 		case map[string]any:
 			if m, ok := x["mcpServers"].(map[string]any); ok {
-				if _, has := m["relay"]; has {
-					return true
+				for k := range m {
+					if k == "relay" || strings.HasPrefix(k, "relay-") {
+						return k, true
+					}
 				}
 			}
 			for _, c := range x {
-				if walk(c) {
-					return true
+				if name, ok := walk(c); ok {
+					return name, true
 				}
 			}
 		case []any:
 			for _, c := range x {
-				if walk(c) {
-					return true
+				if name, ok := walk(c); ok {
+					return name, true
 				}
 			}
 		}
-		return false
+		return "", false
 	}
 	return walk(v)
 }
