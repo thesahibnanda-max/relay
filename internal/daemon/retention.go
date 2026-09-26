@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -29,24 +30,34 @@ func compressFile(path string) (saved int64, err error) {
 	if err != nil {
 		return 0, err
 	}
-	defer in.Close()
 	st, err := in.Stat()
 	if err != nil {
+		in.Close()
 		return 0, err
 	}
 	tmp := path + ".zst.tmp"
 	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
+		in.Close()
 		return 0, err
 	}
 	enc, err := zstd.NewWriter(out)
 	if err != nil {
+		in.Close()
 		out.Close()
 		os.Remove(tmp)
 		return 0, err
 	}
 	_, err = io.Copy(enc, in)
 	if cerr := enc.Close(); err == nil {
+		err = cerr
+	}
+	// Close in (our own read handle on path) before path is removed below:
+	// on Windows, unlike Unix, a file cannot be removed while this same
+	// process still holds it open - confirmed live, this is the real,
+	// deterministic cause of a remove failure here, not the handle-release
+	// latency renameRetrying/removeRetrying exist for.
+	if cerr := in.Close(); err == nil {
 		err = cerr
 	}
 	if cerr := out.Close(); err == nil {
@@ -57,14 +68,59 @@ func compressFile(path string) (saved int64, err error) {
 		return 0, err
 	}
 	zst, _ := os.Stat(tmp)
-	if err := os.Rename(tmp, path+".zst"); err != nil {
+	if err := renameRetrying(tmp, path+".zst"); err != nil {
 		os.Remove(tmp)
 		return 0, err
 	}
-	if err := os.Remove(path); err != nil {
+	if err := removeRetrying(path); err != nil {
 		return 0, err
 	}
 	return st.Size() - zst.Size(), nil
+}
+
+// renameRetrying and removeRetrying exist for Windows: closing a file there
+// (unlike Unix) does not release the OS-level handle instantly - confirmed
+// live, a segment this same process had open a moment ago (in/out above, or
+// the writer that produced it) can briefly report "in use" to a rename or
+// remove attempted right after Close returns. This is a short, bounded
+// platform characteristic, not a real conflict, so a brief retry is the
+// correct fix rather than treating it as a hard error - on every other
+// platform the first attempt always succeeds and these are a no-op.
+// retryBudget is generous: besides a closed handle taking a moment to fully
+// release, a freshly-written file on Windows can also be briefly opened by
+// the OS itself (Windows Defender / the search indexer commonly scan a new
+// file within about a second of creation) - both are real, external, bounded
+// delays to tolerate, not something relay's own code can prevent.
+const retryBudget = 30
+
+func renameRetrying(oldpath, newpath string) (err error) {
+	for i := 0; i < retryBudget; i++ {
+		if err = os.Rename(oldpath, newpath); err == nil || i == retryBudget-1 || runtime.GOOS != "windows" {
+			return err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return err
+}
+
+func removeRetrying(path string) (err error) {
+	for i := 0; i < retryBudget; i++ {
+		if err = os.Remove(path); err == nil || i == retryBudget-1 || runtime.GOOS != "windows" {
+			return err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return err
+}
+
+func removeAllRetrying(path string) (err error) {
+	for i := 0; i < retryBudget; i++ {
+		if err = os.RemoveAll(path); err == nil || i == retryBudget-1 || runtime.GOOS != "windows" {
+			return err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return err
 }
 
 // bgCompress compresses a just-closed segment without delaying the ack path.
@@ -120,7 +176,7 @@ func (s *Server) GC(ctx context.Context, req proto.GCRequest) (proto.GCReport, e
 				return rep, err
 			}
 			if ids.Valid(sess.ID) { // never build a path from anything but a ULID
-				_ = os.RemoveAll(rawDir)
+				_ = removeAllRetrying(rawDir)
 			}
 		}
 		// The agent-side local logs (sessions/*.jsonl) are per process, not per session: go by age.

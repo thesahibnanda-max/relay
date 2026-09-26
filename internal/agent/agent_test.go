@@ -110,16 +110,25 @@ func TestSignalExitIs128Plus(t *testing.T) {
 }
 
 func TestPipedStdinWorks(t *testing.T) {
-	// Non-TTY stdin: no raw mode, EOF is turned into Ctrl+D so `cat` finishes.
+	// Non-TTY stdin: no raw mode, EOF is turned into Ctrl+D so the "cat"
+	// process finishes.
 	r, w, _ := os.Pipe()
-	out, err := os.CreateTemp(t.TempDir(), "out")
+	dir := tempDirTolerantOfSlowHandleRelease(t)
+	out, err := os.CreateTemp(dir, "out")
 	if err != nil {
 		t.Fatal(err)
 	}
-	go func() { w.WriteString("hello\n"); w.Close() }()
+	// \r\n, not a bare \n: real piped text commonly ends lines this way
+	// (especially from a Windows source), and a Windows console's canonical
+	// input mode - confirmed live - only recognizes a line as complete on \r,
+	// unlike a Unix pty which accepts a bare \n; relay forwards bytes
+	// byte-transparently rather than rewriting them, so the input itself
+	// should be realistic for whichever platform is running the test.
+	go func() { w.WriteString("hello\r\n"); w.Close() }()
 
+	bin, args := catCmd()
 	rec := &recorder{}
-	code, err := Run(Config{Tool: "test", Bin: "/bin/cat", Env: os.Environ(), Interceptor: rec, In: r, Out: out})
+	code, err := Run(Config{Tool: "test", Bin: bin, Args: args, Env: os.Environ(), Interceptor: rec, In: r, Out: out})
 	if err != nil || code != 0 {
 		t.Fatalf("code=%d err=%v", code, err)
 	}
@@ -127,6 +136,35 @@ func TestPipedStdinWorks(t *testing.T) {
 	if !strings.Contains(string(b), "hello") {
 		t.Errorf("output %q missing hello", b)
 	}
+	out.Close()
+}
+
+// tempDirTolerantOfSlowHandleRelease is t.TempDir(), except its cleanup
+// retries: closing a ConPTY's pipes on Windows (unlike a Unix pty's fds)
+// does not release the OS-level handle instantly - confirmed live, a file
+// this test's own background pty-drain goroutine was still touching a
+// moment ago can briefly report "in use" to a delete attempted right after
+// Run returns, even though everything relay owns has already been Close'd.
+// This is a bounded, real platform characteristic, not a leak (a short
+// retry always succeeds), so it belongs in test cleanup, not as an
+// artificial delay added to every real Run call.
+func tempDirTolerantOfSlowHandleRelease(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "relay-agent-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		var err error
+		for i := 0; i < 20; i++ {
+			if err = os.RemoveAll(dir); err == nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		t.Errorf("cleanup: %v", err)
+	})
+	return dir
 }
 
 func TestMissingBinaryErrors(t *testing.T) {

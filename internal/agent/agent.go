@@ -284,7 +284,7 @@ func Run(cfg Config) (int, error) {
 			}
 			if err != nil {
 				if !isTTY && errors.Is(err, io.EOF) {
-					_, _ = mux.WriteUser([]byte{0x04}) // piped stdin ended: send Ctrl+D
+					_, _ = mux.WriteUser(eofSignal()) // piped stdin ended
 				}
 				return
 			}

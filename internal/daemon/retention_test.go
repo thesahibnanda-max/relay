@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -37,8 +38,12 @@ func TestCompressRoundTripKeepsEveryByte(t *testing.T) {
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("original must be removed")
 	}
-	if st, _ := os.Stat(path + ".zst"); st.Mode().Perm() != 0o600 {
-		t.Fatalf("mode %v", st.Mode().Perm())
+	// os.Chmod cannot express owner-only on Windows (confirmed elsewhere: it
+	// only toggles the read-only attribute, always reporting back 0666).
+	if runtime.GOOS != "windows" {
+		if st, _ := os.Stat(path + ".zst"); st.Mode().Perm() != 0o600 {
+			t.Fatalf("mode %v", st.Mode().Perm())
+		}
 	}
 	f, _ := os.Open(path + ".zst")
 	defer f.Close()
@@ -99,7 +104,17 @@ func TestGCPrunesIdleSessionsOnlyAndCompresses(t *testing.T) {
 
 	live := e.newSession()
 	l := e.joinPeer(live, proto.Hello{Name: "live", Role: "dev"})
-	liveDir := writeSegments(t, e, live, l.w.Agent.ID, 3)
+	// Only one segment: a real, still-connected agent that hasn't rotated
+	// only ever has its one open segment on disk. GC's keepOpen logic
+	// protects exactly the newest (highest-numbered) segment for such an
+	// agent, on the assumption - true in real use, since rotation only ever
+	// increases segment numbers - that it's the one actually open; writing
+	// extra, out-of-band segments here would violate that assumption and
+	// have GC try to compress/remove this real, still-open file (confirmed
+	// live: on Windows, unlike Unix, that always fails - the daemon's own
+	// still-open handle blocks the delete for as long as the connection
+	// stays up, i.e. for the rest of the test).
+	liveDir := writeSegments(t, e, live, l.w.Agent.ID, 1)
 	time.Sleep(1200 * time.Millisecond)
 
 	// the session that still has a connected agent is never pruned, whatever its age
@@ -111,13 +126,13 @@ func TestGCPrunesIdleSessionsOnlyAndCompresses(t *testing.T) {
 		t.Fatal("dry run must not touch anything")
 	}
 
-	// compress: the exited agent's segments all go; the connected agent keeps its newest plain
+	// compress: the exited agent's segments all go; the connected agent's only (open) segment stays
 	rep = e.gc(proto.GCRequest{Compress: true})
-	if rep.SegmentsCompressed != 3+2 || rep.BytesSaved <= 0 {
+	if rep.SegmentsCompressed != 3 || rep.BytesSaved <= 0 {
 		t.Fatalf("compress: %+v", rep)
 	}
-	if _, err := os.Stat(filepath.Join(liveDir, "raw-0003.jsonl")); err != nil {
-		t.Fatal("the connected agent's newest segment must stay writable")
+	if _, err := os.Stat(filepath.Join(liveDir, "raw-0001.jsonl")); err != nil {
+		t.Fatal("the connected agent's open segment must stay writable")
 	}
 	if _, err := os.Stat(filepath.Join(oldDir, "raw-0003.jsonl.zst")); err != nil {
 		t.Fatal("an exited agent's segments are all compressed")

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -356,8 +357,13 @@ func TestEventsStoredAckedAndDeduplicated(t *testing.T) {
 	if len(files) != 1 {
 		t.Fatalf("segments: %v", files)
 	}
-	if st, _ := os.Stat(files[0]); st.Mode().Perm()&0o077 != 0 {
-		t.Errorf("segment mode %v", st.Mode().Perm())
+	// os.Chmod cannot express owner-only on Windows (confirmed elsewhere: it
+	// only toggles the read-only attribute, always reporting back 0666) - the
+	// real protection there is openSegment's ACL, not a POSIX mode bit.
+	if runtime.GOOS != "windows" {
+		if st, _ := os.Stat(files[0]); st.Mode().Perm()&0o077 != 0 {
+			t.Errorf("segment mode %v", st.Mode().Perm())
+		}
 	}
 	data, _ := os.ReadFile(files[0])
 	var got []rawLine

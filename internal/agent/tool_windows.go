@@ -72,6 +72,14 @@ func (w *windowsTool) ExitCode(waitErr error) int {
 	return w.cmd.ProcessState.ExitCode()
 }
 
+// eofSignal is what a foreground console process reading piped stdin sees as
+// end-of-input on Windows: unlike Unix's Ctrl+D, a Windows console's
+// canonical-mode reader recognises Ctrl+Z (0x1A) as EOF only as a complete
+// line - i.e. followed by a line ending - confirmed live: sending bare 0x04
+// (the Unix byte) into a real ConPTY-attached console reader does not signal
+// EOF at all and hangs the reader waiting for more input.
+func eofSignal() []byte { return []byte{0x1a, '\r', '\n'} }
+
 // winsize reads the size of f, the user's controlling terminal.
 func winsize(f *os.File) (int, int, bool) {
 	c, r, err := term.GetSize(int(f.Fd()))

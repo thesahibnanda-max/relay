@@ -59,6 +59,12 @@ func (u *unixTool) ExitCode(waitErr error) int {
 	return u.cmd.ProcessState.ExitCode()
 }
 
+// eofSignal is what a foreground process reading from a console/pty sees as
+// end-of-input when piped stdin runs out: on Unix the pty line discipline
+// turns byte 0x04 (Ctrl+D) at the start of a line into EOF for a cooked
+// reader.
+func eofSignal() []byte { return []byte{0x04} }
+
 // winsize reads the size of f via the same ioctl creack/pty already used
 // inline before - unchanged behavior.
 func winsize(f *os.File) (int, int, bool) {
