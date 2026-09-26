@@ -2,6 +2,14 @@ import { test, expect } from '@playwright/test';
 
 const REPO = 'https://github.com/thesahibnanda-max/relay';
 
+// The site now auto-detects the visitor's OS to pick the starting command/tab
+// (see the "OS auto-detection" describe block below). Every other test in this
+// file cares about a stable, known default, not about detection itself, so it
+// pins a macOS user agent - otherwise it would inherit whatever host platform
+// happens to be baked into the project's default device (Desktop Chrome's is
+// Windows), which is incidental to what these tests are actually checking.
+test.use({ userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36' });
+
 test('loads cleanly: no console errors, page errors or failed requests', async ({ page }) => {
   const problems: string[] = [];
   page.on('console', (m) => { if (m.type() === 'error') problems.push(`console: ${m.text()}`); });
@@ -116,6 +124,45 @@ test('the Windows tab swaps in the PowerShell command and its own upgrade/remove
   await expect(cmd).toHaveText(`curl -fsSL ${baseURL}/install.sh | bash`);
   await expect(unixCards).toBeVisible();
   await expect(windowsCards).toBeHidden();
+});
+
+test.describe('OS auto-detection', () => {
+  const cases: { name: string; userAgent: string; tab: string; cmd: (base: string) => string }[] = [
+    {
+      name: 'Windows',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+      tab: 'tab-windows',
+      cmd: (base) => `irm ${base}/install.ps1 | iex`,
+    },
+    {
+      name: 'macOS',
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+      tab: 'tab-mac',
+      cmd: (base) => `curl -fsSL ${base}/install.sh | bash`,
+    },
+    {
+      name: 'Linux',
+      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+      tab: 'tab-linux',
+      cmd: (base) => `curl -fsSL ${base}/install.sh | bash`,
+    },
+  ];
+  for (const c of cases) {
+    test(`${c.name} visitors see the ${c.name} tab and command by default`, async ({ browser, baseURL }) => {
+      const page = await (await browser.newContext({ userAgent: c.userAgent })).newPage();
+      await page.goto('/');
+      await expect(page.locator(`#${c.tab}`)).toHaveAttribute('aria-selected', 'true');
+      await expect(page.locator('#install-cmd')).toHaveText(c.cmd(baseURL!));
+      await expect(page.locator('#install-cmd-2')).toHaveText(c.cmd(baseURL!));
+    });
+  }
+
+  test('an unrecognized user agent falls back to the macOS tab', async ({ browser, baseURL }) => {
+    const page = await (await browser.newContext({ userAgent: 'SomeOtherBrowser/1.0' })).newPage();
+    await page.goto('/');
+    await expect(page.locator('#tab-mac')).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('#install-cmd')).toHaveText(`curl -fsSL ${baseURL}/install.sh | bash`);
+  });
 });
 
 test.describe('small screens', () => {
