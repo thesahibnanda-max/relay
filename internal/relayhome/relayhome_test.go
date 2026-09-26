@@ -3,11 +3,28 @@ package relayhome
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/thesahibnanda-max/relay/internal/ids"
 )
+
+// wantPrivateDir checks the directory is owner-only via its mode bits. On
+// Windows os.Chmod (and so Go's Mode()) never reflects real access - it
+// always reads back 0777 for a normal directory regardless of its actual
+// ACL - the real protection there is hardenMode's SetPrivateACL call, whose
+// detection side is covered by doctor's own real-DACL test.
+func wantPrivateDir(t *testing.T, d string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	st, err := os.Stat(d)
+	if err != nil || !st.IsDir() || st.Mode().Perm() != 0o700 {
+		t.Errorf("%s: %v %v", d, st, err)
+	}
+}
 
 func TestResolveHonoursEnvAndEnsurePrivate(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "rh")
@@ -20,17 +37,14 @@ func TestResolveHonoursEnvAndEnsurePrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, d := range []string{p.RunDir(), p.DataDir(), p.RawDir(), p.LogDir(), p.SessionsDir(), p.IdentitiesDir()} {
-		st, err := os.Stat(d)
-		if err != nil || !st.IsDir() || st.Mode().Perm() != 0o700 {
-			t.Errorf("%s: %v %v", d, st, err)
-		}
+		wantPrivateDir(t, d)
 	}
 }
 
 func TestSocketPathFallsBackWhenTooLong(t *testing.T) {
 	short := Paths{Root: "/tmp/rh"}
-	if got := short.SocketPath(); got != "/tmp/rh/run/relayd.sock" {
-		t.Errorf("short: %s", got)
+	if want, got := filepath.Join("/tmp/rh", "run", "relayd.sock"), short.SocketPath(); got != want {
+		t.Errorf("short: %s, want %s", got, want)
 	}
 	long := Paths{Root: "/" + strings.Repeat("x", 120)}
 	s := long.SocketPath()
@@ -56,9 +70,7 @@ func TestAgentDirAndGC(t *testing.T) {
 		t.Fatal(err)
 	}
 	dd, _ := p.CreateAgentDir(dead)
-	if st, _ := os.Stat(ld); st.Mode().Perm() != 0o700 {
-		t.Fatalf("run dir mode %v", st.Mode().Perm())
-	}
+	wantPrivateDir(t, ld)
 	removed, err := p.GC(func(int) bool { return true })
 	if err != nil || len(removed) != 0 {
 		t.Fatalf("live processes keep their dirs: removed %v %v", removed, err)
@@ -109,9 +121,7 @@ func TestVerifyPrivateDirRefusesSymlinksAndTightensMode(t *testing.T) {
 	if err := VerifyPrivateDir(real); err != nil {
 		t.Fatal(err)
 	}
-	if st, _ := os.Stat(real); st.Mode().Perm() != 0o700 {
-		t.Fatalf("mode %v", st.Mode().Perm())
-	}
+	wantPrivateDir(t, real)
 	if err := VerifyPrivateDir(filepath.Join(base, "missing")); err == nil {
 		t.Fatal("missing")
 	}
@@ -128,7 +138,5 @@ func TestLongRootSocketLivesInAPrivateDir(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(filepath.Dir(sock))
-	if st, err := os.Stat(filepath.Dir(sock)); err != nil || st.Mode().Perm() != 0o700 {
-		t.Fatalf("socket dir must be private: %v %v", err, st)
-	}
+	wantPrivateDir(t, filepath.Dir(sock))
 }

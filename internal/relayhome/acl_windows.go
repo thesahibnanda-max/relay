@@ -14,6 +14,13 @@ import (
 // chmod 0600/0700: os.Chmod on Windows only toggles the read-only attribute
 // bit (confirmed empirically: it succeeds but leaves a file reading back as
 // 0666) and provides no actual access restriction at all.
+//
+// The ACE is marked to propagate to subdirectories and files (harmless, and
+// ignored, when path is itself a plain file): otherwise hardening a
+// directory does nothing for anything written inside it afterwards - a real,
+// confirmed gap that let files written under an already-hardened run
+// directory (e.g. adaptor/launch.WriteFile's mcp.json) fall back to
+// Windows' default, broader inherited ACL.
 func SetPrivateACL(path string) error {
 	sid, err := currentUserSID()
 	if err != nil {
@@ -22,6 +29,7 @@ func SetPrivateACL(path string) error {
 	ea := []windows.EXPLICIT_ACCESS{{
 		AccessPermissions: windows.GENERIC_ALL,
 		AccessMode:        windows.GRANT_ACCESS,
+		Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 		Trustee: windows.TRUSTEE{
 			TrusteeForm:  windows.TRUSTEE_IS_SID,
 			TrusteeValue: windows.TrusteeValueFromSID(sid),

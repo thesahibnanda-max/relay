@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -42,9 +43,14 @@ func TestRoundTripPermissionsAndErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer srv.Close()
-	for _, f := range []string{sockName, tokenName} {
-		if st, err := os.Stat(filepath.Join(dir, f)); err != nil || st.Mode().Perm()&0o077 != 0 {
-			t.Fatalf("%s must be private: %v %v", f, err, st)
+	// os.Chmod cannot express owner-only on Windows (confirmed elsewhere: it
+	// only toggles the read-only attribute, always reporting back 0666) - the
+	// real protection there is ctl.go's own SetPrivateACL call, not a mode bit.
+	if runtime.GOOS != "windows" {
+		for _, f := range []string{sockName, tokenName} {
+			if st, err := os.Stat(filepath.Join(dir, f)); err != nil || st.Mode().Perm()&0o077 != 0 {
+				t.Fatalf("%s must be private: %v %v", f, err, st)
+			}
 		}
 	}
 	ctx := context.Background()
