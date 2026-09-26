@@ -160,10 +160,14 @@ func Run(cfg Config) (int, error) {
 		defer func() { _ = term.Restore(int(cfg.In.Fd()), old) }()
 	}
 
-	// Start at the real size so the tool never renders at 80x24 first.
+	// Start at the real size so the tool never renders at 80x24 first. Queried
+	// on Out, not In: on Windows, GetConsoleScreenBufferInfo (what winsize uses
+	// there) requires an output/screen-buffer handle and fails on an input one
+	// (confirmed live) - In and Out are the same controlling tty on Unix, so
+	// this is a no-op there.
 	cols, rows := 80, 24
 	if isTTY {
-		if c, r, ok := winsize(cfg.In); ok {
+		if c, r, ok := winsize(cfg.Out); ok {
 			cols, rows = c, r
 		}
 	}
@@ -196,7 +200,7 @@ func Run(cfg Config) (int, error) {
 		// and written from a goroutine.
 		lastCols, lastRows := cols, rows
 		resize := func() {
-			if c, r, ok := winsize(cfg.In); ok {
+			if c, r, ok := winsize(cfg.Out); ok {
 				_ = t.Resize(c, r)
 				lastCols, lastRows = c, r
 				tracker.Resize(c, r)
@@ -226,7 +230,7 @@ func Run(cfg Config) (int, error) {
 					case <-stopPoll:
 						return
 					case <-tk.C:
-						if c, r, ok := winsize(cfg.In); ok && (c != lastCols || r != lastRows) {
+						if c, r, ok := winsize(cfg.Out); ok && (c != lastCols || r != lastRows) {
 							resize()
 						}
 					}
