@@ -10,7 +10,19 @@
     unix: 'curl -fsSL ' + unixInstallUrl + ' | bash',
     windows: 'irm ' + windowsInstallUrl + ' | iex',
   };
-  document.querySelectorAll('[data-install-cmd]').forEach(function (el) { el.textContent = installCmds.unix; });
+
+  // ---- OS detection: best-effort, only ever picks a friendlier starting
+  // point (which command/tab is shown first) - every command is always one
+  // click away regardless, so a wrong guess costs nothing.
+  var ua = navigator.userAgent || '';
+  function detectTabId() {
+    if (/Windows/.test(ua)) return 'tab-windows';
+    if (/Mac OS X|Macintosh/.test(ua)) return 'tab-mac';
+    if (/Linux/.test(ua) && !/Android/.test(ua)) return 'tab-linux';
+    return null; // unknown: keep the default (macOS)
+  }
+  var detectedKind = /Windows/.test(ua) ? 'windows' : 'unix';
+  document.querySelectorAll('[data-install-cmd]').forEach(function (el) { el.textContent = installCmds[detectedKind]; });
 
   // ---- theme toggle ----
   var themeBtn = document.getElementById('theme-btn');
@@ -110,6 +122,8 @@
         if (n !== null) { e.preventDefault(); select(n, true); }
       });
     });
-    select(0, false);
+    var detectedId = detectTabId();
+    var initial = detectedId ? tabs.findIndex(function (t) { return t.id === detectedId; }) : -1;
+    select(initial >= 0 ? initial : 0, false);
   });
 })();
