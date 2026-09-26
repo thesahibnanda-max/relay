@@ -1,0 +1,5 @@
+# Checked out with LF everywhere, regardless of the platform's core.autocrlf
+# default: gofmt requires LF, and a Windows checkout converting it to CRLF made
+# `gofmt -l` fail on windows-latest CI (confirmed live) even though the exact
+# same commit passed cleanly on ubuntu-latest and macos-latest.
+* text=auto eol=lf
