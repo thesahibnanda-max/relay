@@ -6,6 +6,7 @@ import (
 	"github.com/thesahibnanda-max/relay/internal/adaptor/launch"
 	"github.com/thesahibnanda-max/relay/internal/state"
 
+	internalagy "github.com/thesahibnanda-max/relay/internal/adaptor/internal/agy"
 	internalclaude "github.com/thesahibnanda-max/relay/internal/adaptor/internal/claude"
 	internalcodex "github.com/thesahibnanda-max/relay/internal/adaptor/internal/codex"
 	internalcopilot "github.com/thesahibnanda-max/relay/internal/adaptor/internal/copilot"
@@ -25,6 +26,13 @@ type Adaptor interface {
 	Prepare(spec launch.Spec) (launch.Plan, error)
 	// ScreenRules recognise the tool's dialogs from the screen text.
 	ScreenRules() []state.ScreenRule
+	// Cleanup reverses whatever Prepare registered for this one launch (if
+	// anything). It must always be safe to call - including when Prepare was
+	// never called, failed, or registered nothing - and must never block
+	// indefinitely or panic. It runs on every exit path except a hard kill
+	// (kill -9) of relay itself, the same reliability profile RunDir's own
+	// cleanup already has today.
+	Cleanup(spec launch.Spec) error
 }
 
 // Re-exports so callers need only this package.
@@ -63,6 +71,7 @@ func NewAdaptorFactory() AdaptorFactory { // no need of ptr here
 			&internalclaude.ClaudeAdaptor{},
 			&internalcodex.CodexAdaptor{},
 			&internalcopilot.CopilotAdaptor{},
+			&internalagy.AgyAdaptor{},
 		},
 	}
 }

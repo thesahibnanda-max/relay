@@ -9,12 +9,12 @@ import (
 
 func TestFactoryByName(t *testing.T) {
 	f := NewAdaptorFactory()
-	for _, name := range []string{"claude", "CLAUDE", "  codex ", "copilot", "COPILOT"} {
+	for _, name := range []string{"claude", "CLAUDE", "  codex ", "copilot", "COPILOT", "agy", "AGY"} {
 		if _, ok := f.ByName(name); !ok {
 			t.Errorf("ByName(%q) not found", name)
 		}
 	}
-	for _, name := range []string{"", "gemini", "relay"} {
+	for _, name := range []string{"", "gemini", "antigravity", "relay"} {
 		if _, ok := f.ByName(name); ok {
 			t.Errorf("ByName(%q) unexpectedly found", name)
 		}

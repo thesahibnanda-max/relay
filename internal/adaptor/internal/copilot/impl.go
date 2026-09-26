@@ -90,6 +90,10 @@ func (c *CopilotAdaptor) Prepare(spec launch.Spec) (launch.Plan, error) {
 // in the transcript (see transcript.CopilotParser) are the primary,
 // structured signal, since they are faster and do not depend on exact screen
 // wording surviving a CLI upgrade.
+// Cleanup is a no-op: Prepare never registers anything outside spec.RunDir,
+// which the caller already removes on exit.
+func (c *CopilotAdaptor) Cleanup(spec launch.Spec) error { return nil }
+
 func (c *CopilotAdaptor) ScreenRules() []state.ScreenRule {
 	return []state.ScreenRule{
 		{State: state.Dialog, Contains: "Do you want to run this command", Tail: 14},

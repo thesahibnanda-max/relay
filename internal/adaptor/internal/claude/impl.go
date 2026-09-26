@@ -75,6 +75,10 @@ func (c *ClaudeAdaptor) Prepare(spec launch.Spec) (launch.Plan, error) {
 	return plan, nil
 }
 
+// Cleanup is a no-op: Prepare never registers anything outside spec.RunDir,
+// which the caller already removes on exit.
+func (c *ClaudeAdaptor) Cleanup(spec launch.Spec) error { return nil }
+
 // ScreenRules recognise the dialogs in which Relay must never type.
 func (c *ClaudeAdaptor) ScreenRules() []state.ScreenRule {
 	return []state.ScreenRule{
