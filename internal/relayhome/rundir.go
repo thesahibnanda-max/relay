@@ -127,13 +127,8 @@ func VerifyPrivateDir(d string) error {
 	if !st.IsDir() {
 		return fmt.Errorf("%s is not a directory (symlink?): refusing to use it", d)
 	}
-	if !OwnedByCurrentUser(st) {
+	if !OwnedByCurrentUser(d, st) {
 		return fmt.Errorf("%s belongs to another user: refusing to use it", d)
 	}
-	if st.Mode().Perm() != 0o700 {
-		if err := os.Chmod(d, 0o700); err != nil {
-			return err
-		}
-	}
-	return nil
+	return hardenMode(d, st)
 }

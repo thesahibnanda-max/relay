@@ -1,5 +1,5 @@
 # GoReleaser configuration: `goreleaser release --clean` on a version tag.
-# Relay is a single static binary (pure-Go SQLite, no cgo) for Linux and macOS.
+# Relay is a single static binary (pure-Go SQLite, no cgo) for Linux, macOS and Windows.
 version: 2
 
 project_name: relay
@@ -15,7 +15,7 @@ builds:
     binary: relay
     env:
       - CGO_ENABLED=0
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     flags: [-trimpath]
     ldflags:
@@ -24,6 +24,9 @@ builds:
 archives:
   - id: relay
     formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     name_template: "relay_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE
@@ -49,6 +52,14 @@ release:
     ```
 
     To install exactly this version: `curl -fsSL https://relay-sahib-nanda.vercel.app/install.sh | RELAY_VERSION={{ .Tag }} bash`
+
+    **Windows: one line** (PowerShell — picks the right build, checks it, adds it to your PATH):
+
+    ```powershell
+    irm https://relay-sahib-nanda.vercel.app/install.ps1 | iex
+    ```
+
+    To install exactly this version: `$env:RELAY_VERSION="{{ .Tag }}"; irm https://relay-sahib-nanda.vercel.app/install.ps1 | iex`
 
     Then open a new terminal and run `relay doctor`.
 
@@ -91,10 +102,16 @@ release:
     On a Mac, a file downloaded in a browser may be blocked as "from an unidentified developer".
     Run `xattr -d com.apple.quarantine ~/.local/bin/relay` once to allow it (the one-line install is not affected).
 
+    **Windows, by hand:** download `relay_{{ .Version }}_windows_amd64.zip` (Intel/AMD) or
+    `relay_{{ .Version }}_windows_arm64.zip` (ARM), extract `relay.exe` into a folder of your choice, then add
+    that folder to your PATH: `[Environment]::SetEnvironmentVariable("Path", "$env:Path;C:\path\to\folder", "User")`.
+    Then open a new terminal and run `relay version`.
+
     Optional check: `sha256sum -c --ignore-missing checksums.txt` on Linux/WSL, or
     `grep relay_{{ .Version }}_darwin_arm64.tar.gz checksums.txt | shasum -a 256 -c -` on a Mac.
 
     **Remove it:** delete `~/.local/bin/relay`, and the `# added by relay installer` line from your shell startup file.
+    On Windows, delete `%LOCALAPPDATA%\relay` and remove it from your PATH.
 
 changelog:
   sort: asc

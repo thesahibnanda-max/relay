@@ -96,7 +96,14 @@ func Run(ctx context.Context, paths relayhome.Paths, version string, log *slog.L
 	}
 	defer os.Remove(paths.PidPath())
 
-	srv, err := New(Options{Paths: paths, Version: version, Log: log})
+	// runCtx additionally lets an RPC (Windows' Stop, which has no signal to
+	// send a detached process) trigger the same shutdown path a SIGTERM does
+	// here via ctx: on Unix this is a no-op wrapper around ctx, since Stop
+	// still uses SIGTERM unchanged.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	srv, err := New(Options{Paths: paths, Version: version, Log: log, OnShutdownRequested: cancel})
 	if err != nil {
 		ln.Close()
 		os.Remove(sock)
@@ -107,7 +114,7 @@ func Run(ctx context.Context, paths relayhome.Paths, version string, log *slog.L
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
 	select {
-	case <-ctx.Done():
+	case <-runCtx.Done():
 	case err = <-errc:
 		log.Error("server stopped", "err", err)
 	}

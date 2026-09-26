@@ -7,13 +7,11 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/exec"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/creack/pty"
 	"golang.org/x/term"
 
 	"github.com/thesahibnanda-max/relay/internal/eventlog"
@@ -21,6 +19,28 @@ import (
 	"github.com/thesahibnanda-max/relay/internal/state"
 	relayterm "github.com/thesahibnanda-max/relay/internal/term"
 )
+
+// tool is the platform pty/process backend Run drives: creack/pty wrapping an
+// *exec.Cmd on Unix (tool_unix.go, behavior-preserving extraction of what
+// used to be inline here), a real ConPTY via aymanbagabas/go-pty on Windows
+// (tool_windows.go). Everything else in this file is common: only startTool,
+// winsize and the tool interface itself are platform-specific.
+type tool interface {
+	io.Reader
+	io.Writer
+	io.Closer
+	// Resize tells the pty (and so the wrapped process) its terminal is now cols x rows.
+	Resize(cols, rows int) error
+	// Wait blocks until the process exits.
+	Wait() error
+	// Signal forwards a signal aimed at Relay itself to the wrapped process.
+	// Never called for user-typed Ctrl+C: the pty/ConPTY line discipline
+	// already turns that into the child's own SIGINT/CTRL+C by construction.
+	Signal(os.Signal) error
+	// ExitCode reports the process's exit status once Wait has returned;
+	// waitErr is Wait's own return value, for the "never started" case.
+	ExitCode(waitErr error) int
+}
 
 // drainTimeout bounds how long we wait for trailing output after the child
 // exits; a lingering grandchild holding the PTY open would otherwise hang us.
@@ -127,9 +147,6 @@ func Run(cfg Config) (int, error) {
 		cfg.Interceptor = intercept.Chain(nil)
 	}
 
-	cmd := exec.Command(cfg.Bin, cfg.Args...)
-	cmd.Env = cfg.Env
-
 	isTTY := term.IsTerminal(int(cfg.In.Fd()))
 
 	// Raw mode BEFORE the tool starts: otherwise keys typed during startup are
@@ -143,31 +160,24 @@ func Run(cfg Config) (int, error) {
 		defer func() { _ = term.Restore(int(cfg.In.Fd()), old) }()
 	}
 
-	var ptmx *os.File
-	var err error
+	// Start at the real size so the tool never renders at 80x24 first.
+	cols, rows := 80, 24
 	if isTTY {
-		// Start at the real size so the tool never renders at 80x24 first.
-		ws, _ := pty.GetsizeFull(cfg.In)
-		ptmx, err = pty.StartWithSize(cmd, ws)
-	} else {
-		ptmx, err = pty.Start(cmd)
+		if c, r, ok := winsize(cfg.In); ok {
+			cols, rows = c, r
+		}
 	}
+	t, err := startTool(cfg.Bin, cfg.Args, cfg.Env, isTTY, cols, rows)
 	if err != nil {
 		return 1, err
 	}
-	defer ptmx.Close()
+	defer t.Close()
 
-	cols, rows := 80, 24
-	if isTTY {
-		if ws, err := pty.GetsizeFull(cfg.In); err == nil {
-			cols, rows = int(ws.Cols), int(ws.Rows)
-		}
-	}
 	var outMu sync.Mutex
 	tracker := relayterm.New(cols, rows)
 	defer tracker.Close()
 	machine := state.NewMachine()
-	mux := NewInputMux(ptmx)
+	mux := NewInputMux(t)
 	if cfg.RecordInject {
 		mux.OnInject = func(p []byte) { cfg.Log.Data("inject", p) }
 	}
@@ -179,11 +189,18 @@ func Run(cfg Config) (int, error) {
 	cfg.Log.Log(eventlog.Event{Type: "start", Tool: cfg.Tool, Bin: cfg.Bin, Args: cfg.Args, Cwd: cwd})
 
 	if isTTY {
+		// lastCols/lastRows are only ever touched by whichever ONE of the two
+		// goroutines below is actually active on this platform (resizeSignals
+		// and pollInterval are complementary: exactly one is non-empty/nonzero
+		// per platform), so this is safe without a mutex despite being read
+		// and written from a goroutine.
+		lastCols, lastRows := cols, rows
 		resize := func() {
-			if ws, err := pty.GetsizeFull(cfg.In); err == nil {
-				_ = pty.Setsize(ptmx, ws)
-				tracker.Resize(int(ws.Cols), int(ws.Rows))
-				cfg.Log.Log(eventlog.Event{Type: "resize", Rows: ws.Rows, Cols: ws.Cols})
+			if c, r, ok := winsize(cfg.In); ok {
+				_ = t.Resize(c, r)
+				lastCols, lastRows = c, r
+				tracker.Resize(c, r)
+				cfg.Log.Log(eventlog.Event{Type: "resize", Rows: uint16(r), Cols: uint16(c)})
 			}
 		}
 		winch := make(chan os.Signal, 1)
@@ -196,6 +213,26 @@ func Run(cfg Config) (int, error) {
 				resize()
 			}
 		}()
+		// Windows has no resize signal at all: poll instead. pollInterval is 0
+		// on every platform that does have one, so this loop never starts there.
+		if iv := pollInterval(); iv > 0 {
+			stopPoll := make(chan struct{})
+			defer close(stopPoll)
+			go func() {
+				tk := time.NewTicker(iv)
+				defer tk.Stop()
+				for {
+					select {
+					case <-stopPoll:
+						return
+					case <-tk.C:
+						if c, r, ok := winsize(cfg.In); ok && (c != lastCols || r != lastRows) {
+							resize()
+						}
+					}
+				}
+			}()
+		}
 	}
 
 	// Signals aimed at Relay itself (kill, terminal hangup) go to the tool.
@@ -206,7 +243,7 @@ func Run(cfg Config) (int, error) {
 	defer signal.Stop(sigs)
 	go func() {
 		for s := range sigs {
-			_ = cmd.Process.Signal(s)
+			_ = t.Signal(s)
 		}
 	}()
 
@@ -216,7 +253,7 @@ func Run(cfg Config) (int, error) {
 		defer close(outDone)
 		buf := make([]byte, 32*1024)
 		for {
-			n, err := ptmx.Read(buf)
+			n, err := t.Read(buf)
 			if n > 0 {
 				if p := cfg.Interceptor.Output(buf[:n]); len(p) > 0 {
 					if _, werr := cfg.Out.Write(p); werr != nil {
@@ -247,32 +284,19 @@ func Run(cfg Config) (int, error) {
 			}
 			if err != nil {
 				if !isTTY && errors.Is(err, io.EOF) {
-					_, _ = mux.WriteUser([]byte{0x04}) // piped stdin ended: send Ctrl+D
+					_, _ = mux.WriteUser(eofSignal()) // piped stdin ended
 				}
 				return
 			}
 		}
 	}()
 
-	waitErr := cmd.Wait()
+	waitErr := t.Wait()
 
 	select {
 	case <-outDone:
 	case <-time.After(drainTimeout):
 	}
 
-	return exitCode(cmd, waitErr), nil
-}
-
-func exitCode(cmd *exec.Cmd, waitErr error) int {
-	if cmd.ProcessState == nil {
-		if waitErr != nil {
-			return 1
-		}
-		return 0
-	}
-	if ws, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
-		return 128 + int(ws.Signal())
-	}
-	return cmd.ProcessState.ExitCode()
+	return t.ExitCode(waitErr), nil
 }

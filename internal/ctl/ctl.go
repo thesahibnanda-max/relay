@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/thesahibnanda-max/relay/internal/ids"
 	"github.com/thesahibnanda-max/relay/internal/peercred"
 	"github.com/thesahibnanda-max/relay/internal/proto"
+	"github.com/thesahibnanda-max/relay/internal/relayhome"
 )
 
 const (
@@ -60,7 +62,8 @@ type Server struct {
 // Serve listens on dir/ctl.sock and writes dir/ctl.token. Stop it with Close.
 func Serve(dir string, h Handler) (*Server, error) {
 	token := ids.Token()
-	if err := os.WriteFile(filepath.Join(dir, tokenName), []byte(token), 0o600); err != nil {
+	tokenPath := filepath.Join(dir, tokenName)
+	if err := os.WriteFile(tokenPath, []byte(token), 0o600); err != nil {
 		return nil, err
 	}
 	sock := filepath.Join(dir, sockName)
@@ -70,6 +73,14 @@ func Serve(dir string, h Handler) (*Server, error) {
 		return nil, err
 	}
 	_ = os.Chmod(sock, 0o600)
+	// os.Chmod cannot express owner-only on Windows (it only toggles the
+	// read-only attribute); the containing run directory is already hardened
+	// with a real ACL by CreateAgentDir, but harden these two files
+	// individually too, for the same defense-in-depth every 0600 file gets.
+	if runtime.GOOS == "windows" {
+		_ = relayhome.SetPrivateACL(tokenPath)
+		_ = relayhome.SetPrivateACL(sock)
+	}
 	s := &Server{ln: ln, token: token, h: h, quit: make(chan struct{}), slots: make(chan struct{}, maxConns)}
 	s.wg.Add(1)
 	go s.accept()

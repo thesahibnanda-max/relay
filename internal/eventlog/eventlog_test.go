@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -59,9 +60,16 @@ func TestWritesValidJSONLWithPrivateMode(t *testing.T) {
 		t.Errorf("exit: %+v", evs[2])
 	}
 
-	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("mode = %v, want 0600", info.Mode().Perm())
+	// os.Chmod cannot express owner-only on Windows (confirmed elsewhere: it
+	// only toggles the read-only attribute, always reporting back 0666). The
+	// real protection there comes from the session directory's own ACL,
+	// hardened by relayhome.Paths.Ensure before a real caller ever opens a
+	// log here - this test's bare t.TempDir() deliberately has none.
+	if runtime.GOOS != "windows" {
+		info, _ := os.Stat(path)
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("mode = %v, want 0600", info.Mode().Perm())
+		}
 	}
 }
 

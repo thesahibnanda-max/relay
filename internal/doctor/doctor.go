@@ -119,10 +119,10 @@ func Render(w io.Writer, cs []Check) {
 func checkPlatform(env Env) []Check {
 	var out []Check
 	switch env.GOOS {
-	case "linux", "darwin":
+	case "linux", "darwin", "windows":
 		out = append(out, Check{Name: "platform", Status: OK, Detail: env.GOOS})
 	default:
-		out = append(out, Check{Name: "platform", Status: Fail, Detail: env.GOOS + " is not supported", Fix: "use Linux, macOS or WSL"})
+		out = append(out, Check{Name: "platform", Status: Fail, Detail: env.GOOS + " is not supported", Fix: "use Linux, macOS, Windows or WSL"})
 	}
 	if env.Getenv("RELAY_ACTIVE") != "" {
 		out = append(out, Check{Name: "nesting", Status: Info, Detail: "running inside a relay-wrapped tool (RELAY_ACTIVE is set)"})
@@ -137,41 +137,29 @@ func checkPlatform(env Env) []Check {
 
 // ---- home directory ------------------------------------------------------------
 
-func mode(path string) (fs.FileMode, error) {
-	st, err := os.Lstat(path)
-	if err != nil {
-		return 0, err
-	}
-	return st.Mode().Perm(), nil
-}
-
 func checkHome(env Env) []Check {
 	p := env.Paths
 	if _, err := os.Stat(p.Root); err != nil {
 		return []Check{{Name: "relay home", Status: Info, Detail: p.Root + " does not exist yet (created on first use)"}}
 	}
 	var bad []string
+	check := func(path string) {
+		if ok, detail := privateEnough(path); !ok {
+			bad = append(bad, detail)
+		}
+		if st, err := os.Lstat(path); err == nil && !relayhome.OwnedByCurrentUser(path, st) {
+			bad = append(bad, path+" belongs to another user")
+		}
+	}
 	for _, d := range []string{p.Root, p.RunDir(), p.DataDir(), p.RawDir(), p.LogDir(), p.SessionsDir()} {
-		if m, err := mode(d); err == nil && m&0o077 != 0 {
-			bad = append(bad, fmt.Sprintf("%s is %#o", d, m))
-		}
-		if st, err := os.Lstat(d); err == nil {
-			if !relayhome.OwnedByCurrentUser(st) {
-				bad = append(bad, d+" belongs to another user")
-			}
-		}
+		check(d)
 	}
-	for _, f := range []string{p.DBPath(), p.DaemonLog()} {
-		if m, err := mode(f); err == nil && m&0o077 != 0 {
-			bad = append(bad, fmt.Sprintf("%s is %#o", f, m))
-		}
-	}
-	if m, err := mode(p.SocketPath()); err == nil && m&0o077 != 0 {
-		bad = append(bad, fmt.Sprintf("%s is %#o", p.SocketPath(), m))
+	for _, f := range []string{p.DBPath(), p.DaemonLog(), p.SocketPath()} {
+		check(f)
 	}
 	if len(bad) > 0 {
 		return []Check{{Name: "relay home", Status: Fail, Detail: "other users could read Relay's data: " + strings.Join(bad, "; "),
-			Fix: "chmod -R go-rwx " + p.Root + "  (relay repairs directories itself on next start)"}}
+			Fix: fixHint(p.Root)}}
 	}
 	return []Check{{Name: "relay home", Status: OK, Detail: p.Root + " (private)"}}
 }
@@ -287,25 +275,26 @@ func checkTools(env Env) []Check {
 var footprintMarks = []string{"relay mcp --dir", "relay hook ", "mcp__relay", "mcp_servers.relay", "Relay session (id", "relay_send"}
 
 func checkFootprint(env Env) []Check {
-	claudeHome := env.Home + "/.claude"
+	claudeHome := filepath.Join(env.Home, ".claude")
 	codexHome := env.Getenv("CODEX_HOME")
 	if codexHome == "" {
-		codexHome = env.Home + "/.codex"
+		codexHome = filepath.Join(env.Home, ".codex")
 	}
 	copilotHome := env.Getenv("COPILOT_HOME")
 	if copilotHome == "" {
-		copilotHome = env.Home + "/.copilot"
+		copilotHome = filepath.Join(env.Home, ".copilot")
 	}
 	files := []string{
-		claudeHome + "/settings.json", claudeHome + "/settings.local.json", claudeHome + "/CLAUDE.md", env.Home + "/.claude.json",
-		codexHome + "/config.toml", codexHome + "/AGENTS.md",
-		copilotHome + "/mcp-config.json", copilotHome + "/config.json", copilotHome + "/settings.json",
-		env.Cwd + "/.mcp.json", env.Cwd + "/.claude/settings.json", env.Cwd + "/.claude/settings.local.json",
-		env.Cwd + "/CLAUDE.md", env.Cwd + "/AGENTS.md", env.Cwd + "/.codex/config.toml",
+		filepath.Join(claudeHome, "settings.json"), filepath.Join(claudeHome, "settings.local.json"),
+		filepath.Join(claudeHome, "CLAUDE.md"), filepath.Join(env.Home, ".claude.json"),
+		filepath.Join(codexHome, "config.toml"), filepath.Join(codexHome, "AGENTS.md"),
+		filepath.Join(copilotHome, "mcp-config.json"), filepath.Join(copilotHome, "config.json"), filepath.Join(copilotHome, "settings.json"),
+		filepath.Join(env.Cwd, ".mcp.json"), filepath.Join(env.Cwd, ".claude", "settings.json"), filepath.Join(env.Cwd, ".claude", "settings.local.json"),
+		filepath.Join(env.Cwd, "CLAUDE.md"), filepath.Join(env.Cwd, "AGENTS.md"), filepath.Join(env.Cwd, ".codex", "config.toml"),
 	}
 	// Copilot's hooks live one per file in a directory, not a fixed path, so
 	// they need a glob rather than a literal entry in the files list above.
-	if matches, _ := filepath.Glob(copilotHome + "/hooks/*.json"); len(matches) > 0 {
+	if matches, _ := filepath.Glob(filepath.Join(copilotHome, "hooks", "*.json")); len(matches) > 0 {
 		files = append(files, matches...)
 	}
 	var found []string

@@ -2,9 +2,11 @@ package doctor
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -60,6 +62,15 @@ func TestHealthyInstallation(t *testing.T) {
 }
 
 func TestOpenPermissionsAreAFailure(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// os.Chmod cannot loosen a directory's real access on Windows (confirmed
+		// elsewhere: it only toggles the read-only attribute) - there is no way
+		// to simulate "someone widened this by hand" here without directly
+		// manipulating the ACL, which doctor_windows.go's own true-positive
+		// path is for. checkHome's Windows logic is exercised by every other
+		// test in this file that expects it to report ok.
+		t.Skip("os.Chmod cannot create an insecure ACL to detect on Windows")
+	}
 	env, _ := testEnv(t)
 	os.Chmod(env.Paths.DataDir(), 0o755)
 	os.WriteFile(env.Paths.DaemonLog(), []byte("x"), 0o644)
@@ -120,8 +131,12 @@ func TestStaleRunDirsAreReportedNotRemoved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// make its owner "dead"
-	os.WriteFile(filepath.Join(dir, "agent.json"), []byte(`{"agent_id":"x","pid":2147483646,"root":"`+env.Paths.Root+`"}`), 0o600)
+	// make its owner "dead" - json.Marshal, not a hand-built string: env.Paths.Root
+	// contains backslashes on Windows, which broke this as raw JSON (confirmed
+	// live: it silently made the directory look ownerless-but-fresh instead of
+	// stale, so doctor correctly found nothing to warn about).
+	info, _ := json.Marshal(relayhome.RunInfo{AgentID: "x", PID: 2147483646, Root: env.Paths.Root})
+	os.WriteFile(filepath.Join(dir, "agent.json"), info, 0o600)
 	c := find(Run(env), "leftovers")
 	if c.Status != Warn || c.Fix != "relay gc" {
 		t.Fatalf("%+v", c)
@@ -180,6 +195,10 @@ func TestMissingToolsAndUnsupportedPlatform(t *testing.T) {
 		t.Fatalf("%+v", cs)
 	}
 	env.GOOS = "windows"
+	if c := find(Run(env), "platform"); c.Status != OK {
+		t.Fatalf("windows is a supported platform: %+v", c)
+	}
+	env.GOOS = "plan9"
 	if c := find(Run(env), "platform"); c.Status != Fail {
 		t.Fatalf("%+v", c)
 	}

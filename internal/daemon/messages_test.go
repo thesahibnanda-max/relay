@@ -719,6 +719,7 @@ func TestRawQuotaStopsRecordingButNotTheSession(t *testing.T) {
 	rw.Close()
 	// the quota counts what earlier runs already wrote
 	rw2, _ := openRaw(dir, "S", "A", 1000)
+	defer rw2.Close()
 	rw2.Write([]proto.Event{{Seq: 99, T: time.Now(), Type: "out", B: []byte("x")}})
 	if rw2.Dropped() != 1 {
 		t.Fatalf("a resumed agent must not get a fresh quota: %d", rw2.Dropped())

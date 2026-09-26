@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -14,6 +15,26 @@ import (
 func spec(t *testing.T, briefing string, mcp bool, user ...string) launch.Spec {
 	t.Helper()
 	return launch.Spec{AgentName: "fox", Session: "S", RunDir: t.TempDir(), RelayExe: "/opt/relay bin/relay", Briefing: briefing, WithMCP: mcp, UserArgs: user}
+}
+
+// wantPrivateFile checks the file is owner-only via its mode bits. On Windows
+// os.Chmod (and so Go's Mode()) never reflects real access - it always reads
+// back 0666 for a normal file regardless of its actual ACL - and this test's
+// RunDir is a plain t.TempDir(), never hardened via relayhome.VerifyPrivateDir
+// the way a real run directory is, so there is nothing meaningful to assert
+// here on Windows.
+func wantPrivateFile(t *testing.T, path string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", st.Mode().Perm())
+	}
 }
 
 func prepare(t *testing.T, tool string, s launch.Spec) launch.Plan {
@@ -60,9 +81,7 @@ func TestClaudeLaunchIsAdditiveAndKeepsUserArgsLast(t *testing.T) {
 	if r.Type != "stdio" || r.Command != "/opt/relay bin/relay" || !reflect.DeepEqual(r.Args, []string{"mcp", "--dir", s.RunDir}) || len(cfg.Servers) != 1 {
 		t.Fatalf("mcp config: %+v", cfg)
 	}
-	if st, _ := os.Stat(filepath.Join(s.RunDir, "mcp.json")); st.Mode().Perm() != 0o600 {
-		t.Fatalf("mode %v", st.Mode().Perm())
-	}
+	wantPrivateFile(t, filepath.Join(s.RunDir, "mcp.json"))
 }
 
 func TestClaudeSoloWithRoleOnlyAddsThePrompt(t *testing.T) {
@@ -200,9 +219,7 @@ func TestClaudeHooksArePerLaunchAndKeepUserSettings(t *testing.T) {
 	if err != nil || !strings.Contains(string(data), "/opt/relay bin/relay") || !strings.Contains(string(data), "PostToolUse") {
 		t.Fatalf("%v %s", err, data)
 	}
-	if st, _ := os.Stat(settings); st.Mode().Perm() != 0o600 {
-		t.Fatalf("mode %v", st.Mode().Perm())
-	}
+	wantPrivateFile(t, settings)
 
 	// the user's own --settings would be replaced by ours (or ours by theirs): keep theirs, drop hooks
 	s = spec(t, "BRIEF", true, "--settings", "/my/settings.json")
@@ -263,9 +280,7 @@ func TestCopilotLaunchIsAdditiveAndKeepsUserArgsLast(t *testing.T) {
 		!reflect.DeepEqual(r.Tools, []string{"*"}) || len(cfg.Servers) != 1 {
 		t.Fatalf("mcp config: %+v", cfg)
 	}
-	if st, _ := os.Stat(mcpPath); st.Mode().Perm() != 0o600 {
-		t.Fatalf("mode %v", st.Mode().Perm())
-	}
+	wantPrivateFile(t, mcpPath)
 }
 
 func TestCopilotSoloWithNoMCPAddsNothing(t *testing.T) {

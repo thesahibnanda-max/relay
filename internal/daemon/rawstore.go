@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/thesahibnanda-max/relay/internal/proto"
+	"github.com/thesahibnanda-max/relay/internal/relayhome"
 )
 
 // rotateSize is when a raw segment file is closed and a new one started.
@@ -46,6 +48,9 @@ func openRaw(root, session, agent string, limit int64) (*rawWriter, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	if runtime.GOOS == "windows" {
+		_ = relayhome.SetPrivateACL(dir) // os.Chmod cannot express owner-only on Windows
+	}
 	// Continue after the highest existing segment so a resumed agent appends.
 	n := 0
 	matches, _ := filepath.Glob(filepath.Join(dir, "raw-*.jsonl*")) // includes compressed .zst segments
@@ -72,9 +77,13 @@ func openRaw(root, session, agent string, limit int64) (*rawWriter, error) {
 }
 
 func (r *rawWriter) openSegment(i int) error {
-	f, err := os.OpenFile(filepath.Join(r.dir, fmt.Sprintf("raw-%04d.jsonl", i)), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	path := filepath.Join(r.dir, fmt.Sprintf("raw-%04d.jsonl", i))
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
+	}
+	if runtime.GOOS == "windows" {
+		_ = relayhome.SetPrivateACL(path)
 	}
 	st, _ := f.Stat()
 	r.f, r.n, r.size = f, i, st.Size()

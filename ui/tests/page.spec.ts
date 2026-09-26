@@ -76,6 +76,7 @@ test('follows the system light theme by default', async ({ page }) => {
 test('install tabs switch panels with mouse and keyboard', async ({ page }) => {
   await page.goto('/');
   const mac = page.locator('#tab-mac'), linux = page.locator('#tab-linux'), wsl = page.locator('#tab-wsl');
+  const windows = page.locator('#tab-windows');
   await expect(page.locator('#panel-mac')).toBeVisible();
   await expect(page.locator('#panel-linux')).toBeHidden();
   await linux.click();
@@ -85,9 +86,36 @@ test('install tabs switch panels with mouse and keyboard', async ({ page }) => {
   await linux.press('ArrowRight');
   await expect(wsl).toBeFocused();
   await expect(page.locator('#panel-wsl')).toBeVisible();
-  await wsl.press('Home');
+  await wsl.press('ArrowRight');
+  await expect(windows).toBeFocused();
+  await expect(page.locator('#panel-windows')).toBeVisible();
+  await windows.press('Home');
   await expect(mac).toBeFocused();
   await expect(page.locator('#panel-mac')).toBeVisible();
+  await mac.press('End');
+  await expect(windows).toBeFocused();
+  await expect(page.locator('#panel-windows')).toBeVisible();
+});
+
+test('the Windows tab swaps in the PowerShell command and its own upgrade/remove notes', async ({ page, baseURL }) => {
+  await page.goto('/');
+  const cmd = page.locator('#install-cmd-2');
+  const unixCards = page.locator('[data-cards="unix"]');
+  const windowsCards = page.locator('[data-cards="windows"]');
+  await expect(cmd).toHaveText(`curl -fsSL ${baseURL}/install.sh | bash`);
+  await expect(unixCards).toBeVisible();
+  await expect(windowsCards).toBeHidden();
+
+  await page.locator('#tab-windows').click();
+  await expect(cmd).toHaveText(`irm ${baseURL}/install.ps1 | iex`);
+  await expect(unixCards).toBeHidden();
+  await expect(windowsCards).toBeVisible();
+  await expect(windowsCards).toContainText('%LOCALAPPDATA%');
+
+  await page.locator('#tab-mac').click();
+  await expect(cmd).toHaveText(`curl -fsSL ${baseURL}/install.sh | bash`);
+  await expect(unixCards).toBeVisible();
+  await expect(windowsCards).toBeHidden();
 });
 
 test.describe('small screens', () => {

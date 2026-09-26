@@ -29,15 +29,16 @@ func resolveIn(name, pathEnv, self string) (string, error) {
 		if dir == "" {
 			dir = "."
 		}
-		candidate := filepath.Join(dir, name)
-		info, err := os.Stat(candidate) // follows symlinks
-		if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
-			continue
+		for _, candidate := range candidatesFor(dir, name) {
+			info, err := os.Stat(candidate) // follows symlinks
+			if err != nil || info.IsDir() || !isExecutable(info) {
+				continue
+			}
+			if selfInfo != nil && os.SameFile(info, selfInfo) {
+				continue
+			}
+			return candidate, nil
 		}
-		if selfInfo != nil && os.SameFile(info, selfInfo) {
-			continue
-		}
-		return candidate, nil
 	}
 	return "", fmt.Errorf("%w: %q not found on PATH (excluding relay itself)", ErrNotFound, name)
 }

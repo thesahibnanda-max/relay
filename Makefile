@@ -52,9 +52,10 @@ fuzz:            ## run every fuzz target briefly (FUZZTIME=30s to lengthen)
 
 cross:           ## build for every supported platform into ./dist
 	@mkdir -p dist
-	@for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+	@for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do \
+	  ext=""; [ "$${t%/*}" = "windows" ] && ext=".exe"; \
 	  echo "building $$t"; \
-	  CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/relay-$${t%/*}-$${t#*/} . || exit 1; \
+	  CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/relay-$${t%/*}-$${t#*/}$$ext . || exit 1; \
 	done
 
 notices:         ## regenerate THIRD_PARTY_NOTICES.md from the linked modules

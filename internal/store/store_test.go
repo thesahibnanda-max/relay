@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -42,9 +43,16 @@ func TestFilePermissionsAndReopen(t *testing.T) {
 	}
 	sess := newSession(t, s)
 	s.Close()
-	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		if st, err := os.Stat(p); err == nil && st.Mode().Perm()&0o077 != 0 {
-			t.Errorf("%s is accessible to others: %v", p, st.Mode().Perm())
+	// os.Chmod cannot express owner-only on Windows (confirmed elsewhere: it
+	// only toggles the read-only attribute, always reporting back 0666). The
+	// real protection there comes from the data directory's own ACL, hardened
+	// by relayhome.Paths.Ensure before a real relay.db is ever opened - this
+	// test's bare t.TempDir() deliberately has none.
+	if runtime.GOOS != "windows" {
+		for _, p := range []string{path, path + "-wal", path + "-shm"} {
+			if st, err := os.Stat(p); err == nil && st.Mode().Perm()&0o077 != 0 {
+				t.Errorf("%s is accessible to others: %v", p, st.Mode().Perm())
+			}
 		}
 	}
 	s2, err := Open(path) // migrations must be idempotent and data must persist
