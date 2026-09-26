@@ -35,6 +35,7 @@ type native struct {
 	upload      bool
 	codexOnce   sync.Once
 	copilotOnce sync.Once
+	agyOnce     sync.Once
 }
 
 // SetUploadTurns controls whether conversation turns are sent to the daemon
@@ -57,6 +58,9 @@ func (s *Session) startNative(ctx context.Context) {
 	}
 	if s.tool == "copilot" && s.lk != nil {
 		s.nat.copilotOnce.Do(func() { go s.followCopilot(ctx) })
+	}
+	if s.tool == "agy" && s.lk != nil {
+		s.nat.agyOnce.Do(func() { go s.followAgy(ctx) })
 	}
 }
 
@@ -96,6 +100,48 @@ func (s *Session) followCopilot(ctx context.Context) {
 		case <-t.C:
 		}
 	}
+}
+
+// followAgy waits for this agent's conversation database to appear (agy
+// writes it at the first message) and follows it. Unlike the other three
+// adaptors, agy has no append-only transcript file - see setAgyTranscript.
+func (s *Session) followAgy(ctx context.Context) {
+	q := transcript.AgyQuery{Cwd: s.nat.cwd, Since: s.nat.started, Name: s.ident.Agent.Name, Session: s.ident.Session.ID}
+	t := time.NewTicker(500 * time.Millisecond)
+	defer t.Stop()
+	for {
+		if path := transcript.LocateAgy(q); path != "" {
+			s.setAgyTranscript(path)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// setAgyTranscript follows a (new) agy conversation database, dropping the
+// previous one. Deliberately separate from setTranscript, not merged into
+// it: agy's `steps` table is mutated in place rather than appended to (see
+// transcript.SQLiteTailer), a different poll shape from the line-based
+// Tailer every other adaptor uses - keeping the two paths apart means this
+// addition carries zero risk of changing the three already-working
+// line-based adaptors' behavior.
+func (s *Session) setAgyTranscript(path string) {
+	s.nat.mu.Lock()
+	defer s.nat.mu.Unlock()
+	if path == "" || path == s.nat.trPath || s.nat.ctx == nil {
+		return
+	}
+	if s.nat.trCancel != nil {
+		s.nat.trCancel()
+	}
+	ctx, cancel := context.WithCancel(s.nat.ctx)
+	s.nat.trPath, s.nat.trCancel = path, cancel
+	tl := &transcript.SQLiteTailer{Path: path, Fn: s.onRecord}
+	go tl.Run(ctx)
 }
 
 // setTranscript follows a (new) transcript file, dropping the previous one.
