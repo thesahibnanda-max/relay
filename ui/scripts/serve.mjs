@@ -1,6 +1,6 @@
 // Tiny static file server for local development and the Playwright tests (no dependencies).
 // Behaves like a real static host where it matters here: correct MIME types, with install.sh
-// served as text/plain.
+// and install.ps1 served as text/plain.
 import { createServer } from 'node:http';
 import { createReadStream, statSync } from 'node:fs';
 import path from 'node:path';
@@ -23,6 +23,7 @@ const types = {
   '.woff2': 'font/woff2',
   '.txt': 'text/plain; charset=utf-8',
   '.sh': 'text/plain; charset=utf-8',
+  '.ps1': 'text/plain; charset=utf-8',
 };
 
 function send(res, status, body, headers = {}) {

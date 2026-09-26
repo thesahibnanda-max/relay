@@ -3,10 +3,14 @@
   'use strict';
   var root = document.documentElement;
 
-  // ---- install command: always point at THIS site's own install.sh ----
-  var installUrl = new URL('install.sh', document.baseURI).href;
-  var installCmd = 'curl -fsSL ' + installUrl + ' | bash';
-  document.querySelectorAll('[data-install-cmd]').forEach(function (el) { el.textContent = installCmd; });
+  // ---- install command: always point at THIS site's own install script ----
+  var unixInstallUrl = new URL('install.sh', document.baseURI).href;
+  var windowsInstallUrl = new URL('install.ps1', document.baseURI).href;
+  var installCmds = {
+    unix: 'curl -fsSL ' + unixInstallUrl + ' | bash',
+    windows: 'irm ' + windowsInstallUrl + ' | iex',
+  };
+  document.querySelectorAll('[data-install-cmd]').forEach(function (el) { el.textContent = installCmds.unix; });
 
   // ---- theme toggle ----
   var themeBtn = document.getElementById('theme-btn');
@@ -79,6 +83,9 @@
   document.querySelectorAll('[data-tabs]').forEach(function (box) {
     var tabs = Array.prototype.slice.call(box.querySelectorAll('[role="tab"]'));
     var panels = tabs.map(function (t) { return document.getElementById(t.getAttribute('aria-controls')); });
+    var cmdEl = box.querySelector('[data-install-cmd]');
+    var cardsUnix = document.querySelector('[data-cards="unix"]');
+    var cardsWindows = document.querySelector('[data-cards="windows"]');
     function select(i, focus) {
       tabs.forEach(function (t, n) {
         var on = n === i;
@@ -86,6 +93,10 @@
         t.tabIndex = on ? 0 : -1;
         panels[n].hidden = !on;
       });
+      var kind = tabs[i].getAttribute('data-cmd') || 'unix';
+      if (cmdEl && installCmds[kind]) cmdEl.textContent = installCmds[kind];
+      if (cardsUnix) cardsUnix.hidden = kind !== 'unix';
+      if (cardsWindows) cardsWindows.hidden = kind !== 'windows';
       if (focus) tabs[i].focus();
     }
     tabs.forEach(function (t, i) {

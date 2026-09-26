@@ -10,8 +10,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash # windows-latest ships Git Bash; every step below is POSIX shell
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -26,7 +29,14 @@ jobs:
       # Includes the blocking zero-footprint test: it hashes a fake ~/.claude,
       # ~/.codex and project dir around a full two-agent session.
       - name: test (race)
+        if: runner.os != 'Windows'
         run: go test -race -count=1 ./...
+      # The race detector needs a native cgo C toolchain relay does not
+      # otherwise depend on; Windows still gets the full, real suite run
+      # natively (not cross-compiled), just without -race.
+      - name: test
+        if: runner.os == 'Windows'
+        run: go test -count=1 ./...
 
   cross-build:
     runs-on: ubuntu-latest

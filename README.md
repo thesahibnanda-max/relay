@@ -30,7 +30,7 @@ deleted on exit). Run plain `claude`, `codex` or `copilot` afterwards, or after 
 and they behave exactly as before.
 `relay doctor` checks this, and an automated test enforces it.
 
-Linux, macOS and WSL only (native Windows is not supported: `relay` says so and exits). The code still compiles on every platform so editors and tools stay clean. One static binary, no cgo.
+Linux, macOS, WSL and native Windows. One static binary, no cgo.
 
 **New to Relay?** [NOTICE.md](NOTICE.md) explains everything in plain language: what it does, where it works,
 and what its limits are.
@@ -43,15 +43,24 @@ and what its limits are.
 curl -fsSL https://relay-sahib-nanda.vercel.app/install.sh | bash
 ```
 
+**Windows** (PowerShell, one line):
+
+```powershell
+irm https://relay-sahib-nanda.vercel.app/install.ps1 | iex
+```
+
 Then open a new terminal and run `relay doctor` to verify the installation.
 
 * **Which build?** The script detects it for you. By hand: Mac with an Apple chip = `darwin_arm64`,
-  Intel Mac = `darwin_amd64`, Linux/WSL = `linux_amd64` (Intel/AMD) or `linux_arm64` (ARM). WSL is just Linux.
-* **Options** (set before `bash`): `RELAY_VERSION=v1.2.3` pins a version, `RELAY_INSTALL_DIR=/dir` changes
-  where it goes (default `~/.local/bin`), `RELAY_NO_MODIFY_PATH=1` leaves your shell startup files alone.
+  Intel Mac = `darwin_amd64`, Linux/WSL = `linux_amd64` (Intel/AMD) or `linux_arm64` (ARM), Windows =
+  `windows_amd64` (Intel/AMD) or `windows_arm64` (ARM). WSL is just Linux.
+* **Options** (set before `bash`, or as `$env:NAME` before the PowerShell command): `RELAY_VERSION=v1.2.3`
+  pins a version, `RELAY_INSTALL_DIR=/dir` changes where it goes (default `~/.local/bin`, or
+  `%LOCALAPPDATA%\relay\bin` on Windows), `RELAY_NO_MODIFY_PATH=1` leaves your PATH alone.
   Example: `curl -fsSL .../install.sh | RELAY_VERSION=v1.2.3 bash`.
 * **Manual install:** every [release](../../releases) lists the downloads and the step-by-step commands.
-* **Remove it:** delete `~/.local/bin/relay` and the `# added by relay installer` line in your shell startup file.
+* **Remove it:** delete `~/.local/bin/relay` and the `# added by relay installer` line in your shell startup
+  file (on Windows: delete `%LOCALAPPDATA%\relay` and remove it from your PATH).
 * **From source** (needs Go): `go install github.com/thesahibnanda-max/relay@latest`, or `make build` for `./bin/relay`.
 
 Relay wraps tools you already have (`claude`, `codex`, `copilot`) found on your `PATH`.
@@ -189,14 +198,14 @@ needed for local preview and the tests.
 ```sh
 cd ui
 npm ci
-npm run dev       # http://localhost:4173, copies ../install.sh into the site first
-npm test          # Playwright: layout at 320-1440px, demo image, install.sh check, accessibility
+npm run dev       # http://localhost:4173, copies ../install.sh and ../install.ps1 into the site first
+npm test          # Playwright: layout at 320-1440px, demo image, install.sh/install.ps1 check, accessibility
 npx playwright install chromium   # once, to download the test browser
 ```
 
-The site serves its own copy of the installer at `/install.sh`. The root `install.sh` stays the single source of
-truth: `npm run dev`, `npm run build` and `npm test` copy it to `ui/site/install.sh` (git-ignored), and a test
-fails if the served copy ever differs. To host it, use any static host: run `npm run build` in `ui/` and publish
+The site serves its own copy of the installers at `/install.sh` and `/install.ps1`. The root `install.sh` and
+`install.ps1` stay the single source of truth: `npm run dev`, `npm run build` and `npm test` copy them to
+`ui/site/install.sh` and `ui/site/install.ps1` (both git-ignored), and a test fails if either served copy ever differs. To host it, use any static host: run `npm run build` in `ui/` and publish
 `ui/site`. On Vercel import the repo with **Root Directory = `ui`** and Framework Preset "Other": the root `vercel.json`
 sets the build command (`node scripts/sync-install.mjs`), the output folder (`site`) and the headers, with paths
 relative to `ui/`.

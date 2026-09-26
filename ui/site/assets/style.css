@@ -209,6 +209,7 @@ code:not(pre code) {
 /* ---------- sections ---------- */
 .section { padding-block: clamp(3rem, 7vw, 5.5rem); border-top: 1px solid var(--line); }
 .cards { display: grid; gap: 1rem; margin-top: 2.25rem; }
+.cards[hidden] { display: none; }
 .card {
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.25rem 1.25rem 1.4rem;
 }

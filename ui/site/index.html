@@ -50,7 +50,7 @@
   <main id="main">
     <section class="hero wrap" id="top">
       <div class="hero-copy">
-        <p class="eyebrow">Open source &middot; macOS, Linux &amp; WSL</p>
+        <p class="eyebrow">Open source &middot; macOS, Linux, WSL &amp; Windows</p>
         <h1>Your AI coding agents, working as <span class="accent">one team</span>.</h1>
         <p class="lead">Run Claude Code and Codex side by side, each in its own terminal. Relay lets them hand work to each other, ask questions and answer back, while every terminal still looks and behaves exactly like the tool itself.</p>
 
@@ -209,9 +209,10 @@
 
       <div class="tabs" data-tabs>
         <div class="tablist" role="tablist" aria-label="Operating system">
-          <button role="tab" type="button" id="tab-mac" aria-controls="panel-mac" aria-selected="true">macOS</button>
-          <button role="tab" type="button" id="tab-linux" aria-controls="panel-linux" aria-selected="false" tabindex="-1">Linux</button>
-          <button role="tab" type="button" id="tab-wsl" aria-controls="panel-wsl" aria-selected="false" tabindex="-1">WSL</button>
+          <button role="tab" type="button" id="tab-mac" aria-controls="panel-mac" aria-selected="true" data-cmd="unix">macOS</button>
+          <button role="tab" type="button" id="tab-linux" aria-controls="panel-linux" aria-selected="false" tabindex="-1" data-cmd="unix">Linux</button>
+          <button role="tab" type="button" id="tab-wsl" aria-controls="panel-wsl" aria-selected="false" tabindex="-1" data-cmd="unix">WSL</button>
+          <button role="tab" type="button" id="tab-windows" aria-controls="panel-windows" aria-selected="false" tabindex="-1" data-cmd="windows">Windows</button>
         </div>
 
         <div class="cmd" data-cmd-box>
@@ -230,13 +231,16 @@
           <p>Paste it into any terminal. It installs to <code>~/.local/bin</code> without sudo, for Intel/AMD and ARM machines, and adds that folder to your PATH.</p>
         </div>
         <div class="tabpanel" role="tabpanel" id="panel-wsl" aria-labelledby="tab-wsl" tabindex="0">
-          <p>Run it inside your WSL terminal (Ubuntu and friends), not in PowerShell. WSL is Linux, so you get the Linux build. Native Windows isn't supported.</p>
+          <p>Run it inside your WSL terminal (Ubuntu and friends), not in PowerShell. WSL is Linux, so you get the Linux build.</p>
+        </div>
+        <div class="tabpanel" role="tabpanel" id="panel-windows" aria-labelledby="tab-windows" tabindex="0">
+          <p>Open <strong>PowerShell</strong> and paste the command. It installs to <code>%LOCALAPPDATA%\relay\bin</code> without admin rights, for Intel/AMD and ARM machines, and adds that folder to your PATH.</p>
         </div>
       </div>
 
       <p class="after">Then open a new terminal and run <code>relay doctor</code> to check everything is in order.</p>
 
-      <div class="cards cards-3">
+      <div class="cards cards-3" data-cards="unix">
         <article class="card">
           <h3>Upgrade</h3>
           <p>Run the same command again. It fetches the latest release and replaces the old one.</p>
@@ -248,6 +252,20 @@
         <article class="card">
           <h3>Remove</h3>
           <p>Delete <code>~/.local/bin/relay</code> and the <code># added by relay installer</code> line in your shell startup file.</p>
+        </article>
+      </div>
+      <div class="cards cards-3" data-cards="windows" hidden>
+        <article class="card">
+          <h3>Upgrade</h3>
+          <p>Run the same command again. It fetches the latest release and replaces the old one.</p>
+        </article>
+        <article class="card">
+          <h3>Pin a version</h3>
+          <p>Put <code>$env:RELAY_VERSION="v0.0.2"</code> before the command to install exactly that release.</p>
+        </article>
+        <article class="card">
+          <h3>Remove</h3>
+          <p>Delete <code>%LOCALAPPDATA%\relay</code> and remove it from your PATH.</p>
         </article>
       </div>
       <p class="after">Prefer to download by hand? Every build has a checksum on the <a href="https://github.com/thesahibnanda-max/relay/releases/latest" rel="noopener">latest release</a> page.</p>

@@ -28,7 +28,7 @@ have tar || die "tar is required"
 case "$(uname -s)" in
   Linux) os=linux ;;
   Darwin) os=darwin ;;
-  MINGW* | MSYS* | CYGWIN*) die "Windows is not supported natively: install WSL, then run this inside the WSL terminal" ;;
+  MINGW* | MSYS* | CYGWIN*) die "this script is for a Unix shell; on native Windows run: irm https://relay-sahib-nanda.vercel.app/install.ps1 | iex" ;;
   *) die "unsupported system: $(uname -s) (Relay supports macOS, Linux and WSL)" ;;
 esac
 case "$(uname -m)" in

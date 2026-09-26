@@ -2,12 +2,13 @@ bin/
 dist/
 *.test
 
-# Website (ui/): dependencies, test output, generated copy of install.sh, hosting metadata
+# Website (ui/): dependencies, test output, generated copy of install.sh/install.ps1, hosting metadata
 ui/node_modules/
 ui/playwright-report/
 ui/test-results/
 ui/blob-report/
 ui/site/install.sh
+ui/site/install.ps1
 ui/.vercel/
 .vercel/
 .DS_Store
