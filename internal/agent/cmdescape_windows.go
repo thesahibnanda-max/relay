@@ -4,6 +4,7 @@ package agent
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -94,6 +95,59 @@ func escapeCmdArgument(arg string, doubleEscapeMetaChars bool) string {
 		escaped = escapeCmdMetaChars(escaped)
 	}
 	return escaped
+}
+
+// npmShimScriptRe matches the one stable, defining line of npm's own
+// cmd-shim template (what "npm install -g <js-cli>" drops on Windows,
+// confirmed live against a real codex.cmd) across the small variations npm
+// has shipped over the years: a quoted "%dp0%\<relative path>" immediately
+// followed by " %*", forwarding every original argument straight through to
+// a real .js entry point via node.
+var npmShimScriptRe = regexp.MustCompile(`(?m)"%dp0%\\([^"]+)"\s+%\*\s*$`)
+
+// ParseNpmCmdShim looks for npm's own cmd-shim shape in shimPath's content
+// and, if found, returns the real interpreter (node.exe) and script it
+// ultimately runs, so the caller can launch that directly as a plain argv -
+// bypassing cmd.exe's own command-line reparsing entirely, rather than
+// trying to escape through it (see WrapForCmdExe). This is the preferred
+// path whenever it applies: cmd.exe's own quoting has a real,
+// confirmed-live edge case for an argument containing a double quote
+// followed later by a metacharacter like `|` - the exact shape of relay's
+// own collaboration briefing text - that even the current, "fixed" version
+// of cross-spawn (the reference WrapForCmdExe is ported from) still gets
+// wrong: https://github.com/moxystudio/node-cross-spawn/issues/82. Bypassing
+// cmd.exe means the tool actually runs via relay's already-correct
+// plain-.exe launch path (CommandLineToArgvW-compatible quoting, which
+// go-pty's Cmd already handles) with nothing left to reparse it.
+func ParseNpmCmdShim(shimPath string) (nodeExe, script string, ok bool) {
+	data, err := os.ReadFile(shimPath)
+	if err != nil {
+		return "", "", false
+	}
+	m := npmShimScriptRe.FindSubmatch(data)
+	if m == nil {
+		return "", "", false
+	}
+	dir := filepath.Dir(shimPath)
+	script = filepath.Join(dir, string(m[1]))
+	if _, err := os.Stat(script); err != nil {
+		return "", "", false
+	}
+	if local := filepath.Join(dir, "node.exe"); fileExists(local) {
+		return local, script, true
+	}
+	if p, err := exec.LookPath("node.exe"); err == nil {
+		return p, script, true
+	}
+	if p, err := exec.LookPath("node"); err == nil {
+		return p, script, true
+	}
+	return "", "", false
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // comspec returns cmd.exe's real path, matching cross-spawn's own fallback.

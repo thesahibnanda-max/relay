@@ -33,19 +33,33 @@ func startTool(bin string, args, env []string, isTTY bool, cols, rows int) (tool
 	// target only this child, never Relay's own process.
 	sys := &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
 	var cmd *gopty.Cmd
-	if IsBatchFile(bin) {
+	switch {
+	case !IsBatchFile(bin):
+		cmd = p.Command(bin, args...)
+	default:
 		// bin is a .cmd/.bat shim (every npm-installed CLI tool on Windows):
 		// CreateProcess cannot launch that directly, and a plain argv (correct
-		// for a real .exe, which is all the "else" branch below ever needs)
-		// is not enough once cmd.exe's own tokenizer gets involved - see
-		// WrapForCmdExe. Confirmed live: without this, a briefing/message
-		// containing a `|` broke codex.cmd with a literal
-		// "'from' is not recognized" error from cmd.exe.
-		cmdExe, cmdLine := WrapForCmdExe(bin, args)
-		sys.CmdLine = cmdLine
-		cmd = p.Command(cmdExe)
-	} else {
-		cmd = p.Command(bin, args...)
+		// for a real .exe, which is all the first case above ever needs) is
+		// not enough once cmd.exe's own tokenizer gets involved.
+		if nodeExe, script, ok := ParseNpmCmdShim(bin); ok {
+			// Preferred: bypass cmd.exe entirely by launching the shim's own
+			// real target (node.exe + its .js entry point) directly, as a
+			// plain argv - go-pty's existing CreateProcess-based launch
+			// already handles this correctly for any real .exe, with no
+			// cmd.exe reparsing to trip over. See ParseNpmCmdShim's doc
+			// comment for why this is needed even after cmd.exe-escaping.
+			cmd = p.Command(nodeExe, append([]string{script}, args...)...)
+		} else {
+			// Fallback for a .cmd/.bat that isn't a recognisable npm shim:
+			// best-effort cmd.exe escaping. Confirmed live: without this,
+			// a briefing/message containing a `|` broke codex.cmd with a
+			// literal "'from' is not recognized" error from cmd.exe - and
+			// ParseNpmCmdShim's bypass fixes that specific, common case for
+			// real; this fallback remains for whatever it doesn't match.
+			cmdExe, cmdLine := WrapForCmdExe(bin, args)
+			sys.CmdLine = cmdLine
+			cmd = p.Command(cmdExe)
+		}
 	}
 	cmd.Env = env
 	cmd.SysProcAttr = sys
