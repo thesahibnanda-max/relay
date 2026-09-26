@@ -29,11 +29,26 @@ func startTool(bin string, args, env []string, isTTY bool, cols, rows int) (tool
 			return nil, err
 		}
 	}
-	cmd := p.Command(bin, args...)
-	cmd.Env = env
 	// A new process group so Signal's GenerateConsoleCtrlEvent below can
 	// target only this child, never Relay's own process.
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+	sys := &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+	var cmd *gopty.Cmd
+	if IsBatchFile(bin) {
+		// bin is a .cmd/.bat shim (every npm-installed CLI tool on Windows):
+		// CreateProcess cannot launch that directly, and a plain argv (correct
+		// for a real .exe, which is all the "else" branch below ever needs)
+		// is not enough once cmd.exe's own tokenizer gets involved - see
+		// WrapForCmdExe. Confirmed live: without this, a briefing/message
+		// containing a `|` broke codex.cmd with a literal
+		// "'from' is not recognized" error from cmd.exe.
+		cmdExe, cmdLine := WrapForCmdExe(bin, args)
+		sys.CmdLine = cmdLine
+		cmd = p.Command(cmdExe)
+	} else {
+		cmd = p.Command(bin, args...)
+	}
+	cmd.Env = env
+	cmd.SysProcAttr = sys
 	if err := cmd.Start(); err != nil {
 		p.Close()
 		return nil, err
