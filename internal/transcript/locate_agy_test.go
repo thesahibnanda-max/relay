@@ -37,7 +37,13 @@ func TestFileURIToPath(t *testing.T) {
 // agyDBMatchesCwd reads (trajectory_metadata_blob, id="main"), embedding a
 // file:// URI exactly as confirmed live against a real agy conversation
 // database - including the trailing protobuf-framing noise that scan must
-// tolerate (see hasPathPrefix's own doc comment).
+// tolerate (see hasPathPrefix's own doc comment). cwd is an OS-native path
+// (as os.Getwd() would return it); it is converted to a forward-slash URI
+// here, exactly as the real agy binary does, so this round-trips correctly
+// through agyDBMatchesCwd's own filepath.FromSlash on every platform - a
+// bare "/unix/style" literal embedded without this conversion previously
+// passed on Unix by coincidence (FromSlash is a no-op there) but failed for
+// real on Windows, where FromSlash actually rewrites the separators.
 func seedTrajectoryBlob(t *testing.T, path, cwd string) {
 	t.Helper()
 	db, err := sql.Open("sqlite", "file:"+path)
@@ -51,7 +57,7 @@ func seedTrajectoryBlob(t *testing.T, path, cwd string) {
 	if _, err := db.Exec(`CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, step_payload BLOB)`); err != nil {
 		t.Fatal(err)
 	}
-	blob := append([]byte("\x12\x02\x01\x02\"$some-uuid-noise"), []byte("file://"+cwd+"z\x94\x03\x88\x9c")...)
+	blob := append([]byte("\x12\x02\x01\x02\"$some-uuid-noise"), []byte("file://"+filepath.ToSlash(cwd)+"z\x94\x03\x88\x9c")...)
 	if _, err := db.Exec(`INSERT INTO trajectory_metadata_blob (id, data) VALUES ('main', ?)`, blob); err != nil {
 		t.Fatal(err)
 	}
@@ -71,16 +77,17 @@ func seedUserMessage(t *testing.T, path, text string) {
 }
 
 func TestAgyDBMatchesCwd(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "conv.db")
-	seedTrajectoryBlob(t, path, "/mnt/c/Users/sabby/OneDrive/Desktop/relay")
+	dbPath := filepath.Join(t.TempDir(), "conv.db")
+	wantCwd := filepath.Join(t.TempDir(), "relay") // an OS-native path, e.g. backslashes on Windows
+	seedTrajectoryBlob(t, dbPath, wantCwd)
 
-	if !agyDBMatchesCwd(path, "/mnt/c/Users/sabby/OneDrive/Desktop/relay") {
+	if !agyDBMatchesCwd(dbPath, wantCwd) {
 		t.Fatal("expected a match on the real cwd")
 	}
-	if agyDBMatchesCwd(path, "/mnt/c/Users/sabby/OneDrive/Desktop/relay2") {
+	if agyDBMatchesCwd(dbPath, wantCwd+"2") {
 		t.Fatal("must not match a longer, different directory name")
 	}
-	if agyDBMatchesCwd(path, "/somewhere/else") {
+	if agyDBMatchesCwd(dbPath, filepath.Join(t.TempDir(), "else")) {
 		t.Fatal("must not match an unrelated cwd")
 	}
 }
@@ -120,11 +127,12 @@ func TestLocateAgyDisambiguatesByCwdAndBriefing(t *testing.T) {
 
 func TestLocateAgyIgnoresOldFiles(t *testing.T) {
 	root := t.TempDir()
+	cwd := filepath.Join(t.TempDir(), "x")
 	old := filepath.Join(root, "old.db")
-	seedTrajectoryBlob(t, old, "/x")
+	seedTrajectoryBlob(t, old, cwd)
 	seedUserMessage(t, old, "hi")
 
-	got := LocateAgy(AgyQuery{Root: root, Cwd: "/x", Since: time.Now().Add(time.Hour)})
+	got := LocateAgy(AgyQuery{Root: root, Cwd: cwd, Since: time.Now().Add(time.Hour)})
 	if got != "" {
 		t.Fatalf("a file older than Since must be ignored, got %q", got)
 	}
