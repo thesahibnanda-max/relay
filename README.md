@@ -2,10 +2,23 @@
 
 # Relay
 
+**🌐 [relay-sahib-nanda.vercel.app](https://relay-sahib-nanda.vercel.app)** &middot; website, demo and one-line install
+
 Relay lets AI coding agents in separate terminals work as one team. Run Claude Code, Codex, GitHub
-Copilot CLI and Google's Antigravity CLI (or several of each) side by side, and one can hand work to
+Copilot CLI and Google's Antigravity CLI 🧪 (or several of each) side by side, and one can hand work to
 another (*"tell codex to fix the failing test"*), ask what another has done, and answer back, while
 every terminal still looks and behaves exactly like the tool itself.
+
+## Demo
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="ui/site/assets/demo.png">
+  <source media="(prefers-color-scheme: light)" srcset="ui/site/assets/lightdemo.png">
+  <img src="ui/site/assets/demo.png" alt="Two terminal windows side by side, joined by a glowing line labelled relay. Claude Code is told to say hi to Codex and reports &quot;Message sent to codex!&quot;; the message arrives in Codex's terminal as a new message from claude.">
+</picture>
+
+Claude Code is told to say hi to Codex; the message travels through Relay and shows up in Codex's
+terminal - nobody copied or pasted anything. Same idea, in raw terminal text:
 
 ```
  terminal A                       terminal B
@@ -41,7 +54,7 @@ Linux, macOS, WSL and native Windows. One static binary, no cgo.
 
 **New to Relay?** [NOTICE.md](NOTICE.md) explains everything in plain language: what it does, where it works,
 and what its limits are. In short: macOS/Linux/WSL with Claude Code, Codex or Copilot CLI is the most
-battle-tested combination; `agy` support and native Windows are newer - please
+battle-tested combination; `agy` support and native Windows are both 🧪 **Experimental** - please
 [open an issue](https://github.com/thesahibnanda-max/relay/issues/new) if something looks off on either.
 
 ## Install
@@ -191,6 +204,9 @@ Terminal logs contain everything typed, including secrets you type: use `--recor
 * Leftover files after a crash: `relay gc`.
 
 ## Development
+
+Want to contribute? See [CONTRIBUTING.md](CONTRIBUTING.md) for the branch/commit/PR conventions and
+what CI checks.
 
 ```sh
 make check        # gofmt + vet + tests under the race detector (what CI runs)
