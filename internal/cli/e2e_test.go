@@ -46,7 +46,7 @@ func buildBinaries(t *testing.T) string {
 		if buildErr != nil {
 			return
 		}
-		for out, pkg := range map[string]string{"relay": "../..", "fakeagent": "../../testdata/fakeagent"} {
+		for out, pkg := range map[string]string{"relay": "../..", "fakeagent": "../../testdata/fakeagent", "fakeagy": "../../testdata/fakeagy"} {
 			if b, err := exec.Command("go", "build", "-o", filepath.Join(binDir, out), pkg).CombinedOutput(); err != nil {
 				buildErr = &buildFailure{string(b), err}
 				return
@@ -58,6 +58,14 @@ func buildBinaries(t *testing.T) string {
 				buildErr = err
 				return
 			}
+		}
+		// agy's own `mcp add`/`mcp remove` subcommands, used only by the gc/
+		// doctor-level tests below - fakeagy has no interactive session mode,
+		// so it does not stand in for `relay agy ...` itself (see fakeagy's
+		// own doc comment).
+		if err := os.Symlink(filepath.Join(binDir, "fakeagy"), filepath.Join(binDir, "agy")); err != nil {
+			buildErr = err
+			return
 		}
 	})
 	if buildErr != nil {
@@ -104,6 +112,7 @@ func newWorld(t *testing.T) *world {
 	}
 	w.env = append(os.Environ(),
 		"HOME="+w.home, "CODEX_HOME="+filepath.Join(w.home, ".codex"), "COPILOT_HOME="+filepath.Join(w.home, ".copilot"),
+		"GEMINI_HOME="+filepath.Join(w.home, ".gemini"),
 		"RELAY_HOME="+w.relay, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"RELAY_ACTIVE=", // never inherit the nesting marker from an outer relay
 	)
@@ -1041,6 +1050,53 @@ func TestGCRetentionCommandsReportAndNeverTouchLiveSessions(t *testing.T) {
 // is given, not race ahead and hand the terminal to the tool - which would
 // make the banner text unrecoverable (the tool switches to its own alternate
 // screen) before anyone has a real chance to copy it.
+// TestGCRemovesStaleAgyMCPRegistration is the CLI-level proof of decision 6:
+// `relay gc` gives a one-command cleanup for a leftover agy MCP registration
+// even when nothing ever relaunches agy on this machine. It exercises the
+// real wiring (msgcmd.go's runGC -> adaptor.AgySweepStale -> the agy
+// package's own locked sweep -> the real `agy mcp remove`, here fakeagy)
+// end to end, not just the underlying package function directly.
+func TestGCRemovesStaleAgyMCPRegistration(t *testing.T) {
+	w := newWorld(t)
+	cfgPath := filepath.Join(w.home, ".gemini", "config", "mcp_config.json")
+	os.MkdirAll(filepath.Dir(cfgPath), 0o755)
+
+	liveDir := t.TempDir()
+	deadDir := filepath.Join(t.TempDir(), "gone")
+	seed := `{"mcpServers":{
+		"relay-live": {"command":"/opt/relay/relay","args":["mcp","--dir","` + filepath.ToSlash(liveDir) + `"],"disabled":false},
+		"relay-dead": {"command":"/opt/relay/relay","args":["mcp","--dir","` + filepath.ToSlash(deadDir) + `"],"disabled":false}
+	}}`
+	if err := os.WriteFile(cfgPath, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// --dry-run must never touch it.
+	out, errs, code := w.runRelay("gc", "--dry-run", "--older-than=1d")
+	if code != 0 || strings.Contains(out, "removed stale agy") {
+		t.Fatalf("dry run must not remove anything (%d): %q %q", code, out, errs)
+	}
+	data, _ := os.ReadFile(cfgPath)
+	if !strings.Contains(string(data), "relay-dead") {
+		t.Fatal("dry run must leave the stale entry in place")
+	}
+
+	out, errs, code = w.runRelay("gc")
+	if code != 0 || !strings.Contains(out, "removed stale agy MCP server relay-dead") {
+		t.Fatalf("(%d) out=%q errs=%q", code, out, errs)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "relay-dead") {
+		t.Fatalf("stale entry must be gone: %s", data)
+	}
+	if !strings.Contains(string(data), "relay-live") {
+		t.Fatalf("live entry must survive: %s", data)
+	}
+}
+
 func TestSessionBannerPausesForAcknowledgmentBeforeHandingOffToTheTool(t *testing.T) {
 	w := newWorld(t)
 	alice := w.startWithoutAck("claude", "orchestrator", "--session=NEW_LOCAL", "--name=alice")
