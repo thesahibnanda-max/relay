@@ -40,7 +40,9 @@ doctor`/`relay gc` flag and clean up anything left behind.
 Linux, macOS, WSL and native Windows. One static binary, no cgo.
 
 **New to Relay?** [NOTICE.md](NOTICE.md) explains everything in plain language: what it does, where it works,
-and what its limits are.
+and what its limits are. In short: macOS/Linux/WSL with Claude Code, Codex or Copilot CLI is the most
+battle-tested combination; `agy` support and native Windows are newer - please
+[open an issue](https://github.com/thesahibnanda-max/relay/issues/new) if something looks off on either.
 
 ## Install
 
