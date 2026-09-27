@@ -2,10 +2,10 @@
 
 # Relay
 
-Relay lets AI coding agents in separate terminals work as one team. Run Claude Code, Codex and
-GitHub Copilot CLI (or several of each) side by side, and one can hand work to another (*"tell codex
-to fix the failing test"*), ask what another has done, and answer back, while every terminal still
-looks and behaves exactly like the tool itself.
+Relay lets AI coding agents in separate terminals work as one team. Run Claude Code, Codex, GitHub
+Copilot CLI and Google's Antigravity CLI (or several of each) side by side, and one can hand work to
+another (*"tell codex to fix the failing test"*), ask what another has done, and answer back, while
+every terminal still looks and behaves exactly like the tool itself.
 
 ```
  terminal A                       terminal B
@@ -29,6 +29,13 @@ is passed for that one launch (flags, `-c` overrides, temp files in `~/.relay/ru
 deleted on exit). Run plain `claude`, `codex` or `copilot` afterwards, or after uninstalling Relay,
 and they behave exactly as before.
 `relay doctor` checks this, and an automated test enforces it.
+
+One exception: Google's Antigravity CLI (`agy`) has no per-launch way to register an MCP server at
+all - the only mechanism it offers is `agy mcp add`, which writes into its own global, persistent
+config. Relay uses that anyway, but only for the one launch: it registers a uniquely-named entry,
+removes it on exit (or on the next `relay <tool>` launch or `relay gc`, if the process was killed
+before it could), and locks around every change so it can never race `agy`'s own config file. `relay
+doctor`/`relay gc` flag and clean up anything left behind.
 
 Linux, macOS, WSL and native Windows. One static binary, no cgo.
 
@@ -63,7 +70,7 @@ Then open a new terminal and run `relay doctor` to verify the installation.
   file (on Windows: delete `%LOCALAPPDATA%\relay` and remove it from your PATH).
 * **From source** (needs Go): `go install github.com/thesahibnanda-max/relay@latest`, or `make build` for `./bin/relay`.
 
-Relay wraps tools you already have (`claude`, `codex`, `copilot`) found on your `PATH`.
+Relay wraps tools you already have (`claude`, `codex`, `copilot`, `agy`) found on your `PATH`.
 
 ## Quick start
 
@@ -84,7 +91,7 @@ involved? Use `--session=NEW_LOCAL --name=lead` and `--session=<id> --name=coder
 
 | Command | What it does |
 |---|---|
-| `relay <claude\|codex\|copilot> [role] [--session=NEW\|NEW_LOCAL\|<id>\|<token>] [--name=x] [--server=host[:port]] [--resume\|--fresh] [--approve-inbound] [--record=raw\|events\|off] [-- tool args]` | Run a tool as an agent. `NEW` starts a global session (any machine can join; the official binary needs no `--server`); `NEW_LOCAL` keeps it on this machine only; a `<token>` (`<ulid>@host[:port]`) joins a global session from anywhere. Everything after `--` goes to the tool unchanged. |
+| `relay <claude\|codex\|copilot\|agy> [role] [--session=NEW\|NEW_LOCAL\|<id>\|<token>] [--name=x] [--server=host[:port]] [--resume\|--fresh] [--approve-inbound] [--record=raw\|events\|off] [-- tool args]` | Run a tool as an agent. `NEW` starts a global session (any machine can join; the official binary needs no `--server`); `NEW_LOCAL` keeps it on this machine only; a `<token>` (`<ulid>@host[:port]`) joins a global session from anywhere. Everything after `--` goes to the tool unchanged. |
 | `relay ls [--all] [--session=<id>]` | Sessions and their agents. |
 | `relay session new [--name=..]` / `relay session end <id>` | Create / close a session. |
 | `relay send <agent> <text> [--priority=low\|normal\|high\|interrupt] [--session=<id>]` | Message an agent yourself (`-` reads stdin). |
@@ -98,8 +105,8 @@ involved? Use `--session=NEW_LOCAL --name=lead` and `--session=<id> --name=coder
 (with optional frontmatter: `can_interrupt`, `can_broadcast`). A role is delivered to the model once,
 at launch, as part of its system prompt.
 
-**Shim mode.** Symlink `claude`, `codex` or `copilot` to `relay` earlier on your `PATH` and typing
-`claude` runs it under Relay, solo, with all arguments passed straight through.
+**Shim mode.** Symlink `claude`, `codex`, `copilot` or `agy` to `relay` earlier on your `PATH` and
+typing `claude` runs it under Relay, solo, with all arguments passed straight through.
 
 ## What the agents get
 

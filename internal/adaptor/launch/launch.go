@@ -28,6 +28,16 @@ type Spec struct {
 	// WithHooks registers Relay's hooks for this launch (tools that have them).
 	WithHooks bool
 	UserArgs  []string // everything after `--`, passed through verbatim
+	// RelayHome is relay's own home directory (relayhome.Paths.Root). Used
+	// only by the agy adaptor, which needs a place for its own lock/marker
+	// files outside the wrapped tool's config; zero-value-safe and ignored
+	// by every other adaptor.
+	RelayHome string
+	// ToolBin is the already-resolved, absolute path of the wrapped tool's
+	// binary for this launch. Used only by the agy adaptor, which execs it
+	// directly (for `agy mcp add/remove`) instead of doing a second PATH
+	// lookup; zero-value-safe and ignored by every other adaptor.
+	ToolBin string
 }
 
 // Plan is the result: how to start the tool.

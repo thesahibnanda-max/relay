@@ -88,6 +88,10 @@ func hasKeyPrefix(kv, key string) bool {
 	return len(kv) > len(key) && kv[:len(key)] == key && kv[len(key)] == '='
 }
 
+// Cleanup is a no-op: Prepare never registers anything outside spec.RunDir,
+// which the caller already removes on exit.
+func (c *CodexAdaptor) Cleanup(spec launch.Spec) error { return nil }
+
 // ScreenRules recognise the dialogs in which Relay must never type.
 func (c *CodexAdaptor) ScreenRules() []state.ScreenRule {
 	return []state.ScreenRule{

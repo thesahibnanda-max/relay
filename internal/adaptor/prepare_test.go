@@ -115,6 +115,7 @@ func TestNonInteractiveRunsAreUntouched(t *testing.T) {
 		"claude":  {{"-p", "hi"}, {"--print", "hi"}, {"mcp", "list"}, {"--version"}, {"doctor"}, {"--help"}},
 		"codex":   {{"exec", "hi"}, {"mcp", "list"}, {"login"}, {"--help"}, {"queue", "--message", "x"}, {"review"}},
 		"copilot": {{"-p", "hi"}, {"--prompt", "hi"}, {"mcp", "list"}, {"--version"}, {"login"}, {"--help"}},
+		"agy":     {{"-p", "hi"}, {"--print", "hi"}, {"mcp", "list"}, {"--version"}, {"install"}, {"--help"}},
 	} {
 		for _, args := range argsets {
 			s := spec(t, "BRIEF", true, args...)

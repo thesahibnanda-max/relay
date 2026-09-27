@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -46,18 +47,26 @@ func buildBinaries(t *testing.T) string {
 		if buildErr != nil {
 			return
 		}
-		for out, pkg := range map[string]string{"relay": "../..", "fakeagent": "../../testdata/fakeagent"} {
-			if b, err := exec.Command("go", "build", "-o", filepath.Join(binDir, out), pkg).CombinedOutput(); err != nil {
+		for out, pkg := range map[string]string{"relay": "../..", "fakeagent": "../../testdata/fakeagent", "fakeagy": "../../testdata/fakeagy"} {
+			if b, err := exec.Command("go", "build", "-o", filepath.Join(binDir, binName(out)), pkg).CombinedOutput(); err != nil {
 				buildErr = &buildFailure{string(b), err}
 				return
 			}
 		}
 		// the fake tool is installed under the names of the real ones
 		for _, name := range []string{"claude", "codex", "copilot"} {
-			if err := os.Symlink(filepath.Join(binDir, "fakeagent"), filepath.Join(binDir, name)); err != nil {
+			if err := os.Symlink(filepath.Join(binDir, binName("fakeagent")), filepath.Join(binDir, binName(name))); err != nil {
 				buildErr = err
 				return
 			}
+		}
+		// agy's own `mcp add`/`mcp remove` subcommands, used only by the gc/
+		// doctor-level tests below - fakeagy has no interactive session mode,
+		// so it does not stand in for `relay agy ...` itself (see fakeagy's
+		// own doc comment).
+		if err := os.Symlink(filepath.Join(binDir, binName("fakeagy")), filepath.Join(binDir, binName("agy"))); err != nil {
+			buildErr = err
+			return
 		}
 	})
 	if buildErr != nil {
@@ -72,6 +81,21 @@ type buildFailure struct {
 }
 
 func (b *buildFailure) Error() string { return b.err.Error() + ": " + b.out }
+
+// binName appends the platform's own executable extension: on Windows,
+// go build -o with an explicit path does NOT auto-append .exe (only the
+// default output name does), and exec.Command can never launch a file
+// lacking one there regardless - confirmed live, via WSL interop against a
+// real Windows binary, and again for real on windows-latest CI (the runRelay
+// path here, not needing a PTY, is the one e2e call path that actually
+// exercises this; every PTY-based test currently skips before reaching it -
+// see the "no pty" skip below).
+func binName(name string) string {
+	if runtime.GOOS == "windows" {
+		return name + ".exe"
+	}
+	return name
+}
 
 // world is an isolated HOME + RELAY_HOME.
 type world struct {
@@ -104,6 +128,7 @@ func newWorld(t *testing.T) *world {
 	}
 	w.env = append(os.Environ(),
 		"HOME="+w.home, "CODEX_HOME="+filepath.Join(w.home, ".codex"), "COPILOT_HOME="+filepath.Join(w.home, ".copilot"),
+		"GEMINI_HOME="+filepath.Join(w.home, ".gemini"),
 		"RELAY_HOME="+w.relay, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"RELAY_ACTIVE=", // never inherit the nesting marker from an outer relay
 	)
@@ -115,7 +140,7 @@ func newWorld(t *testing.T) *world {
 		}
 	})
 	t.Cleanup(func() { // stop the daemon this world started
-		cmd := exec.Command(filepath.Join(bin, "relay"), "daemon", "stop")
+		cmd := exec.Command(filepath.Join(bin, binName("relay")), "daemon", "stop")
 		cmd.Env = w.env
 		cmd.Run()
 	})
@@ -178,7 +203,7 @@ func (w *world) startWithoutAck(tool string, args ...string) *relayProc {
 func (w *world) startWithAck(tool string, ack bool, args ...string) *relayProc {
 	w.t.Helper()
 	a := &relayProc{t: w.t, logPath: filepath.Join(w.t.TempDir(), tool+".jsonl"), done: make(chan struct{})}
-	a.cmd = exec.Command(filepath.Join(w.bin, "relay"), append([]string{tool}, args...)...)
+	a.cmd = exec.Command(filepath.Join(w.bin, binName("relay")), append([]string{tool}, args...)...)
 	a.cmd.Env = append(append([]string(nil), w.env...), "FAKE_LOG="+a.logPath, "FAKE_BUSY_MS=300")
 	a.cmd.Dir = w.t.TempDir()
 	var err error
@@ -303,7 +328,7 @@ type shim struct {
 
 func (w *world) shim(dir string) *shim {
 	w.t.Helper()
-	cmd := exec.Command(filepath.Join(w.bin, "relay"), "mcp", "--dir", dir)
+	cmd := exec.Command(filepath.Join(w.bin, binName("relay")), "mcp", "--dir", dir)
 	cmd.Env = w.env
 	in, _ := cmd.StdinPipe()
 	out, _ := cmd.StdoutPipe()
@@ -363,7 +388,7 @@ func (w *world) agents(session string) map[string]proto.AgentInfo {
 
 func (w *world) runRelay(args ...string) (string, string, int) {
 	w.t.Helper()
-	cmd := exec.Command(filepath.Join(w.bin, "relay"), args...)
+	cmd := exec.Command(filepath.Join(w.bin, binName("relay")), args...)
 	cmd.Env = w.env
 	var o, e bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &o, &e
@@ -717,7 +742,7 @@ func (w *world) hook(dir, event string, payload map[string]any) string {
 	w.t.Helper()
 	payload["hook_event_name"] = event
 	b, _ := json.Marshal(payload)
-	cmd := exec.Command(filepath.Join(w.bin, "relay"), "hook", event, "--dir", dir)
+	cmd := exec.Command(filepath.Join(w.bin, binName("relay")), "hook", event, "--dir", dir)
 	cmd.Env = w.env
 	cmd.Stdin = bytes.NewReader(b)
 	out, err := cmd.Output()
@@ -838,13 +863,13 @@ func TestStopContinueIsBoundedAndHookFailuresAreSilent(t *testing.T) {
 	}
 
 	// hooks against a dead agent, a missing dir or garbage input say nothing and succeed
-	cmd := exec.Command(filepath.Join(w.bin, "relay"), "hook", "Stop", "--dir", "/nonexistent")
+	cmd := exec.Command(filepath.Join(w.bin, binName("relay")), "hook", "Stop", "--dir", "/nonexistent")
 	cmd.Env = w.env
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"Stop"}`)
 	if out, err := cmd.Output(); err != nil || len(out) != 0 {
 		t.Fatalf("a hook must never break the tool: %q %v", out, err)
 	}
-	cmd = exec.Command(filepath.Join(w.bin, "relay"), "hook", "Stop", "--dir", bobDir)
+	cmd = exec.Command(filepath.Join(w.bin, binName("relay")), "hook", "Stop", "--dir", bobDir)
 	cmd.Env = w.env
 	cmd.Stdin = strings.NewReader(`not json`)
 	if out, err := cmd.Output(); err != nil || len(out) != 0 {
@@ -1041,6 +1066,53 @@ func TestGCRetentionCommandsReportAndNeverTouchLiveSessions(t *testing.T) {
 // is given, not race ahead and hand the terminal to the tool - which would
 // make the banner text unrecoverable (the tool switches to its own alternate
 // screen) before anyone has a real chance to copy it.
+// TestGCRemovesStaleAgyMCPRegistration is the CLI-level proof of decision 6:
+// `relay gc` gives a one-command cleanup for a leftover agy MCP registration
+// even when nothing ever relaunches agy on this machine. It exercises the
+// real wiring (msgcmd.go's runGC -> adaptor.AgySweepStale -> the agy
+// package's own locked sweep -> the real `agy mcp remove`, here fakeagy)
+// end to end, not just the underlying package function directly.
+func TestGCRemovesStaleAgyMCPRegistration(t *testing.T) {
+	w := newWorld(t)
+	cfgPath := filepath.Join(w.home, ".gemini", "config", "mcp_config.json")
+	os.MkdirAll(filepath.Dir(cfgPath), 0o755)
+
+	liveDir := t.TempDir()
+	deadDir := filepath.Join(t.TempDir(), "gone")
+	seed := `{"mcpServers":{
+		"relay-live": {"command":"/opt/relay/relay","args":["mcp","--dir","` + filepath.ToSlash(liveDir) + `"],"disabled":false},
+		"relay-dead": {"command":"/opt/relay/relay","args":["mcp","--dir","` + filepath.ToSlash(deadDir) + `"],"disabled":false}
+	}}`
+	if err := os.WriteFile(cfgPath, []byte(seed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// --dry-run must never touch it.
+	out, errs, code := w.runRelay("gc", "--dry-run", "--older-than=1d")
+	if code != 0 || strings.Contains(out, "removed stale agy") {
+		t.Fatalf("dry run must not remove anything (%d): %q %q", code, out, errs)
+	}
+	data, _ := os.ReadFile(cfgPath)
+	if !strings.Contains(string(data), "relay-dead") {
+		t.Fatal("dry run must leave the stale entry in place")
+	}
+
+	out, errs, code = w.runRelay("gc")
+	if code != 0 || !strings.Contains(out, "removed stale agy MCP server relay-dead") {
+		t.Fatalf("(%d) out=%q errs=%q", code, out, errs)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "relay-dead") {
+		t.Fatalf("stale entry must be gone: %s", data)
+	}
+	if !strings.Contains(string(data), "relay-live") {
+		t.Fatalf("live entry must survive: %s", data)
+	}
+}
+
 func TestSessionBannerPausesForAcknowledgmentBeforeHandingOffToTheTool(t *testing.T) {
 	w := newWorld(t)
 	alice := w.startWithoutAck("claude", "orchestrator", "--session=NEW_LOCAL", "--name=alice")

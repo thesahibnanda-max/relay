@@ -55,6 +55,20 @@ func (p Paths) SpawnLockPath() string {
 func (p Paths) PidPath() string   { return filepath.Join(p.RunDir(), "relayd.pid") }
 func (p Paths) DaemonLog() string { return filepath.Join(p.LogDir(), "relayd.log") }
 
+// AgyMCPLockPath guards every read-modify-write of agy's own
+// ~/.gemini/config/mcp_config.json - a file relay does not own and agy itself
+// never locks. Kept in relay's home, never inside ~/.gemini, so the lock file
+// is not itself a footprint item next to agy's own config.
+func (p Paths) AgyMCPLockPath() string { return filepath.Join(p.RunDir(), "agy-mcp.lock") }
+
+// AgyOriginalSnapshotPath records, once, whether ~/.gemini/config/mcp_config.json
+// existed before relay ever touched it on this machine - see the agy
+// adaptor's restoration logic for why this is the only fact worth persisting
+// (content fidelity is already handled by agy's own `mcp remove`).
+func (p Paths) AgyOriginalSnapshotPath() string {
+	return filepath.Join(p.RunDir(), "agy-mcp-original.json")
+}
+
 // SocketPath is run/relayd.sock, unless that would exceed the OS limit on
 // unix socket paths; then it is a short, stable path under the temp dir
 // derived from the root (so every process computes the same one).

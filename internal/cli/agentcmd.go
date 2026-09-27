@@ -84,7 +84,7 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, in io.Reader, errw io.W
 			if id.Resumed {
 				who = fmt.Sprintf("welcome back, %s (%s) — resumed", id.Agent.Name, id.Agent.Role)
 			}
-			fmt.Fprintf(errw, "relay: session %s · %s\nrelay: others join with: relay <claude|codex|copilot> [role] --session=%s\n",
+			fmt.Fprintf(errw, "relay: session %s · %s\nrelay: others join with: relay <claude|codex|copilot|agy> [role] --session=%s\n",
 				id.Session.ID, who, id.Session.ID)
 			// The tool switches the terminal to its own alternate screen right
 			// after this, hiding the lines above for good (see issue #41) - a
@@ -126,7 +126,7 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, in io.Reader, errw io.W
 	col.Bind(lk, a.Name(), role.Name)
 	col.SetUploadTurns(p.Record != RecordOff)
 
-	toolArgs, attach, cleanup := prepareLaunch(a, p, role, lk, shared, paths, perr == nil, col, errw)
+	toolArgs, attach, cleanup := prepareLaunch(a, p, role, lk, shared, paths, perr == nil, col, errw, bin)
 	defer cleanup()
 
 	code, err := agent.Run(agent.Config{
@@ -482,7 +482,7 @@ func friendly(err error, p Parsed) string {
 // simply runs as the user typed it. The returned cleanup is idempotent and
 // removes everything created here.
 func prepareLaunch(a adaptor.Adaptor, p Parsed, role roles.Role, lk collab.Link, shared bool,
-	paths relayhome.Paths, homeOK bool, col *collab.Session, errw io.Writer) (args []string, attach bool, cleanup func()) {
+	paths relayhome.Paths, homeOK bool, col *collab.Session, errw io.Writer, bin string) (args []string, attach bool, cleanup func()) {
 	args, cleanup = p.ToolArgs, func() {}
 	if !shared && p.Role == "" {
 		return // nothing to add: a plain solo run stays byte-for-byte what the user typed
@@ -498,6 +498,7 @@ func prepareLaunch(a adaptor.Adaptor, p Parsed, role roles.Role, lk collab.Link,
 	}
 	spec := adaptor.LaunchSpec{AgentName: id.Agent.Name, Session: id.Session.ID, WithMCP: shared, WithHooks: shared, UserArgs: p.ToolArgs}
 	spec.Briefing = collab.Briefing(id, role, shared)
+	spec.RelayHome, spec.ToolBin = paths.Root, bin
 
 	var once sync.Once
 	var runDir string
@@ -506,6 +507,12 @@ func prepareLaunch(a adaptor.Adaptor, p Parsed, role roles.Role, lk collab.Link,
 		once.Do(func() {
 			if srv != nil {
 				srv.Close()
+			}
+			// Reverse whatever Prepare registered outside runDir (today, only
+			// the agy adaptor does this) before runDir itself - and the marker
+			// file inside it Cleanup needs to find its own entry - disappears.
+			if err := a.Cleanup(spec); err != nil {
+				fmt.Fprintf(errw, "relay: note: cleaning up after %s: %v\n", a.Name(), err)
 			}
 			if runDir != "" {
 				_ = os.RemoveAll(runDir)
