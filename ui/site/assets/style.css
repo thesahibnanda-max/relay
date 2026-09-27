@@ -63,7 +63,11 @@ html { scroll-behavior: smooth; scroll-padding-top: 5rem; -webkit-text-size-adju
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 body {
   margin: 0;
-  background: var(--bg);
+  background:
+    radial-gradient(52rem 28rem at 18% -8%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 70%),
+    radial-gradient(38rem 24rem at 100% 10%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 65%),
+    var(--bg);
+  background-attachment: fixed;
   color: var(--text);
   font-family: var(--font-sans);
   font-size: 1rem;
@@ -172,6 +176,10 @@ code:not(pre code) {
 .tool-chip {
   display: inline-grid; place-items: center; width: 2.25rem; height: 2.25rem;
   background: var(--surface); border: 1px solid var(--line); border-radius: 10px; color: var(--muted);
+  transition: transform .2s ease, border-color .2s ease, color .2s ease;
+}
+@media (hover: hover) {
+  .tool-chip:hover { transform: translateY(-2px); border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); color: var(--text); }
 }
 @media (min-width: 62rem) {
   .hero { grid-template-columns: 1.15fr .85fr; align-items: center; gap: 3rem; }
@@ -198,7 +206,11 @@ code:not(pre code) {
 /* terminal mock */
 .term {
   margin: 0; min-width: 0; background: var(--surface); border: 1px solid var(--line);
-  border-radius: var(--radius); overflow: hidden; box-shadow: 0 20px 50px -25px rgb(0 0 0 / .55);
+  border-radius: var(--radius); overflow: hidden;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent),
+    0 35px 70px -35px color-mix(in srgb, var(--accent) 45%, transparent),
+    0 20px 50px -25px rgb(0 0 0 / .55);
 }
 .term-bar { display: flex; align-items: center; gap: .4rem; padding: .7rem .9rem; border-bottom: 1px solid var(--line); background: var(--surface-2); }
 .term-bar i { width: 10px; height: 10px; border-radius: 50%; background: var(--line); display: block; }
@@ -217,6 +229,14 @@ code:not(pre code) {
 .cards[hidden] { display: none; }
 .card {
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.25rem 1.25rem 1.4rem;
+  transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease;
+}
+@media (hover: hover) {
+  .card:hover {
+    transform: translateY(-3px);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+    box-shadow: 0 16px 34px -22px color-mix(in srgb, var(--accent) 45%, transparent);
+  }
 }
 .card h3 { margin-bottom: .55rem; }
 .card p { color: var(--muted); }
@@ -227,7 +247,7 @@ code:not(pre code) {
 }
 .agent-card h3 { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 .agent-card .code { margin-top: .9rem; }
-.tag-new {
+.tag-experimental {
   display: inline-block; font-family: var(--font-mono); font-size: .68rem; font-weight: 700;
   letter-spacing: .06em; text-transform: uppercase; padding: .2rem .5rem; border-radius: 999px;
   color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent);
@@ -237,9 +257,9 @@ code:not(pre code) {
    WCAG AA's 4.5:1 for text this size (measured ~4.25:1) - darken the text only
    in light theme, same override pattern already used for the sun/moon icons. */
 @media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) .tag-new { color: #7c3d00; }
+  :root:not([data-theme="dark"]) .tag-experimental { color: #7c3d00; }
 }
-:root[data-theme="light"] .tag-new { color: #7c3d00; }
+:root[data-theme="light"] .tag-experimental { color: #7c3d00; }
 @media (min-width: 40rem) { .cards-4, .cards-3 { grid-template-columns: repeat(2, 1fr); } }
 @media (min-width: 52rem) {
   .cards { grid-template-columns: repeat(3, 1fr); }
@@ -251,6 +271,14 @@ code:not(pre code) {
 .steps li {
   counter-increment: step; position: relative; min-width: 0;
   background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 1.25rem 1.25rem 1.4rem 1.25rem;
+  transition: transform .2s ease, border-color .2s ease, box-shadow .2s ease;
+}
+@media (hover: hover) {
+  .steps li:hover {
+    transform: translateY(-3px);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+    box-shadow: 0 16px 34px -22px color-mix(in srgb, var(--accent) 45%, transparent);
+  }
 }
 .steps li::before {
   content: counter(step); display: grid; place-items: center; width: 2rem; height: 2rem; margin-bottom: .8rem;

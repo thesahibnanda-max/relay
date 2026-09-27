@@ -13,17 +13,17 @@ Be aware of the difference between "built and tested" and "should work".
 
 **The mature, most battle-tested combination is macOS, Linux or WSL with Claude Code, Codex or
 GitHub Copilot CLI** - that's where the great majority of real-world use and testing has happened.
-Antigravity CLI (`agy`) support and native Windows support are both newer additions with less
-real-world mileage behind them. They're expected to work, but if something looks wrong on either,
-please [open a GitHub issue](https://github.com/thesahibnanda-max/relay/issues/new) - real reports
-from real use are exactly what moves them from "newer" to "proven."
+**Antigravity CLI (`agy`) support and native Windows support are both marked Experimental**: they
+work and are covered by CI, but they're new enough to have real rough edges still to find. If
+something looks wrong on either, please [open a GitHub issue](https://github.com/thesahibnanda-max/relay/issues/new) -
+real reports from real use are exactly what moves something from Experimental to proven.
 
 | Platform | Status |
 |---|---|
 | **WSL** | The main test environment. Every feature has been run here, including live with real Claude Code, real Codex and real GitHub Copilot CLI: a full Relay session with a real, authenticated Copilot CLI has been run end-to-end, including the MCP tools working with no permission prompt, the briefing arriving correctly, and a teammate's message being correctly held (not typed) while Copilot's own dialogs were open. |
 | **Linux (regular)** | Very likely fine, because WSL is Linux. Not yet run on a non-WSL Linux machine. |
 | **macOS** | Automated CI runs and passes on macOS on every pull request. Real-machine use is newer than on WSL, so treat an early run as a test; the macOS-specific part (checking who is on the other end of a connection) has less real-world mileage than the Linux one. |
-| **Windows (native)** | Supported - `relay` runs directly, no WSL required - but newer than the other platforms: it shipped more recently and has had less real-world use. Automated CI runs and passes on Windows on every pull request, but if you hit something odd, please open an issue. |
+| **Windows (native)** 🧪 Experimental | `relay` runs directly, no WSL required, and CI runs and passes on Windows on every pull request - but it shipped more recently than the other platforms and has had far less real-world use. If you hit something odd, please open an issue. |
 
 Two more caveats:
 
@@ -33,7 +33,7 @@ Two more caveats:
   of Relay may need adjusting - Copilot CLI in particular ships near-daily updates, and its per-session
   event log is explicitly undocumented and unstable upstream, so re-verify after upgrading it. `agy`'s own
   conversation-database schema and MCP config format are likewise undocumented upstream, and `agy` support
-  overall is the newest of the four adaptors - see the note above.
+  overall is marked 🧪 Experimental, the newest of the four adaptors - see the note above.
 * **Claude's permission prompts.** They were never seen on screen during testing, because the test machine's
   Claude runs in "bypass permissions" mode. Relay has protection for them, but it was only tested against
   Codex's and Copilot's real prompts.
