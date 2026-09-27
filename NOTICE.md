@@ -21,10 +21,11 @@ Be aware of the difference between "built and tested" and "should work".
 Two more caveats:
 
 * **Tool versions.** Relay depends on how the tools behave: their hook formats, their log-file formats and
-  what their screens look like. It was built and verified against **Claude Code 2.1.282**, **Codex 0.155.1**
-  and **GitHub Copilot CLI 1.0.88**. If a tool changes in an update, parts of Relay may need adjusting -
-  Copilot CLI in particular ships near-daily updates, and its per-session event log is explicitly
-  undocumented and unstable upstream, so re-verify after upgrading it.
+  what their screens look like. It was built and verified against **Claude Code 2.1.282**, **Codex 0.155.1**,
+  **GitHub Copilot CLI 1.0.88** and **Antigravity CLI (`agy`) 1.2.11**. If a tool changes in an update, parts
+  of Relay may need adjusting - Copilot CLI in particular ships near-daily updates, and its per-session
+  event log is explicitly undocumented and unstable upstream, so re-verify after upgrading it. `agy`'s own
+  conversation-database schema and MCP config format are likewise undocumented upstream.
 * **Claude's permission prompts.** They were never seen on screen during testing, because the test machine's
   Claude runs in "bypass permissions" mode. Relay has protection for them, but it was only tested against
   Codex's and Copilot's real prompts.
@@ -33,8 +34,8 @@ Two more caveats:
 
 ## What Relay is
 
-Normally you run Claude in one terminal, Codex in another, and Copilot CLI in a third, and they cannot
-talk to each other.
+Normally you run Claude in one terminal, Codex in another, and Copilot CLI or Antigravity CLI in a
+third, and they cannot talk to each other.
 **Relay is a layer that lets AI coding assistants in separate terminals work like a team.**
 
 You launch each assistant through `relay`, and each terminal looks and behaves exactly as before. The
@@ -176,13 +177,28 @@ behaves exactly as before, even if you uninstall Relay.
 * The tools' own history (Claude transcripts, Codex logs, Copilot's session events) will of course contain
   what happened during a Relay session. That is the tool's own record, not a Relay setting.
 
+**One documented exception: Google's Antigravity CLI (`agy`).** Unlike the other three tools, `agy` has no
+way at all to register an MCP server for just one launch - the only mechanism it offers, `agy mcp add`, always
+writes into its own single, global, permanent config file (`~/.gemini/config/mcp_config.json`). Relay uses
+that mechanism anyway, because it is the only way to give an `agy` agent the same abilities as the others,
+but keeps it as close to "zero footprint" as that allows:
+
+* It registers a uniquely-named entry (never a fixed name, since `agy`'s config is shared by every `agy`
+  agent you have running at once) and removes it the moment that one agent exits.
+* If Relay is killed outright (`kill -9`, a crash, a power loss) before it can clean up, the leftover entry
+  is inert - it points at files Relay already deleted - and is removed automatically the next time you run
+  `relay agy ...` or `relay gc`. `relay doctor` also flags one if you run it first.
+* Every change is made under Relay's own lock, so it can never race or corrupt `agy`'s config even with
+  several `agy` agents starting or stopping at once (a real bug in `agy` itself otherwise: concurrent
+  `agy mcp add` calls with no lock of its own can silently lose one).
+
 ---
 
 ## The commands
 
 | Command | What it does |
 |---|---|
-| `relay claude ...` / `relay codex ...` / `relay copilot ...` | Run an assistant (see above). |
+| `relay claude ...` / `relay codex ...` / `relay copilot ...` / `relay agy ...` | Run an assistant (see above). |
 | `relay ls` | Show sessions and who is in them. |
 | `relay session new` / `relay session end <id>` | Create or close a session. |
 | `relay send <name> <text>` | Send a message yourself (`-` reads the text from input). |
@@ -192,7 +208,7 @@ behaves exactly as before, even if you uninstall Relay.
 | `relay doctor` | Health check: permissions, background service, database, tools installed, and a scan for stray Relay files. |
 | `relay daemon status` / `relay daemon stop` | Control the background service (it starts itself when needed). |
 | `relay version` | Show the version. |
-| Shim mode | Symlink `claude`, `codex` or `copilot` to `relay` earlier on your PATH and typing `claude` runs it under Relay, on its own. |
+| Shim mode | Symlink `claude`, `codex`, `copilot` or `agy` to `relay` earlier on your PATH and typing `claude` runs it under Relay, on its own. |
 
 ---
 
