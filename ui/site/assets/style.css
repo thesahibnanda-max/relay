@@ -233,6 +233,13 @@ code:not(pre code) {
   color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent);
   border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
 }
+/* --warn's light-theme value (#b45309) on this pill's pale tint falls just under
+   WCAG AA's 4.5:1 for text this size (measured ~4.25:1) - darken the text only
+   in light theme, same override pattern already used for the sun/moon icons. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) .tag-new { color: #7c3d00; }
+}
+:root[data-theme="light"] .tag-new { color: #7c3d00; }
 @media (min-width: 40rem) { .cards-4, .cards-3 { grid-template-columns: repeat(2, 1fr); } }
 @media (min-width: 52rem) {
   .cards { grid-template-columns: repeat(3, 1fr); }
