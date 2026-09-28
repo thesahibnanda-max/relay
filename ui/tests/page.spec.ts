@@ -69,7 +69,12 @@ test('copy button copies the exact command', async ({ page, context, baseURL, br
 async function setTheme(page: Page, mode: 'system' | 'light' | 'dark') {
   const menu = page.locator('#menu-btn');
   if (await menu.isVisible()) {
-    if ((await menu.getAttribute('aria-expanded')) !== 'true') await menu.click();
+    // iOS drops a tap that lands while the page is still moving (e.g. mid smooth-scroll),
+    // so make sure the menu really opened, and tap again if it did not.
+    await expect(async () => {
+      if ((await menu.getAttribute('aria-expanded')) !== 'true') await menu.click();
+      await expect(page.locator('#site-nav')).toBeVisible({ timeout: 1000 });
+    }).toPass({ timeout: 10000 });
     await page.locator(`[data-theme-set="${mode}"]`).click();
     await page.keyboard.press('Escape');
   } else {
