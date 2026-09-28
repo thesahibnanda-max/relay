@@ -1,4 +1,5 @@
 // Runs before first paint: marks the page as script-enabled and applies a saved theme choice.
+// "system" (or nothing saved) leaves <html> without data-theme, so CSS follows the OS.
 (function () {
   var root = document.documentElement;
   root.classList.add('js');
