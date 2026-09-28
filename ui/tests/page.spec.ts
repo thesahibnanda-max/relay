@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 const REPO = 'https://github.com/thesahibnanda-max/relay';
 
@@ -25,9 +25,12 @@ test('has the expected structure', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveTitle(/Relay/);
   await expect(page.locator('h1')).toHaveCount(1);
-  for (const id of ['problem', 'solution', 'demo', 'install']) {
+  for (const id of ['how', 'demo', 'install']) {
     await expect(page.locator(`section#${id}`)).toHaveCount(1);
   }
+  // the problem and the solution are the two slides of one carousel
+  await expect(page.locator('section#how #problem.slide')).toHaveCount(1);
+  await expect(page.locator('section#how #solution.slide')).toHaveCount(1);
   await expect(page.locator('html')).toHaveAttribute('lang', 'en');
   await expect(page.locator('meta[name="viewport"]')).toHaveCount(1);
 });
@@ -61,24 +64,293 @@ test('copy button copies the exact command', async ({ page, context, baseURL, br
   await expect(btn.locator('.copy-label')).toHaveText('Copy', { timeout: 5000 });
 });
 
-test('theme toggle switches and remembers the choice', async ({ page }) => {
+// The theme control is a System / Light / Dark radio group. On small screens it
+// lives in the menu, so open that first when the menu button is showing.
+async function setTheme(page: Page, mode: 'system' | 'light' | 'dark') {
+  const menu = page.locator('#menu-btn');
+  if (await menu.isVisible()) {
+    if ((await menu.getAttribute('aria-expanded')) !== 'true') await menu.click();
+    await page.locator(`[data-theme-set="${mode}"]`).click();
+    await page.keyboard.press('Escape');
+  } else {
+    await page.locator(`[data-theme-set="${mode}"]`).click();
+  }
+}
+
+const DARK_BG = 'rgb(10, 7, 20)';
+const LIGHT_BG = 'rgb(247, 244, 255)';
+
+test('theme switch: light and dark are remembered, system follows the OS again', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'dark' });
   await page.goto('/');
-  const html = page.locator('html');
-  await page.locator('#theme-btn').click();
+  const html = page.locator('html'), body = page.locator('body');
+  await expect(html).not.toHaveAttribute('data-theme', /.+/);
+  await expect(page.locator('[data-theme-set="system"]')).toHaveAttribute('aria-checked', 'true');
+  await setTheme(page, 'light');
   await expect(html).toHaveAttribute('data-theme', 'light');
-  await expect(page.locator('body')).toHaveCSS('background-color', 'rgb(250, 250, 247)');
+  await expect(body).toHaveCSS('background-color', LIGHT_BG);
   await page.reload();
   await expect(html).toHaveAttribute('data-theme', 'light');
-  await page.locator('#theme-btn').click();
+  await expect(page.locator('[data-theme-set="light"]')).toHaveAttribute('aria-checked', 'true');
+  await setTheme(page, 'dark');
   await expect(html).toHaveAttribute('data-theme', 'dark');
-  await expect(page.locator('body')).toHaveCSS('background-color', 'rgb(10, 11, 13)');
+  await expect(body).toHaveCSS('background-color', DARK_BG);
+  await setTheme(page, 'system');
+  await expect(html).not.toHaveAttribute('data-theme', /.+/);
+  await page.emulateMedia({ colorScheme: 'light' });
+  await expect(body).toHaveCSS('background-color', LIGHT_BG);
+  await page.reload();
+  await expect(html).not.toHaveAttribute('data-theme', /.+/);
 });
 
 test('follows the system light theme by default', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'light' });
   await page.goto('/');
-  await expect(page.locator('body')).toHaveCSS('background-color', 'rgb(250, 250, 247)');
+  await expect(page.locator('body')).toHaveCSS('background-color', LIGHT_BG);
+});
+
+test('follows the system dark theme by default', async ({ page }) => {
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.goto('/');
+  await expect(page.locator('body')).toHaveCSS('background-color', DARK_BG);
+});
+
+test('the theme radio group works with the arrow keys', async ({ page }) => {
+  test.skip((page.viewportSize()?.width ?? 0) < 768, 'the switch sits in the menu on small screens');
+  await page.emulateMedia({ colorScheme: 'dark' });
+  await page.goto('/');
+  await page.locator('[data-theme-set="system"]').focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await expect(page.locator('[data-theme-set="light"]')).toBeFocused();
+  await page.keyboard.press('ArrowRight');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+});
+
+test.describe('the four supported CLIs', () => {
+  const agents = [
+    { cls: 'a-claude', name: 'Claude Code', symbol: '#i-claude' },
+    { cls: 'a-codex', name: 'Codex', symbol: '#i-codex' },
+    { cls: 'a-copilot', name: 'GitHub Copilot CLI', symbol: '#i-copilot' },
+    { cls: 'a-agy', name: 'Antigravity CLI', symbol: '#i-agy' },
+  ];
+  for (const scheme of ['dark', 'light'] as const) {
+    test(`each has a card with its real icon, rendered, in the ${scheme} theme`, async ({ page }) => {
+      await page.emulateMedia({ colorScheme: scheme });
+      await page.goto('/');
+      for (const a of agents) {
+        const card = page.locator(`#agents .${a.cls}`);
+        await expect(card.locator('h3')).toContainText(a.name);
+        const icon = card.locator('.agent-icon svg');
+        await expect(icon.locator('use')).toHaveAttribute('href', a.symbol);
+        const box = (await icon.boundingBox())!;
+        expect(box.width).toBeGreaterThanOrEqual(28);
+        expect(box.height).toBeGreaterThanOrEqual(28);
+      }
+      // every symbol the page references exists in the sprite
+      for (const a of agents) await expect(page.locator(`symbol${a.symbol}`)).toHaveCount(1);
+      await expect(page.locator('#agents .a-agy .tag-experimental')).toContainText('Experimental');
+    });
+  }
+
+  test('all four sit in the hero constellation with visible names', async ({ page }) => {
+    await page.goto('/');
+    for (const [n, label] of [['n-claude', 'Claude Code'], ['n-codex', 'Codex'], ['n-copilot', 'Copilot'], ['n-agy', 'Antigravity']]) {
+      await expect(page.locator(`.constellation .${n} .node-label`)).toContainText(label);
+      await expect(page.locator(`.constellation .${n} svg`)).toBeVisible();
+    }
+  });
+});
+
+test.describe('problem -> solution carousel', () => {
+  const problem = (page: Page) => page.locator('#problem');
+  const solution = (page: Page) => page.locator('#solution');
+
+  test('opens on the problem, with the solution slide out of reach', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('#problem .slide-title')).toContainText('island');
+    await expect(page.locator('.btn-add')).toHaveText(/Add Relay/);
+    await expect(problem(page)).toHaveAttribute('aria-hidden', 'false');
+    await expect(solution(page)).toHaveAttribute('aria-hidden', 'true');
+    await expect(solution(page)).toHaveAttribute('inert', '');
+    await expect(page.locator('#step-problem')).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('#solution .sea')).not.toHaveClass(/\blit\b/);
+  });
+
+  test('"Add Relay" slides to the solution, brings in the boat and lights every agent', async ({ page, browserName }) => {
+    await page.goto('/');
+    await page.locator('.btn-add').click();
+    await expect(solution(page)).toHaveAttribute('aria-hidden', 'false');
+    await expect(problem(page)).toHaveAttribute('inert', '');
+    await expect(page.locator('#step-solution')).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('#solution .slide-title')).toContainText('boat');
+    await expect(page.locator('.btn-add')).toHaveText(/Remove Relay/);
+    // The button stays put under the tabs, so focus stays on it (Safari never focuses a
+    // button on a mouse click, so there is nothing to check there).
+    if (browserName !== 'webkit') await expect(page.locator('.btn-add')).toBeFocused();
+    await expect(page.locator('#solution .sea')).toHaveClass(/\blit\b/);
+    // once the boat has passed, all four islands are in full colour
+    for (const n of [1, 2, 3, 4]) {
+      await expect.poll(() => page.locator(`#solution .isl-${n} .island-tile`).evaluate((e) => getComputedStyle(e).filter), { timeout: 6000 }).toBe('none');
+    }
+    const sea = (await page.locator('#solution .sea').boundingBox())!;
+    const boat = (await page.locator('#solution .boat').boundingBox())!;
+    expect(boat.x).toBeGreaterThanOrEqual(sea.x - 1);
+    expect(boat.x + boat.width).toBeLessThanOrEqual(sea.x + sea.width + 1);
+    // the solution slide is actually on screen, the problem slide is not
+    const vw = page.viewportSize()!.width;
+    const sBox = (await page.locator('#solution .slide-copy').boundingBox())!;
+    expect(sBox.x).toBeGreaterThanOrEqual(0);
+    expect(sBox.x).toBeLessThan(vw);
+  });
+
+  test('"Remove Relay" goes back to the problem, and the islands go dark again', async ({ page }) => {
+    await page.goto('/');
+    await page.locator('.btn-add').click();
+    await page.locator('.btn-add').click();
+    await expect(problem(page)).toHaveAttribute('aria-hidden', 'false');
+    await expect(page.locator('.btn-add')).toHaveText(/Add Relay/);
+    await expect(page.locator('#solution .sea')).not.toHaveClass(/\blit\b/);
+  });
+
+  test('the stepper works with the mouse and the arrow keys', async ({ page }) => {
+    await page.goto('/');
+    await page.locator('#step-solution').click();
+    await expect(solution(page)).toHaveAttribute('aria-hidden', 'false');
+    await page.locator('#step-solution').press('ArrowLeft');
+    await expect(page.locator('#step-problem')).toBeFocused();
+    await expect(problem(page)).toHaveAttribute('aria-hidden', 'false');
+    await page.locator('#step-problem').press('End');
+    await expect(solution(page)).toHaveAttribute('aria-hidden', 'false');
+  });
+
+  test('the Add Relay button sits right under the problem / solution tabs', async ({ page }) => {
+    await page.goto('/');
+    const tabs = (await page.locator('.stepper').boundingBox())!;
+    const btn = (await page.locator('.btn-add').boundingBox())!;
+    expect(btn.y).toBeGreaterThan(tabs.y + tabs.height - 1);
+    expect(btn.y - (tabs.y + tabs.height)).toBeLessThan(24);
+    const first = (await page.locator('#problem .slide-copy').boundingBox())!;
+    expect(first.y).toBeGreaterThan(btn.y + btn.height - 1);
+  });
+
+  test('a reload after switching always opens on the problem again', async ({ page }) => {
+    await page.goto('/');
+    await page.locator('.btn-add').click();
+    await expect(solution(page)).toHaveAttribute('aria-hidden', 'false');
+    await page.reload();
+    await expect(problem(page)).toHaveAttribute('aria-hidden', 'false');
+    await expect(solution(page)).toHaveAttribute('aria-hidden', 'true');
+  });
+
+  test('even a link straight to #solution tells the story from the problem', async ({ page }) => {
+    await page.goto('/#solution');
+    await expect(problem(page)).toHaveAttribute('aria-hidden', 'false');
+    await expect(solution(page)).toHaveAttribute('aria-hidden', 'true');
+  });
+
+  test('a horizontal swipe switches slides', async ({ page }) => {
+    await page.goto('/');
+    const sea = page.locator('#problem .sea');
+    await sea.scrollIntoViewIfNeeded();
+    const b = (await sea.boundingBox())!;
+    const y = b.y + b.height / 2;
+    await page.mouse.move(b.x + b.width * .8, y);
+    await page.mouse.down();
+    await page.mouse.move(b.x + b.width * .2, y + 5, { steps: 6 });
+    await page.mouse.up();
+    await expect(solution(page)).toHaveAttribute('aria-hidden', 'false');
+  });
+
+  test('with reduced motion the solution is lit straight away, with the boat in the middle', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.goto('/');
+    await page.locator('.btn-add').click();
+    for (const n of [1, 2, 3, 4]) {
+      expect(await page.locator(`#solution .isl-${n} .island-tile`).evaluate((e) => getComputedStyle(e).filter)).toBe('none');
+    }
+    expect(await page.evaluate(() => document.getAnimations().length)).toBe(0);
+    const sea = (await page.locator('#solution .sea').boundingBox())!;
+    const boat = (await page.locator('#solution .boat').boundingBox())!;
+    expect(Math.abs(boat.x + boat.width / 2 - (sea.x + sea.width / 2))).toBeLessThan(sea.width * .1);
+  });
+});
+
+test.describe('the four perks on the solution slide', () => {
+  const keys = ['mess', 'polite', 'captain', 'private'];
+  async function toSolution(page: Page) {
+    await page.goto('/');
+    await page.locator('.btn-add').click();
+    await expect(page.locator('#solution')).toHaveAttribute('aria-hidden', 'false');
+  }
+
+  test('each opens its own description, one at a time, pointing at its chip', async ({ page }) => {
+    await toSolution(page);
+    for (const k of keys) {
+      const btn = page.locator(`#perk-btn-${k}`), detail = page.locator(`#perk-${k}`);
+      await btn.click();
+      await expect(btn).toHaveAttribute('aria-expanded', 'true');
+      await expect(detail).toBeVisible();
+      await expect(detail.locator('.perk-detail-text')).not.toBeEmpty();
+      for (const other of keys.filter((o) => o !== k)) {
+        await expect(page.locator(`#perk-btn-${other}`)).toHaveAttribute('aria-expanded', 'false');
+        await expect(page.locator(`#perk-${other}`)).toBeHidden();
+      }
+      // the pointer sits over the chip that opened it
+      const b = (await btn.boundingBox())!, wrap = (await page.locator('.perks-wrap').boundingBox())!;
+      const ax = parseFloat(await detail.evaluate((e) => getComputedStyle(e).getPropertyValue('--ax')));
+      expect(Math.abs(wrap.x + ax - (b.x + b.width / 2))).toBeLessThan(b.width / 2);
+    }
+  });
+
+  test('tapping the same chip again, Esc, a click elsewhere or changing slide all close it', async ({ page }) => {
+    await toSolution(page);
+    const btn = page.locator('#perk-btn-captain'), detail = page.locator('#perk-captain');
+    await btn.click();
+    await btn.click();
+    await expect(detail).toBeHidden();
+    await btn.click();
+    await page.keyboard.press('Escape');
+    await expect(detail).toBeHidden();
+    await expect(btn).toBeFocused();
+    await btn.click();
+    await page.locator('#solution .slide-title').click();
+    await expect(detail).toBeHidden();
+    await btn.click();
+    await page.locator('.btn-add').click(); // Remove Relay
+    await expect(page.locator('#problem')).toHaveAttribute('aria-hidden', 'false');
+    await expect(btn).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  test('an open description floats: the slide does not grow', async ({ page }) => {
+    await toSolution(page);
+    await page.waitForTimeout(800);
+    const before = (await page.locator('.carousel-viewport').boundingBox())!.height;
+    await page.locator('#perk-btn-mess').click();
+    await page.waitForTimeout(400);
+    const after = (await page.locator('.carousel-viewport').boundingBox())!.height;
+    expect(Math.abs(after - before)).toBeLessThan(1);
+  });
+});
+
+test('with reduced motion nothing animates and everything is visible', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/');
+  await page.waitForLoadState('networkidle');
+  expect(await page.evaluate(() => document.getAnimations().length)).toBe(0);
+  for (const sel of ['#problem .card', '#agents .card', '.term .ln']) {
+    const hidden = await page.locator(sel).evaluateAll((els) => els.filter((e) => {
+      const cs = getComputedStyle(e);
+      return cs.opacity !== '1' || cs.visibility !== 'visible';
+    }).length);
+    expect(hidden, sel).toBe(0);
+  }
+});
+
+test('the hero names the detected system and links to the others', async ({ page }) => {
+  await page.goto('/'); // this file pins a macOS user agent
+  await expect(page.locator('[data-os-label]')).toHaveText('Detected: macOS');
+  await expect(page.locator('.os-pill a[href="#install"]')).toBeVisible();
 });
 
 test('install tabs switch panels with mouse and keyboard', async ({ page }) => {
@@ -187,7 +459,8 @@ test.describe('demo screenshot', () => {
   for (const kind of ['dark', 'light'] as const) {
     test(`${kind} version is a small WebP with a PNG fallback and a full-size link`, async ({ page }) => {
       await page.goto('/');
-      const frame = page.locator(`#demo .shot-${kind}`);
+    await page.locator('#demo-tab-local').click();
+      const frame = page.locator(`#demo-local .shot-${kind}`);
       const img = frame.locator('img');
       const alt = await img.getAttribute('alt');
       expect(alt!.length).toBeGreaterThan(40);
@@ -211,11 +484,12 @@ test.describe('demo screenshot', () => {
   test('the dark image shows in dark mode and the light one in light mode', async ({ page }) => {
     await page.emulateMedia({ colorScheme: 'dark' });
     await page.goto('/');
-    await expect(page.locator('#demo .shot-dark')).toBeVisible();
-    await expect(page.locator('#demo .shot-light')).toBeHidden();
+    await page.locator('#demo-tab-local').click();
+    await expect(page.locator('#demo-local .shot-dark')).toBeVisible();
+    await expect(page.locator('#demo-local .shot-light')).toBeHidden();
     await page.emulateMedia({ colorScheme: 'light' });
-    await expect(page.locator('#demo .shot-light')).toBeVisible();
-    await expect(page.locator('#demo .shot-dark')).toBeHidden();
+    await expect(page.locator('#demo-local .shot-light')).toBeVisible();
+    await expect(page.locator('#demo-local .shot-dark')).toBeHidden();
   });
 
   test('the theme toggle switches the image too, and only the visible one is downloaded', async ({ page }) => {
@@ -223,24 +497,26 @@ test.describe('demo screenshot', () => {
     const loaded: string[] = [];
     page.on('response', (r) => { if (/\/(light)?demo[^/]*\.(webp|png)$/.test(r.url())) loaded.push(r.url().split('/').pop()!); });
     await page.goto('/');
-    const section = page.locator('#demo');
+    await page.locator('#demo-tab-local').click();
+    const section = page.locator('#demo-local');
     await section.scrollIntoViewIfNeeded();
-    await expect.poll(() => page.locator('#demo .shot-dark img').evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
+    await expect.poll(() => page.locator('#demo-local .shot-dark img').evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
     expect(loaded.filter((f) => f.startsWith('lightdemo'))).toEqual([]);
-    await page.locator('#theme-btn').click(); // dark -> light
-    await expect(page.locator('#demo .shot-light')).toBeVisible();
-    await expect(page.locator('#demo .shot-dark')).toBeHidden();
-    const light = page.locator('#demo .shot-light img');
+    await setTheme(page, 'light');
+    await expect(page.locator('#demo-local .shot-light')).toBeVisible();
+    await expect(page.locator('#demo-local .shot-dark')).toBeHidden();
+    const light = page.locator('#demo-local .shot-light img');
     await light.scrollIntoViewIfNeeded();
     await expect.poll(() => light.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
     expect(await light.evaluate((el: HTMLImageElement) => el.currentSrc)).toMatch(/lightdemo[^/]*\.webp$/);
-    await page.locator('#theme-btn').click(); // back to dark
-    await expect(page.locator('#demo .shot-dark')).toBeVisible();
+    await setTheme(page, 'dark');
+    await expect(page.locator('#demo-local .shot-dark')).toBeVisible();
   });
 
   test('actually renders, sharp, without stretching', async ({ page }) => {
     await page.goto('/');
-    const img = page.locator('#demo .shot-frame:visible img');
+    await page.locator('#demo-tab-local').click();
+    const img = page.locator('#demo-local .shot-frame:visible img');
     await img.scrollIntoViewIfNeeded();
     await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
     const m = await img.evaluate((el: HTMLImageElement) => ({ nw: el.naturalWidth, nh: el.naturalHeight, w: el.clientWidth, h: el.clientHeight, src: el.currentSrc }));
@@ -253,9 +529,10 @@ test.describe('demo screenshot', () => {
     test(`has three numbered markers on the ${scheme} image and a matching legend`, async ({ page }) => {
       await page.emulateMedia({ colorScheme: scheme });
       await page.goto('/');
-      const markers = page.locator('#demo .shot-frame:visible .marker');
+    await page.locator('#demo-tab-local').click();
+      const markers = page.locator('#demo-local .shot-frame:visible .marker');
       await expect(markers).toHaveCount(3);
-      await expect(page.locator('#demo .legend li')).toHaveCount(3);
+      await expect(page.locator('#demo-local .legend li')).toHaveCount(3);
       const inside = await markers.evaluateAll((els) => {
         const frame = els[0].closest('.shot-frame')!.getBoundingClientRect();
         return els.map((e) => { const r = e.getBoundingClientRect(); return r.left >= frame.left && r.right <= frame.right && r.top >= frame.top && r.bottom <= frame.bottom; });
@@ -266,7 +543,42 @@ test.describe('demo screenshot', () => {
 
   test('there is no video left on the page', async ({ page }) => {
     await page.goto('/');
+    await page.locator('#demo-tab-local').click();
     await expect(page.locator('video')).toHaveCount(0);
+  });
+});
+
+test.describe('demo views', () => {
+  test('opens on the cross-machine view, and switches with mouse and keyboard', async ({ page }) => {
+    await page.goto('/');
+    const laptops = page.locator('#demo-tab-laptops'), local = page.locator('#demo-tab-local');
+    await expect(laptops).toHaveAttribute('aria-selected', 'true');
+    await expect(page.locator('#together')).toBeVisible();
+    await expect(page.locator('#demo-local')).toBeHidden();
+    await local.click();
+    await expect(page.locator('#demo-local')).toBeVisible();
+    await expect(page.locator('#together')).toBeHidden();
+    await local.press('ArrowLeft');
+    await expect(laptops).toBeFocused();
+    await expect(page.locator('#together')).toBeVisible();
+    await laptops.press('End');
+    await expect(local).toBeFocused();
+    await expect(page.locator('#demo-local')).toBeVisible();
+  });
+
+  test('switching demo views never changes the install command', async ({ page, baseURL }) => {
+    await page.goto('/');
+    await page.locator('#tab-windows').click();
+    await page.locator('#demo-tab-local').click();
+    await page.locator('#demo-tab-laptops').click();
+    await expect(page.locator('#install-cmd-2')).toHaveText(`irm ${baseURL}/install.ps1 | iex`);
+    await expect(page.locator('#tab-windows')).toHaveAttribute('aria-selected', 'true');
+  });
+
+  test('the cross-machine view explains its three steps', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('#together .legend li')).toHaveCount(3);
+    await expect(page.locator('#together .shot-frame:visible .bridge')).toBeVisible();
   });
 });
 
