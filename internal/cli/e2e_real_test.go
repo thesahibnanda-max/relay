@@ -129,8 +129,9 @@ func newLive(t *testing.T) *live {
 	settings := snapshot(filepath.Join(l.gemini, "antigravity-cli", "settings.json"))
 	allowRelayTools(settings)
 	t.Cleanup(func() {
-		out, _ := exec.Command(l.relay, "daemon", "stop").CombinedOutput()
-		_ = out
+		stop := exec.Command(l.relay, "daemon", "stop")
+		stop.Env = l.env // this test's RELAY_HOME: never the user's own daemon
+		_ = stop.Run()
 		cfgOK := cfg.unchanged()
 		cfg.restore()
 		settings.restore()
@@ -192,6 +193,13 @@ type liveProc struct {
 	raw  bytes.Buffer
 	em   *vt.Emulator
 	done chan struct{}
+}
+
+// output is everything the process has printed so far.
+func (p *liveProc) output() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.raw.String()
 }
 
 var liveReplies = map[string]string{
@@ -421,9 +429,9 @@ func TestRealAgyHoldsMessagesDuringAPermissionDialog(t *testing.T) {
 func TestRealAgyToAgyThroughRelayTools(t *testing.T) {
 	l := newLive(t)
 	bob := l.agy("bob")
-	sid := regexp.MustCompile(`session ([0-9A-Z]{26})`).FindStringSubmatch(bob.raw.String())
+	sid := regexp.MustCompile(`session ([0-9A-Z]{26})`).FindStringSubmatch(bob.output())
 	if sid == nil {
-		t.Fatalf("no session id in:\n%s", bob.raw.String())
+		t.Fatalf("no session id in:\n%s", bob.output())
 	}
 	carol := l.start("agy", "reviewer", "--session="+sid[1], "--name=carol")
 	carol.waitScreen(3*time.Minute, "carol ready", regexp.MustCompile(`for shortcuts`))
@@ -474,9 +482,9 @@ func TestRealAgyGlobalSession(t *testing.T) {
 	l := newLive(t)
 	bob := l.start("agy", "developer", "--session=NEW", "--server="+server, "--name=bob")
 	bob.waitScreen(3*time.Minute, "bob ready", regexp.MustCompile(`for shortcuts`))
-	token := regexp.MustCompile(`--session=(\S+@\S+)`).FindStringSubmatch(bob.raw.String())
+	token := regexp.MustCompile(`--session=(\S+@\S+)`).FindStringSubmatch(bob.output())
 	if token == nil {
-		t.Fatalf("no join token printed:\n%s", bob.raw.String())
+		t.Fatalf("no join token printed:\n%s", bob.output())
 	}
 	// The printed token names the port the session was created on.
 	if !strings.Contains(token[1], "@") || !strings.HasSuffix(token[1], ":"+strings.Split(server, ":")[1]) {
