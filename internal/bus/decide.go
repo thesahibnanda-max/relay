@@ -38,6 +38,10 @@ type Situation struct {
 	// Interrupted: Esc was already sent for this very message. It is never
 	// sent twice (a second Esc can open history/rewind in the tools).
 	Interrupted bool
+	// OwnTurn: the running turn was started by a message relay typed, so an
+	// interrupt must not cut it short (it would abort the message just
+	// delivered); it waits for the turn to end instead.
+	OwnTurn bool
 	// OthersWaiting: messages of more urgent or equal priority are waiting too
 	// (P3 only goes out when nothing else is queued).
 	OthersWaiting bool
@@ -82,7 +86,7 @@ func Decide(s Situation, p int) (Verdict, string) {
 		}
 		return Inject, "idle"
 	case state.Busy:
-		if p <= P0 && !s.Interrupted {
+		if p <= P0 && !s.Interrupted && !s.OwnTurn {
 			return Interrupt, "interrupt requested"
 		}
 		return Hold, "tool is busy; delivering after the turn"

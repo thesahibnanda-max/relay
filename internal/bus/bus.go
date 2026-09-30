@@ -3,6 +3,7 @@ package bus
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -48,6 +49,7 @@ type pending struct {
 	arrived     time.Time
 	seq         int
 	interrupted time.Time // when Esc was sent for it (zero: not yet)
+	inflight    bool      // being typed right now (guarded by Bus.mu)
 }
 
 // Bus holds the messages waiting for this agent's tool.
@@ -68,6 +70,11 @@ type Bus struct {
 	// react (go busy) yet.
 	injectedAt time.Time
 	sawBusy    bool
+	// ownTurn: the tool's current (or imminent) turn was started by what we
+	// last typed; ownBusy once it was seen busy; ownSince when we typed it.
+	ownTurn  bool
+	ownBusy  bool
+	ownSince time.Time
 
 	// OnDeliver, if set, is called after a message was typed into the tool.
 	OnDeliver func(id string)
@@ -116,6 +123,15 @@ func (b *Bus) rememberLocked(id string) {
 	}
 }
 
+func (b *Bus) queuedLocked(p *pending) bool {
+	for _, q := range b.queue {
+		if q == p {
+			return true
+		}
+	}
+	return false
+}
+
 // Pending returns how many messages are waiting.
 func (b *Bus) Pending() int {
 	b.mu.Lock()
@@ -138,7 +154,7 @@ func (b *Bus) Inbox(limit int, peek bool) []proto.MessageView {
 		if len(out) >= limit {
 			break
 		}
-		if p.ID == BootstrapID {
+		if p.ID == BootstrapID || p.inflight {
 			continue
 		}
 		out = append(out, p.MessageView)
@@ -226,7 +242,9 @@ func (b *Bus) step(ctx context.Context) {
 	b.flushReports(ctx)
 
 	b.mu.Lock()
-	if len(b.queue) == 0 {
+	// With nothing queued there is nothing to decide - but the end of a turn
+	// we started must still be seen, or a later turn would pass for ours.
+	if len(b.queue) == 0 && !b.ownTurn && b.injectedAt.IsZero() {
 		b.mu.Unlock()
 		return
 	}
@@ -246,18 +264,34 @@ func (b *Bus) step(ctx context.Context) {
 			b.injectedAt, b.sawBusy = time.Time{}, false
 		}
 	}
+	// Is the running turn one our own injection started? Until it ends.
+	if b.ownTurn {
+		if snap.State == state.Busy {
+			b.ownBusy = true
+		}
+		if (b.ownBusy && snap.State == state.Idle) || (!b.ownBusy && now.Sub(b.ownSince) > coolingMax) {
+			b.ownTurn, b.ownBusy = false, false
+		}
+	}
 	cooling := !b.injectedAt.IsZero()
+	ownTurn := b.ownTurn
 	b.mu.Unlock()
+	if len(order) == 0 {
+		return
+	}
 
 	sit := Situation{
 		State:      snap,
 		UserTyping: !b.env.UserQuietFor(typingQuiet),
 		DraftDirty: b.env.DraftDirty(),
 		Cooling:    cooling,
+		OwnTurn:    ownTurn,
 	}
 	head := order[0]
 	eff := b.effective(head)
+	b.mu.Lock()
 	sit.Interrupted = !head.interrupted.IsZero()
+	b.mu.Unlock()
 	for _, p := range order[1:] {
 		if b.effective(p) < eff {
 			sit.OthersWaiting = true // cannot happen while order is sorted; keeps the rule true to its table
@@ -286,16 +320,41 @@ func (b *Bus) step(ctx context.Context) {
 }
 
 func (b *Bus) deliver(ctx context.Context, batch []*pending) {
+	// The decision was taken without the lock: a hook or the model's
+	// inbox/ack may have taken some of these meanwhile. Only what is still
+	// queued is typed, and it is marked in flight so nothing else hands it
+	// out while the (possibly slow) injection runs.
+	b.mu.Lock()
+	var live []*pending
+	for _, p := range batch {
+		if !p.inflight && b.queuedLocked(p) {
+			p.inflight = true
+			live = append(live, p)
+		}
+	}
+	b.mu.Unlock()
+	if len(live) == 0 {
+		return
+	}
+	batch = live
 	texts := make([]string, len(batch))
 	for i, p := range batch {
 		texts[i] = Compose(p.MessageView)
 	}
-	if err := b.env.Inject(ctx, strings.Join(texts, "\n\n")); err != nil {
+	err := b.env.Inject(ctx, strings.Join(texts, "\n\n"))
+	b.mu.Lock()
+	for _, p := range batch {
+		p.inflight = false
+	}
+	if err != nil {
+		b.mu.Unlock()
 		return // context ended or the terminal is gone; the message stays queued
 	}
-	b.mu.Lock()
 	gone := map[*pending]bool{}
 	for _, p := range batch {
+		if !b.queuedLocked(p) {
+			continue // acknowledged by the model while it was being typed
+		}
 		gone[p] = true
 		if p.ID != BootstrapID {
 			b.reports = append(b.reports, report{p.ID, StateInjected})
@@ -309,6 +368,7 @@ func (b *Bus) deliver(ctx context.Context, batch []*pending) {
 	}
 	b.queue = kept
 	b.injectedAt, b.sawBusy = b.now(), false
+	b.ownTurn, b.ownBusy, b.ownSince = true, false, b.injectedAt
 	b.mu.Unlock()
 	if b.OnDeliver != nil {
 		for _, p := range batch {
@@ -343,16 +403,60 @@ func Compose(m proto.MessageView) string {
 	if m.ID == BootstrapID {
 		return m.Body
 	}
-	from := m.From
-	if m.FromRole != "" && m.FromRole != "agent" {
-		from += " (" + m.FromRole + ")"
+	from := headerField(m.From)
+	if role := headerField(m.FromRole); role != "" && role != "agent" {
+		from += " (" + role + ")"
 	}
-	head := fmt.Sprintf("[relay | from %s | %s | %s | msg %s]", from, m.Kind, proto.PriorityName(m.Priority), m.ID)
-	text := head + "\n" + Defang(strings.TrimSpace(m.Body))
+	head := fmt.Sprintf("[relay | from %s | %s | %s | msg %s]", from, headerField(m.Kind), proto.PriorityName(m.Priority), headerField(m.ID))
+	text := head + "\n" + Defang(strings.TrimSpace(CleanText(m.Body)))
 	if (m.Kind == "task" || m.Kind == "question") && m.From != "user" && m.From != "relay" {
-		text += fmt.Sprintf("\n[Answer with the relay_send tool: to=%q, reply_to=%q. Text you write in this terminal is not seen by %s.]", m.From, m.ID, m.From)
+		text += fmt.Sprintf("\n%s to=%q, reply_to=%q. Text you write in this terminal is not seen by %s.]", answerHint, headerField(m.From), headerField(m.ID), headerField(m.From))
 	}
 	return text
+}
+
+const answerHint = "[Answer with the relay_send tool:"
+
+// headerField keeps a header field to a plain character set, whatever a peer
+// sent (a global session's server does not police names or kinds): it can
+// never close the header, open a new line or smuggle a separator in.
+func headerField(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', strings.ContainsRune("._:@-", r):
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+		if b.Len() >= 64 {
+			break
+		}
+	}
+	return b.String()
+}
+
+// CleanText removes what a message body must never carry into a terminal or
+// a model's input: C0/C1 controls (keeping newline and tab; CRs become
+// newlines) and the Unicode bidi overrides that make text read differently
+// from what it is. It runs before Defang, so nothing Defang looks for can be
+// assembled afterwards by a later stripping step.
+func CleanText(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", "\n")
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '\r':
+			b.WriteByte('\n')
+		case r == '\n' || r == '\t':
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
+		case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069, r == 0x200e, r == 0x200f, r == 0x061c:
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // TakeForHook hands over, for delivery through a tool hook, the messages that
@@ -366,7 +470,7 @@ func (b *Bus) TakeForHook(all bool) []proto.MessageView {
 	var out []proto.MessageView
 	taken := map[*pending]bool{}
 	for _, p := range b.orderedLocked() {
-		if p.ID == BootstrapID {
+		if p.ID == BootstrapID || p.inflight {
 			continue
 		}
 		if !all && (p.Priority <= P0 || b.effective(p) > P1) {
@@ -428,4 +532,14 @@ func ComposeHook(msgs []proto.MessageView, midTurn bool) string {
 // Defang stops a message body from forging a Relay header. Headers are how the
 // receiving model tells who wrote what (and how delivery is confirmed), so
 // text that merely looks like one is altered: "[relay |" becomes "[relay ¦".
-func Defang(body string) string { return strings.ReplaceAll(body, "[relay |", "[relay ¦") }
+// It also catches look-alikes (spacing, letter case) and the answer hint
+// Compose appends, which a body could otherwise fake.
+func Defang(body string) string {
+	body = forgedHeader.ReplaceAllString(body, "[relay ¦")
+	return forgedHint.ReplaceAllString(body, "(Answer with the relay_send tool:")
+}
+
+var (
+	forgedHeader = regexp.MustCompile(`(?i)\[\s*relay\s*\|`)
+	forgedHint   = regexp.MustCompile(`(?i)\[\s*answer\s+with\s+the\s+relay_send\s+tool\s*:`)
+)
