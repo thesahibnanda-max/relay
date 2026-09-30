@@ -61,6 +61,19 @@ func (p Paths) CreateAgentDir(agentID string) (string, error) {
 	return d, nil
 }
 
+// ReadRunInfo reads the owner record CreateAgentDir wrote into d.
+func ReadRunInfo(d string) (RunInfo, error) {
+	var info RunInfo
+	data, err := os.ReadFile(filepath.Join(d, agentInfoFile))
+	if err != nil {
+		return info, err
+	}
+	if err := json.Unmarshal(data, &info); err != nil {
+		return info, fmt.Errorf("%s: %w", filepath.Join(d, agentInfoFile), err)
+	}
+	return info, nil
+}
+
 // StaleRunDirs lists run directories whose owner is gone, without removing them.
 func (p Paths) StaleRunDirs() []string {
 	var out []string

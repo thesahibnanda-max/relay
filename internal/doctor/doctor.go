@@ -284,20 +284,11 @@ func checkFootprint(env Env) []Check {
 	if copilotHome == "" {
 		copilotHome = filepath.Join(env.Home, ".copilot")
 	}
-	// Not confirmed to be honored by the real agy binary itself (unlike
-	// CODEX_HOME/COPILOT_HOME, which the real Codex/Copilot binaries do
-	// honor) - checked anyway, on the same "cheap and harmless if wrong"
-	// basis as every other entry here, and to match this package's own tests.
-	geminiHome := env.Getenv("GEMINI_HOME")
-	if geminiHome == "" {
-		geminiHome = filepath.Join(env.Home, ".gemini")
-	}
 	files := []string{
 		filepath.Join(claudeHome, "settings.json"), filepath.Join(claudeHome, "settings.local.json"),
 		filepath.Join(claudeHome, "CLAUDE.md"), filepath.Join(env.Home, ".claude.json"),
 		filepath.Join(codexHome, "config.toml"), filepath.Join(codexHome, "AGENTS.md"),
 		filepath.Join(copilotHome, "mcp-config.json"), filepath.Join(copilotHome, "config.json"), filepath.Join(copilotHome, "settings.json"),
-		filepath.Join(geminiHome, "config", "mcp_config.json"),
 		filepath.Join(env.Cwd, ".mcp.json"), filepath.Join(env.Cwd, ".claude", "settings.json"), filepath.Join(env.Cwd, ".claude", "settings.local.json"),
 		filepath.Join(env.Cwd, "CLAUDE.md"), filepath.Join(env.Cwd, "AGENTS.md"), filepath.Join(env.Cwd, ".codex", "config.toml"),
 	}
@@ -307,7 +298,6 @@ func checkFootprint(env Env) []Check {
 		files = append(files, matches...)
 	}
 	var found []string
-	staleAgy := false
 	scanned := 0
 	for _, f := range files {
 		data, err := os.ReadFile(f)
@@ -324,26 +314,43 @@ func checkFootprint(env Env) []Check {
 		}
 		if strings.HasSuffix(f, ".json") && !strings.Contains(strings.Join(found, ";"), f) {
 			if name, ok := hasRelayMCPServer(data); ok {
-				if strings.HasPrefix(name, "relay-") {
-					// agy's own naming (see the agy adaptor's EntryName): a
-					// stale one is dead but not yet swept - relay gc removes
-					// it directly, unlike every other match here.
-					staleAgy = true
-					found = append(found, fmt.Sprintf("%s registers a stale agy MCP server %q", f, name))
-				} else {
-					found = append(found, fmt.Sprintf("%s registers an MCP server named %q", f, name))
-				}
+				found = append(found, fmt.Sprintf("%s registers an MCP server named %q", f, name))
 			}
 		}
 	}
+	checks := []Check{}
 	if len(found) > 0 {
-		fix := "Relay never writes these files; remove the entry (it may have been added by hand or by another tool) so plain claude/codex behave as before"
-		if staleAgy {
-			fix = "run `relay gc` to remove the stale agy MCP server(s); " + fix
-		}
-		return []Check{{Name: "zero footprint", Status: Warn, Detail: strings.Join(found, "; "), Fix: fix}}
+		checks = append(checks, Check{Name: "zero footprint", Status: Warn, Detail: strings.Join(found, "; "),
+			Fix: "Relay never writes these files; remove the entry (it may have been added by hand or by another tool) so plain claude/codex behave as before"})
+	} else {
+		checks = append(checks, Check{Name: "zero footprint", Status: OK, Detail: fmt.Sprintf("no Relay registrations in the %d tool config/project files checked", scanned)})
 	}
-	return []Check{{Name: "zero footprint", Status: OK, Detail: fmt.Sprintf("no Relay registrations in the %d tool config/project files checked", scanned)}}
+	return append(checks, checkAgy(env)...)
+}
+
+// checkAgy reports relay's one deliberate footprint: its entry in agy's
+// user-global MCP config, present only while a relay agy agent runs (agy has
+// no per-launch registration; see the agy adaptor).
+func checkAgy(env Env) []Check {
+	st, err := adaptor.InspectAgy(env.Home)
+	if err != nil {
+		return nil
+	}
+	name := "agy registration"
+	switch {
+	case st.ParseError != nil:
+		return []Check{{Name: name, Status: Warn, Detail: st.ParseError.Error(),
+			Fix: "agy itself cannot read that file either (`agy mcp list` fails); fix or empty it, then relaunch"}}
+	case len(st.Legacy) > 0:
+		return []Check{{Name: name, Status: Warn, Detail: fmt.Sprintf("%s has entries an older relay left: %s", st.ConfigPath, strings.Join(st.Legacy, ", ")),
+			Fix: "run `relay gc` to remove them"}}
+	case st.Stale():
+		return []Check{{Name: name, Status: Warn, Detail: fmt.Sprintf("%s still has relay's entry but no relay agy agent is running (a crashed launch)", st.ConfigPath),
+			Fix: "run `relay gc` to remove it and restore that file"}}
+	case st.Registered:
+		return []Check{{Name: name, Status: OK, Detail: fmt.Sprintf("in use by %d running relay agy agent(s); removed when the last one exits", len(st.LiveAgents))}}
+	}
+	return nil
 }
 
 // hasRelayMCPServer reports whether a JSON document has an mcpServers table

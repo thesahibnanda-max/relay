@@ -70,7 +70,10 @@ func buildBinaries(t *testing.T) string {
 		}
 	})
 	if buildErr != nil {
-		t.Skip("cannot build binaries:", buildErr)
+		if _, err := exec.LookPath("go"); err != nil {
+			t.Skip("cannot build binaries without go on PATH:", buildErr)
+		}
+		t.Fatal("cannot build binaries:", buildErr) // a broken build must never pass as a skip
 	}
 	return binDir
 }
@@ -127,8 +130,7 @@ func newWorld(t *testing.T) *world {
 		os.WriteFile(full, []byte(content), 0o644)
 	}
 	w.env = append(os.Environ(),
-		"HOME="+w.home, "CODEX_HOME="+filepath.Join(w.home, ".codex"), "COPILOT_HOME="+filepath.Join(w.home, ".copilot"),
-		"GEMINI_HOME="+filepath.Join(w.home, ".gemini"),
+		"HOME="+w.home, "USERPROFILE="+w.home, "CODEX_HOME="+filepath.Join(w.home, ".codex"), "COPILOT_HOME="+filepath.Join(w.home, ".copilot"),
 		"RELAY_HOME="+w.relay, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"RELAY_ACTIVE=", // never inherit the nesting marker from an outer relay
 	)

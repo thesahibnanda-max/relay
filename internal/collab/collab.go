@@ -51,6 +51,12 @@ type Session struct {
 
 	held atomic.Int32 // messages held for a human on this agent
 	nat  native
+
+	// verifySubmit: the tool reports every prompt it accepts (agy's log), so
+	// an injection it did not take can be caught and resubmitted.
+	verifySubmit atomic.Bool
+	acceptMu     sync.Mutex
+	acceptedAt   time.Time
 }
 
 // New creates the session before the daemon connection exists (its Deliver and
@@ -192,7 +198,13 @@ func (e *sessionEnv) Inject(ctx context.Context, text string) error {
 	if h == nil {
 		return errors.New("tool not running")
 	}
-	return h.Inject(ctx, text, agent.InjectOptions{Paste: true, Submit: true})
+	if err := h.Inject(ctx, text, agent.InjectOptions{Paste: true, Submit: true}); err != nil {
+		return err
+	}
+	if e.s.verifySubmit.Load() {
+		go e.s.confirmSubmit(h, text, time.Now())
+	}
+	return nil
 }
 
 func (e *sessionEnv) Interrupt() error {

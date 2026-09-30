@@ -17,6 +17,7 @@ import (
 
 // Spec describes the agent being launched.
 type Spec struct {
+	AgentID   string
 	AgentName string
 	Session   string
 	RunDir    string // private, ephemeral, owned by this launch
@@ -51,6 +52,15 @@ type Plan struct {
 	Hooks             bool     // Relay's hooks are registered for this launch
 	Passthrough       bool     // not an interactive session: the tool runs exactly as typed
 	Notes             []string // why anything was skipped or degraded
+	// Env is extra KEY=VALUE entries for this launch's child environment.
+	Env []string
+	// ToolLog is a diagnostic log the tool writes for this launch, which the
+	// agent follows for authoritative state (agy: which conversation is live,
+	// which prompts were accepted).
+	ToolLog string
+	// VerifySubmit: the tool reports accepted prompts (in ToolLog), so the
+	// agent checks every injected message was taken and resubmits if not.
+	VerifySubmit bool
 }
 
 // Passthrough is a Plan that runs the tool exactly as the user asked.

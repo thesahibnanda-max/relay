@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -167,40 +168,44 @@ func TestFootprintScanFindsRelayRegistrations(t *testing.T) {
 	}
 }
 
-func TestFootprintScanFindsStaleAgyRegistration(t *testing.T) {
+func TestAgyRegistrationStates(t *testing.T) {
 	env, home := testEnv(t)
-	geminiConfig := filepath.Join(home, ".gemini", "config")
-	os.MkdirAll(geminiConfig, 0o755)
-	os.WriteFile(filepath.Join(geminiConfig, "mcp_config.json"), []byte(`{"mcpServers":{}}`), 0o644)
-	if c := find(Run(env), "zero footprint"); c.Status != OK {
-		t.Fatalf("an empty agy config must not be flagged: %+v", c)
-	}
-	os.WriteFile(filepath.Join(geminiConfig, "mcp_config.json"),
-		[]byte(`{"mcpServers":{"relay-01M2XRVN1PVQZQC09VYHGYKKMQ":{"command":"/opt/relay/relay","args":["mcp","--dir","/x"],"disabled":false}}}`), 0o644)
-	c := find(Run(env), "zero footprint")
-	if c.Status != Warn || !strings.Contains(c.Detail, "relay-01M2XRVN1PVQZQC09VYHGYKKMQ") {
-		t.Fatalf("a stale agy MCP server entry must be flagged: %+v", c)
-	}
-	if !strings.Contains(c.Fix, "relay gc") {
-		t.Fatalf("the fix must point at relay gc, which can remove it directly: %+v", c)
-	}
-}
+	cfg := filepath.Join(home, ".gemini", "config", "mcp_config.json")
+	os.MkdirAll(filepath.Dir(cfg), 0o755)
+	write := func(s string) { os.WriteFile(cfg, []byte(s), 0o644) }
+	ours := `{"mcpServers":{"relay":{"command":"/opt/relay/relay","args":["mcp","--from-env"]}}}`
 
-func TestFootprintScanNeverFlagsAnotherAdaptorsBareRelayEntryAsAgyStale(t *testing.T) {
-	env, home := testEnv(t)
-	geminiConfig := filepath.Join(home, ".gemini", "config")
-	os.MkdirAll(geminiConfig, 0o755)
-	// The bare "relay" name belongs to Claude/Codex/Copilot's own per-launch,
-	// ephemeral config style, never agy's - if it ever showed up inside agy's
-	// own config (e.g. a user's own unrelated server named "relay"), it must
-	// still be flagged (something is registered), but not with the
-	// agy-specific "relay gc can remove this" fix, since relay's own gc sweep
-	// only ever touches "relay-<id>"-prefixed entries.
-	os.WriteFile(filepath.Join(geminiConfig, "mcp_config.json"),
-		[]byte(`{"mcpServers":{"relay":{"command":"/usr/bin/something-unrelated","args":[],"disabled":false}}}`), 0o644)
-	c := find(Run(env), "zero footprint")
-	if c.Status != Warn || strings.Contains(c.Fix, "relay gc") {
+	write(`{"mcpServers":{}}`)
+	if c := find(Run(env), "agy registration"); c.Detail != "MISSING" {
+		t.Fatalf("nothing registered must report nothing: %+v", c)
+	}
+	if c := find(Run(env), "zero footprint"); c.Status != OK {
 		t.Fatalf("%+v", c)
+	}
+
+	write(`{"mcpServers":{"relay-01M2XRVN1PVQZQC09VYHGYKKMQ":{"command":"/opt/relay/relay","args":["mcp","--dir","/x"]}}}`)
+	if c := find(Run(env), "agy registration"); c.Status != Warn || !strings.Contains(c.Fix, "relay gc") || !strings.Contains(c.Detail, "relay-01M2XRVN1PVQZQC09VYHGYKKMQ") {
+		t.Fatalf("an older relay's entry must point at relay gc: %+v", c)
+	}
+
+	write(ours) // relay's entry, nobody running: a crash leftover
+	if c := find(Run(env), "agy registration"); c.Status != Warn || !strings.Contains(c.Fix, "relay gc") {
+		t.Fatalf("a leftover entry must point at relay gc: %+v", c)
+	}
+
+	leases := filepath.Join(home, ".gemini", "config", ".relay-agy", "leases")
+	os.MkdirAll(leases, 0o700)
+	os.WriteFile(filepath.Join(leases, "01K6AAAAAAAAAAAAAAAAAAAAAA.json"), []byte(fmt.Sprintf(`{"agent_id":"01K6AAAAAAAAAAAAAAAAAAAAAA","pid":%d}`, os.Getpid())), 0o600)
+	if c := find(Run(env), "agy registration"); c.Status != OK || !strings.Contains(c.Detail, "in use by 1") {
+		t.Fatalf("a live agent's entry is not a problem: %+v", c)
+	}
+	if c := find(Run(env), "zero footprint"); c.Status != OK {
+		t.Fatalf("a live agy registration must not be flagged as a stray footprint: %+v", c)
+	}
+
+	write("{ // comment\n}")
+	if c := find(Run(env), "agy registration"); c.Status != Warn || !strings.Contains(c.Fix, "agy mcp list") {
+		t.Fatalf("an unparseable agy config must be reported: %+v", c)
 	}
 }
 

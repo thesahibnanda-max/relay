@@ -126,8 +126,9 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, in io.Reader, errw io.W
 	col.Bind(lk, a.Name(), role.Name)
 	col.SetUploadTurns(p.Record != RecordOff)
 
-	toolArgs, attach, cleanup := prepareLaunch(a, p, role, lk, shared, paths, perr == nil, col, errw, bin)
+	toolArgs, extraEnv, attach, cleanup := prepareLaunch(a, p, role, lk, shared, paths, perr == nil, col, errw, bin)
 	defer cleanup()
+	env = append(env, extraEnv...)
 
 	code, err := agent.Run(agent.Config{
 		Tool: a.Name(), Bin: bin, Args: toolArgs, Env: env,
@@ -482,7 +483,7 @@ func friendly(err error, p Parsed) string {
 // simply runs as the user typed it. The returned cleanup is idempotent and
 // removes everything created here.
 func prepareLaunch(a adaptor.Adaptor, p Parsed, role roles.Role, lk collab.Link, shared bool,
-	paths relayhome.Paths, homeOK bool, col *collab.Session, errw io.Writer, bin string) (args []string, attach bool, cleanup func()) {
+	paths relayhome.Paths, homeOK bool, col *collab.Session, errw io.Writer, bin string) (args, env []string, attach bool, cleanup func()) {
 	args, cleanup = p.ToolArgs, func() {}
 	if !shared && p.Role == "" {
 		return // nothing to add: a plain solo run stays byte-for-byte what the user typed
@@ -496,7 +497,7 @@ func prepareLaunch(a adaptor.Adaptor, p Parsed, role roles.Role, lk collab.Link,
 	if lk != nil {
 		id = lk.Identity()
 	}
-	spec := adaptor.LaunchSpec{AgentName: id.Agent.Name, Session: id.Session.ID, WithMCP: shared, WithHooks: shared, UserArgs: p.ToolArgs}
+	spec := adaptor.LaunchSpec{AgentID: id.Agent.ID, AgentName: id.Agent.Name, Session: id.Session.ID, WithMCP: shared, WithHooks: shared, UserArgs: p.ToolArgs}
 	spec.Briefing = collab.Briefing(id, role, shared)
 	spec.RelayHome, spec.ToolBin = paths.Root, bin
 
@@ -519,10 +520,10 @@ func prepareLaunch(a adaptor.Adaptor, p Parsed, role roles.Role, lk collab.Link,
 			}
 		})
 	}
-	fallback := func(format string, a ...any) ([]string, bool, func()) {
+	fallback := func(format string, a ...any) ([]string, []string, bool, func()) {
 		fmt.Fprintf(errw, "relay: "+format+" (running the tool without relay features)\n", a...)
 		cleanup()
-		return p.ToolArgs, false, func() {}
+		return p.ToolArgs, nil, false, func() {}
 	}
 
 	if shared {
@@ -557,8 +558,11 @@ func prepareLaunch(a adaptor.Adaptor, p Parsed, role roles.Role, lk collab.Link,
 	}
 	if plan.Passthrough {
 		cleanup()
-		return plan.Args, false, func() {}
+		return plan.Args, nil, false, func() {}
 	}
+	col.SetToolLog(plan.ToolLog)
+	col.SetVerifySubmit(plan.VerifySubmit)
+	col.SetBriefing(spec.Briefing)
 	if spec.Briefing != "" && !plan.BriefingDelivered {
 		col.Bus().AddBootstrap(strings.TrimSpace(spec.Briefing))
 		attach = true
@@ -566,5 +570,5 @@ func prepareLaunch(a adaptor.Adaptor, p Parsed, role roles.Role, lk collab.Link,
 	if shared {
 		attach = true
 	}
-	return plan.Args, attach, cleanup
+	return plan.Args, plan.Env, attach, cleanup
 }

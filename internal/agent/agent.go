@@ -89,6 +89,10 @@ func (h *Handle) ClearDraft() { h.mux.ClearDraft() }
 // Interrupt presses Esc in the tool (at a safe boundary in the user's input).
 func (h *Handle) Interrupt(ctx context.Context) error { return h.mux.Raw(ctx, []byte{0x1b}) }
 
+// PressEnter sends a lone Enter at a safe key boundary: a resubmit for a
+// tool that left an injected message in its input box.
+func (h *Handle) PressEnter(ctx context.Context) error { return h.mux.Raw(ctx, []byte{'\r'}) }
+
 // SetChord reserves a command prefix key in the user's input (see InputMux.SetChord).
 func (h *Handle) SetChord(prefix byte, fn func(key byte)) { h.mux.SetChord(prefix, fn) }
 

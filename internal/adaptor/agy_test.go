@@ -2,7 +2,6 @@ package adaptor
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,15 +25,22 @@ func buildFakeAgyOnPath(t *testing.T) {
 	bin := filepath.Join(dir, name)
 	out, err := exec.Command("go", "build", "-o", bin, "../../testdata/fakeagy").CombinedOutput()
 	if err != nil {
-		t.Skip("cannot build fakeagy (is `go` on PATH?):", fmt.Sprintf("%s: %v", out, err))
+		if _, lerr := exec.LookPath("go"); lerr != nil {
+			t.Skip("cannot build fakeagy without go on PATH")
+		}
+		t.Fatalf("cannot build fakeagy: %s: %v", out, err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
+// Entries older relay versions registered per launch ("relay-<id>" running
+// `mcp --dir <run dir>`): gc removes the ones whose owner is gone.
 func TestAgySweepStaleRemovesOnlyDeadEntries(t *testing.T) {
 	buildFakeAgyOnPath(t)
-	geminiHome := t.TempDir()
-	t.Setenv("GEMINI_HOME", geminiHome)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	geminiHome := filepath.Join(home, ".gemini")
 
 	root := t.TempDir()
 	paths := relayhome.Paths{Root: root}
@@ -43,6 +49,10 @@ func TestAgySweepStaleRemovesOnlyDeadEntries(t *testing.T) {
 	}
 
 	liveDir := t.TempDir()
+	info, _ := json.Marshal(relayhome.RunInfo{AgentID: "01K6AAAAAAAAAAAAAAAAAAAAAA", PID: os.Getpid()})
+	if err := os.WriteFile(filepath.Join(liveDir, "agent.json"), info, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	deadDir := filepath.Join(t.TempDir(), "gone")
 	cfg := map[string]any{"mcpServers": map[string]any{
 		"relay-live": map[string]any{"command": "/opt/relay/relay", "args": []string{"mcp", "--dir", liveDir}, "disabled": false},
