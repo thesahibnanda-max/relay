@@ -48,6 +48,9 @@ func options(spec launch.Spec) Options {
 	return Options{
 		AgyBin: spec.ToolBin, RelayExe: spec.RelayExe,
 		LegacyMarker: relayhome.Paths{Root: spec.RelayHome}.AgyOriginalSnapshotPath(),
+		Waiting: func() {
+			fmt.Fprintln(os.Stderr, "relay: waiting for another relay agy launch to finish updating agy's MCP config...")
+		},
 	}
 }
 

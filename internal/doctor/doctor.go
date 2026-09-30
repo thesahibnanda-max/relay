@@ -362,12 +362,9 @@ func checkAgy(env Env) []Check {
 
 // hasRelayMCPServer reports whether a JSON document has an mcpServers table
 // with an entry relay itself would have registered, at any depth
-// (~/.claude.json keeps them per project): either the bare name "relay"
-// (Claude/Codex/Copilot's one, per-launch, ephemeral entry) or a
-// "relay-<id>"-prefixed name (agy's own naming - see the agy adaptor's
-// EntryName - needed because agy's config is one file shared by every
-// concurrently launched agy agent, so a fixed name would collide). Returns
-// the matched name so the caller can tell the two cases apart.
+// (~/.claude.json keeps them per project): the name "relay", or a
+// "relay-<id>"-prefixed name an older relay registered per agy launch.
+// Returns the matched name so the caller can tell the two cases apart.
 func hasRelayMCPServer(data []byte) (name string, found bool) {
 	var v any
 	if json.Unmarshal(data, &v) != nil {

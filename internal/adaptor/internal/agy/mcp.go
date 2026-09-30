@@ -50,6 +50,10 @@ import (
 	"github.com/thesahibnanda-max/relay/internal/relayhome"
 )
 
+// lockNotice is how long a launch waits on another relay's lock before
+// saying so.
+var lockNotice = 2 * time.Second
+
 // lockWait bounds how long a launch waits for another relay's agy
 // bookkeeping: longer than the worst case of one full Register (a capped
 // legacy sweep plus one add, each command bounded by cmdTimeout). A variable
@@ -213,6 +217,7 @@ type regState struct {
 	agyBin   string
 	alive    func(pid int) bool
 	ident    func(pid int) string
+	waiting  func()
 }
 
 func (s regState) leasePath(agentID string) string {
@@ -330,7 +335,17 @@ func (s regState) restore() {
 	if mode == 0 {
 		mode = 0o644
 	}
-	_ = writeFileAtomic(s.cfgPath, snap.Data, mode)
+	// Written where a symlink points (the link stays), and only if the file
+	// is still what was just compared: agy itself takes no lock, so narrow
+	// the window in which a user's own `agy mcp add` could be lost.
+	path := s.cfgPath
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+	}
+	if again, err := os.ReadFile(path); err != nil || !bytes.Equal(again, cur) {
+		return
+	}
+	_ = writeFileAtomic(path, snap.Data, mode)
 }
 
 // finish removes relay's entry, restores the original file and deletes all
@@ -351,7 +366,9 @@ func (s regState) finish() (removed []string, err error) {
 		removed = append(removed, ServerName)
 	}
 	s.restore()
-	_ = os.RemoveAll(s.cacheDir)
+	if len(removed) > 0 { // agy's tool cache for relay's entry; a user's own "relay" keeps its own
+		_ = os.RemoveAll(s.cacheDir)
+	}
 	_ = os.RemoveAll(filepath.Join(s.dir, "leases"))
 	_ = os.Remove(s.snapshotPath())
 	return removed, nil
@@ -414,6 +431,9 @@ type Options struct {
 	Alive func(pid int) bool
 	// Ident names a running process (relayhome.ProcessIdentity by default).
 	Ident func(pid int) string
+	// Waiting, if set, is called once if the lock is still held by another
+	// relay after lockNotice (so a launch never stalls silently).
+	Waiting func()
 	// Home is the user's home directory (default: the real one).
 	Home string
 }
@@ -440,6 +460,7 @@ func (o Options) state() (regState, error) {
 		agyBin:   o.AgyBin,
 		alive:    alive,
 		ident:    ident,
+		waiting:  o.Waiting,
 	}, nil
 }
 
@@ -448,6 +469,10 @@ func (o Options) state() (regState, error) {
 // is removed, so no trace of relay remains in agy's config directory.
 func withLock(s regState, fn func() error) error {
 	lockPath := filepath.Join(s.dir, "lock")
+	if s.waiting != nil {
+		t := time.AfterFunc(lockNotice, s.waiting)
+		defer t.Stop()
+	}
 	lk, err := agyFlock(lockPath, func() error { return os.MkdirAll(s.dir, 0o700) }, lockWait)
 	if err != nil {
 		return err
@@ -575,7 +600,7 @@ func Sweep(o Options) (removed []string, err error) {
 	if _, err := os.Stat(s.dir); errors.Is(err, os.ErrNotExist) {
 		// Nothing of the current scheme; only legacy entries could remain.
 		cfg, _, existed, err := readConfig(s.cfgPath)
-		if err != nil || !existed || !hasLegacy(cfg) {
+		if err != nil || !existed || (!hasLegacy(cfg) && !hasOurs(cfg)) {
 			return nil, err
 		}
 	}
@@ -593,6 +618,11 @@ func Sweep(o Options) (removed []string, err error) {
 		return err
 	})
 	return removed, err
+}
+
+func hasOurs(cfg config) bool {
+	e, ok := cfg.Servers[ServerName]
+	return ok && isOurs(e)
 }
 
 func hasLegacy(cfg config) bool {

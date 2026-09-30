@@ -552,3 +552,93 @@ func TestLeaseOfAReusedPIDIsDead(t *testing.T) {
 		t.Fatalf("config %q exists=%v: the reused pid kept relay's entry alive", data, ok)
 	}
 }
+
+// relay's entry left behind with no state directory next to it (a config
+// synced from another machine, or the directory deleted): doctor calls it
+// stale, so gc must clean it too.
+func TestSweepRemovesAnEntryWithNoStateDir(t *testing.T) {
+	r := newRig(t)
+	r.write(`{"mcpServers":{"mine":{"command":"x"}}}`)
+	r.register(agentA)
+	r.crash()
+	os.RemoveAll(filepath.Join(r.home, ".gemini", "config", stateDirName))
+	if st, _ := Inspect(r.opt); !st.Stale() {
+		t.Fatalf("doctor would not flag it: %+v", st)
+	}
+	if _, err := Sweep(r.opt); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.servers()[ServerName]; ok {
+		t.Fatal("gc left relay's entry in place")
+	}
+	if _, ok := r.servers()["mine"]; !ok {
+		t.Fatal("gc removed the user's own entry")
+	}
+}
+
+// A config kept elsewhere (dotfiles) behind a symlink comes back through the
+// link: the link stays a link, its target byte for byte as it was.
+func TestRestoreKeepsASymlinkedConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	r := newRig(t)
+	orig := "{\n    \"mcpServers\": {\"mine\": {\"command\": \"x\"}}\n}\n"
+	target := filepath.Join(t.TempDir(), "mcp_config.json")
+	os.WriteFile(target, []byte(orig), 0o644)
+	os.MkdirAll(filepath.Dir(r.cfg), 0o755)
+	if err := os.Symlink(target, r.cfg); err != nil {
+		t.Fatal(err)
+	}
+	r.register(agentA)
+	r.unregister(agentA)
+	if st, err := os.Lstat(r.cfg); err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("the symlink was replaced by a file")
+	}
+	if got, _ := os.ReadFile(target); string(got) != orig {
+		t.Fatalf("target is\n%s\nwant\n%s", got, orig)
+	}
+}
+
+// A server of the user's own that happens to be named "relay": its tool
+// cache is agy's and the user's, never relay's to delete.
+func TestSweepKeepsTheCacheOfAUsersOwnRelayServer(t *testing.T) {
+	r := newRig(t)
+	r.write(`{"mcpServers":{"relay":{"command":"/usr/bin/something-else"}}}`)
+	cache := filepath.Join(r.home, ".gemini", "antigravity-cli", "mcp", ServerName)
+	os.MkdirAll(cache, 0o755)
+	os.MkdirAll(filepath.Join(r.home, ".gemini", "config", stateDirName), 0o700) // a crashed launch's leftovers
+	if _, err := Sweep(r.opt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cache); err != nil {
+		t.Fatal("gc deleted the tool cache of a server that is not relay's")
+	}
+}
+
+// A launch held up by another relay's agy bookkeeping says so.
+func TestWaitingForTheLockIsReported(t *testing.T) {
+	r := newRig(t)
+	defer func(d time.Duration) { lockNotice = d }(lockNotice)
+	lockNotice = 50 * time.Millisecond
+	st, _ := r.opt.state()
+	held := make(chan struct{})
+	release := make(chan struct{})
+	go withLock(st, func() error { close(held); <-release; return nil })
+	<-held
+	waited := make(chan struct{}, 1)
+	opt := r.opt
+	opt.Waiting = func() { waited <- struct{}{} }
+	done := make(chan error, 1)
+	go func() { _, err := Register(opt, agentA); done <- err }()
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no word while waiting for the lock")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	r.unregister(agentA)
+}
