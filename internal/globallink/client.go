@@ -294,7 +294,7 @@ func jitter(d time.Duration) time.Duration {
 // retrying is pointless - mirrors internal/link's own definitive().
 func definitive(code string) bool {
 	switch code {
-	case proto.CodeBadToken, proto.CodeSessionEnded, proto.CodeSessionNotFound, proto.CodeNameTaken, proto.CodeBadRequest:
+	case proto.CodeBadToken, proto.CodeSessionEnded, proto.CodeSessionNotFound, proto.CodeNameTaken, proto.CodeBadRequest, proto.CodeBadName:
 		return true
 	}
 	return false
@@ -333,10 +333,15 @@ func (c *Client) serve(ws *websocket.Conn) {
 		case typeDeliver:
 			var d deliverFrame
 			if json.Unmarshal(env.Payload, &d) == nil {
+				// No ack on receipt: the server would take that as
+				// "acknowledged" and never replay the message, losing it if
+				// this process ends before relay types it (the bus still
+				// holds it while the user types or a dialog is open). What
+				// really happens to it is reported with msg_state, like the
+				// local transport.
 				if c.opt.OnDeliver != nil {
 					c.opt.OnDeliver(toProtoMessageView(d.Message))
 				}
-				c.sendAck(ctx, d.Message.ID)
 			}
 		case typeRPCResult:
 			var r rpcResultFrame
@@ -357,22 +362,6 @@ func (c *Client) serve(ws *websocket.Conn) {
 			return
 		}
 	}
-}
-
-func (c *Client) sendAck(ctx context.Context, messageID string) {
-	c.mu.Lock()
-	ws := c.cur
-	c.mu.Unlock()
-	if ws == nil {
-		return
-	}
-	b, err := marshalEnvelope(typeAck, ackFrame{ID: messageID})
-	if err != nil {
-		return
-	}
-	wctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	_ = ws.Write(wctx, websocket.MessageText, b)
 }
 
 func toProtoMessageView(m messageView) proto.MessageView {

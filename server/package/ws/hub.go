@@ -80,6 +80,12 @@ func (h hub) Accept(w http.ResponseWriter, r *http.Request) {
 
 	h.reg.set(result.AgentID, cn)
 	defer h.reg.remove(result.AgentID)
+	// Replayed only once registered: a message sent before this point was
+	// pushed to nobody (the agent looked offline) and is in the replay; one
+	// sent after is pushed live. Replaying first left a gap between the two
+	// in which a message waited for the next reconnect. The overlap can
+	// deliver a message twice, which the client de-duplicates by id.
+	h.replayPending(ctx, cn, result)
 	defer func() {
 		// ctx is already (or about to be) Done() by the time this runs -
 		// this DB write needs its own short-lived context, not the
@@ -98,8 +104,8 @@ func (h hub) Accept(w http.ResponseWriter, r *http.Request) {
 }
 
 // handshake reads the one Hello frame a connection must open with, joins
-// the session it names, replies with a Welcome, and replays anything still
-// owed to this agent from before it connected. ok is false if the
+// the session it names and replies with a Welcome (Accept then replays
+// anything still owed to this agent). ok is false if the
 // connection should be torn down (a protocol violation or a failed join,
 // either way an Error frame has already been sent).
 func (h hub) handshake(ctx context.Context, cn *conn) (session.JoinResult, bool) {
@@ -132,10 +138,13 @@ func (h hub) handshake(ctx context.Context, cn *conn) (session.JoinResult, bool)
 		SessionID: result.SessionID, AgentID: result.AgentID, Name: result.Name,
 		Token: result.Token, Resumed: result.Resumed,
 	}); err != nil {
+		// Joined but gone: without this the agent would stay "connected"
+		// forever, refusing every resume as agent_live.
+		dctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = h.session.Disconnect(dctx, result.SessionID, result.AgentID)
 		return session.JoinResult{}, false
 	}
-
-	h.replayPending(ctx, cn, result)
 	return result, true
 }
 
@@ -575,6 +584,8 @@ func joinErrorCode(err error) string {
 		return "session_not_found"
 	case errors.Is(err, session.ErrNameTaken):
 		return "name_taken"
+	case errors.Is(err, session.ErrBadName):
+		return "bad_name"
 	default:
 		return "join_failed"
 	}

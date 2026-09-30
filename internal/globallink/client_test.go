@@ -366,12 +366,12 @@ func TestNotice_CallsOnNotice(t *testing.T) {
 	}
 }
 
-// TestDeliver_CallsOnDeliverAndAcksEveryTime proves the transport layer
-// never assumes at-most-once delivery: the same message id can legitimately
-// arrive twice (a real reconnect-triggered replay), OnDeliver fires both
-// times (dedup is internal/bus's job, not this package's), and an ack is
-// sent back both times too - idempotent by design.
-func TestDeliver_CallsOnDeliverAndAcksEveryTime(t *testing.T) {
+// TestDeliver_CallsOnDeliverEveryTimeAndNeverAcksOnReceipt: the same
+// message id can legitimately arrive twice (a reconnect-triggered replay) and
+// OnDeliver fires both times (dedup is internal/bus's job). Receiving is not
+// acknowledging: an ack on receipt made the server stop replaying messages
+// relay had not typed yet, losing them if the process then exited.
+func TestDeliver_CallsOnDeliverEveryTimeAndNeverAcksOnReceipt(t *testing.T) {
 	fs := &fakeServer{pushOnHello: []messageView{
 		{ID: "dup-1", From: "bob", To: "alice", Kind: "task", Body: "hello"},
 		{ID: "dup-1", From: "bob", To: "alice", Kind: "task", Body: "hello"},
@@ -392,27 +392,18 @@ func TestDeliver_CallsOnDeliverAndAcksEveryTime(t *testing.T) {
 			}
 		},
 	})
-
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("did not receive both deliver frames")
 	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		fs.mu.Lock()
-		n := len(fs.acksSeen)
-		fs.mu.Unlock()
-		if n >= 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("expected 2 acks, got %d", n)
-		}
-		time.Sleep(20 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
+	fs.mu.Lock()
+	acks := len(fs.acksSeen)
+	fs.mu.Unlock()
+	if acks != 0 {
+		t.Fatalf("%d acks sent on mere receipt", acks)
 	}
-
 	mu.Lock()
 	defer mu.Unlock()
 	if len(delivered) != 2 || delivered[0] != "dup-1" || delivered[1] != "dup-1" {

@@ -14,6 +14,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"regexp"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -108,8 +109,9 @@ type Interface interface {
 	// SetState already enforces.
 	ReportState(ctx context.Context, sessionID, agentID, messageID, state string) error
 	// Wait blocks (up to timeout) for a reply to messageID or for it to
-	// reach mongodb.MessageStateAcknowledged. Only the message's sender or
-	// recipient may wait on it.
+	// reach a final state (done, rejected, expired, undeliverable) - not
+	// merely acknowledged, which only means the recipient has it. Only the
+	// message's sender or recipient may wait on it.
 	Wait(ctx context.Context, sessionID, agentID, messageID string, timeout time.Duration) (WaitOutcome, error)
 	// Context returns forAgentName's recent message history in this
 	// session (up to limit, chronological order) - the data behind the
@@ -190,9 +192,21 @@ func New(
 	}, nil
 }
 
+// Names and kinds follow the local daemon's rules exactly (internal/naming,
+// internal/proto): every receiving relay prints them into a header the model
+// relies on, and a reserved name such as "user" would read as the human.
+var (
+	validName     = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$|^[a-z0-9]$`)
+	reservedNames = map[string]bool{"user": true, "all": true, "relay": true, "me": true, "self": true, "none": true, "new": true}
+	validKinds    = map[string]bool{"task": true, "question": true, "answer": true, "notify": true}
+)
+
+// ErrBadName means a Join asked for a name agents may not have.
+var ErrBadName = errors.New("session: invalid agent name")
+
 func (s service) Join(ctx context.Context, req JoinRequest) (JoinResult, error) {
-	if req.Name == "" {
-		return JoinResult{}, errors.New("session: name is required")
+	if !validName.MatchString(req.Name) || reservedNames[req.Name] {
+		return JoinResult{}, fmt.Errorf("%w: %q (1-32 of a-z, 0-9 and inner hyphens; not user, all, relay, me, self, none or new)", ErrBadName, req.Name)
 	}
 
 	sessionID := req.SessionID
@@ -317,6 +331,9 @@ func (s service) Send(ctx context.Context, sessionID, fromAgentID string, req Se
 	if kind == "" {
 		kind = mongodb.DefaultMessageKind
 	}
+	if !validKinds[kind] {
+		return SendOutcome{}, fmt.Errorf("session: unknown message kind %q (task, question, answer or notify)", kind)
+	}
 	priority := req.Priority
 	if priority == 0 && !sender.CanInterrupt {
 		priority = 1 // P0 needs CanInterrupt; otherwise silently downgraded, mirroring the local daemon exactly
@@ -333,16 +350,19 @@ func (s service) Send(ctx context.Context, sessionID, fromAgentID string, req Se
 	}
 
 	thread, hops := "", 0
+	var parent *mongodb.Message
 	if req.ReplyTo != "" {
-		if parent, found, err := s.messages.Get(ctx, shardURL, req.ReplyTo); err != nil {
+		p, found, err := s.messages.Get(ctx, shardURL, req.ReplyTo)
+		if err != nil {
 			return SendOutcome{}, err
-		} else if found {
-			thread, hops = parent.Thread, parent.Hops+1
-			// A reply is definitive proof the parent was handled, regardless
-			// of whatever state it was in - mirrors the local daemon's own
-			// "answered by <id>" rule.
-			_, _ = s.messages.SetState(ctx, shardURL, parent.ID, mongodb.MessageStateDone)
 		}
+		// Like the local daemon: a reply must be to a message of this session
+		// that the caller received or sent - never one of another session.
+		if !found || p.SessionID != sessionID || (p.ToAgentID != fromAgentID && p.FromAgentID != fromAgentID) {
+			return SendOutcome{}, fmt.Errorf("session: reply_to %q is not a message you received or sent in this session", req.ReplyTo)
+		}
+		parent = &p
+		thread, hops = p.Thread, p.Hops+1
 	}
 
 	id := ulid.Make().String()
@@ -367,6 +387,13 @@ func (s service) Send(ctx context.Context, sessionID, fromAgentID string, req Se
 	})
 	if err != nil {
 		return SendOutcome{}, err
+	}
+	if parent != nil && parent.ToAgentID == fromAgentID {
+		// The recipient's reply is proof the parent was handled (the local
+		// daemon's "answered by <id>" rule) - recorded only once the reply
+		// exists, and never for a follow-up by the parent's own sender, whose
+		// parent may still be waiting to be delivered.
+		_, _ = s.messages.SetState(ctx, shardURL, parent.ID, mongodb.MessageStateDone)
 	}
 	return SendOutcome{
 		MessageID: created.ID, TargetAgentID: target.ID, State: created.State,
@@ -448,23 +475,36 @@ func (s service) Wait(ctx context.Context, sessionID, agentID, messageID string,
 	ticker := time.NewTicker(waitPollInterval)
 	defer ticker.Stop()
 
+	state := msg.State
 	for {
+		if current, found, err := s.messages.Get(ctx, shardURL, messageID); err != nil {
+			return WaitOutcome{}, err
+		} else if found {
+			state = current.State
+		}
 		if reply, found, err := s.messages.FindReply(ctx, shardURL, sessionID, messageID); err != nil {
 			return WaitOutcome{}, err
 		} else if found {
-			return WaitOutcome{State: msg.State, Reply: &reply}, nil
+			return WaitOutcome{State: state, Reply: &reply}, nil
 		}
-		if current, found, err := s.messages.Get(ctx, shardURL, messageID); err != nil {
-			return WaitOutcome{}, err
-		} else if found && current.State == mongodb.MessageStateAcknowledged {
-			return WaitOutcome{State: current.State}, nil
+		if isFinalState(state) {
+			return WaitOutcome{State: state}, nil
 		}
 		select {
 		case <-waitCtx.Done():
-			return WaitOutcome{TimedOut: true}, nil
+			return WaitOutcome{State: state, TimedOut: true}, nil
 		case <-ticker.C:
 		}
 	}
+}
+
+// isFinalState reports whether a message can no longer change.
+func isFinalState(state string) bool {
+	switch state {
+	case mongodb.MessageStateDone, mongodb.MessageStateRejected, mongodb.MessageStateExpired, mongodb.MessageStateUndeliverable:
+		return true
+	}
+	return false
 }
 
 func (s service) Context(ctx context.Context, sessionID, agentID, forAgentName string, limit int) ([]mongodb.Message, error) {

@@ -1183,3 +1183,135 @@ func TestDeleteSessionsOlderThan_PropagatesTransactionErrorsWithoutTouchingState
 		t.Error("agent should NOT have been deleted: the transaction never committed")
 	}
 }
+
+// Acknowledged only means the recipient has the message: the wait goes on
+// until the reply (or a final state), like the local daemon's.
+func TestWait_KeepsWaitingPastAcknowledged(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ctx := context.Background()
+	alice := mustJoin(t, svc, SessionNew, "alice")
+	mustJoin(t, svc, alice.SessionID, "bob")
+	sent, err := svc.Send(ctx, alice.SessionID, alice.AgentID, SendRequest{To: "bob", Body: "question"})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := svc.Acknowledge(ctx, alice.SessionID, sent.TargetAgentID, sent.MessageID); err != nil {
+		t.Fatalf("Acknowledge: %v", err)
+	}
+	done := make(chan WaitOutcome, 1)
+	go func() {
+		outcome, _ := svc.Wait(ctx, alice.SessionID, alice.AgentID, sent.MessageID, 3*time.Second)
+		done <- outcome
+	}()
+	select {
+	case o := <-done:
+		t.Fatalf("Wait returned at acknowledged: %+v", o)
+	case <-time.After(400 * time.Millisecond):
+	}
+	if _, err := svc.Send(ctx, alice.SessionID, sent.TargetAgentID, SendRequest{To: "alice", Body: "answer", ReplyTo: sent.MessageID}); err != nil {
+		t.Fatalf("reply: %v", err)
+	}
+	select {
+	case o := <-done:
+		if o.Reply == nil || o.Reply.Body != "answer" {
+			t.Fatalf("outcome %+v, want the reply", o)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Wait never returned the reply")
+	}
+}
+
+func TestWait_EndsAtAFinalState(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ctx := context.Background()
+	alice := mustJoin(t, svc, SessionNew, "alice")
+	mustJoin(t, svc, alice.SessionID, "bob")
+	sent, err := svc.Send(ctx, alice.SessionID, alice.AgentID, SendRequest{To: "bob", Body: "fyi"})
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if err := svc.ReportState(ctx, alice.SessionID, sent.TargetAgentID, sent.MessageID, "done"); err != nil {
+		t.Fatalf("ReportState: %v", err)
+	}
+	start := time.Now()
+	o, err := svc.Wait(ctx, alice.SessionID, alice.AgentID, sent.MessageID, 3*time.Second)
+	if err != nil || o.TimedOut || o.State != "done" || time.Since(start) > time.Second {
+		t.Fatalf("outcome %+v err %v after %v, want done at once", o, err, time.Since(start))
+	}
+}
+
+func TestSend_FollowUpOnOwnMessageDoesNotCloseIt(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ctx := context.Background()
+	alice := mustJoin(t, svc, SessionNew, "alice")
+	mustJoin(t, svc, alice.SessionID, "bob")
+	first, err := svc.Send(ctx, alice.SessionID, alice.AgentID, SendRequest{To: "bob", Body: "do the thing"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Send(ctx, alice.SessionID, alice.AgentID, SendRequest{To: "bob", Body: "and also this", ReplyTo: first.MessageID}); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ := svc.PendingFor(ctx, alice.SessionID, first.TargetAgentID)
+	found := false
+	for _, m := range pending {
+		found = found || m.ID == first.MessageID
+	}
+	if !found {
+		t.Fatal("the first message was closed by its own sender's follow-up and will never be delivered")
+	}
+	// The recipient's reply still closes it.
+	if _, err := svc.Send(ctx, alice.SessionID, first.TargetAgentID, SendRequest{To: "alice", Body: "done", ReplyTo: first.MessageID}); err != nil {
+		t.Fatal(err)
+	}
+	pending, _ = svc.PendingFor(ctx, alice.SessionID, first.TargetAgentID)
+	for _, m := range pending {
+		if m.ID == first.MessageID {
+			t.Fatal("the recipient's reply did not close the message")
+		}
+	}
+}
+
+func TestSend_ReplyToAnotherSessionsMessageIsRefused(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ctx := context.Background()
+	a := mustJoin(t, svc, SessionNew, "alice")
+	mustJoin(t, svc, a.SessionID, "bob")
+	other := mustJoin(t, svc, SessionNew, "mallory")
+	mustJoin(t, svc, other.SessionID, "eve")
+	secret, err := svc.Send(ctx, a.SessionID, a.AgentID, SendRequest{To: "bob", Body: "private"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Send(ctx, other.SessionID, other.AgentID, SendRequest{To: "eve", Body: "x", ReplyTo: secret.MessageID}); err == nil {
+		t.Fatal("a reply_to into another session was accepted (and would have closed that message)")
+	}
+}
+
+// Names reach every other relay's message header; "user" would pass for the
+// human and a bracket or newline could reshape the header.
+func TestJoin_RefusesNamesAgentsMayNotHave(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ctx := context.Background()
+	for _, name := range []string{"", "user", "relay", "all", "Bob", "a b", "x]", "bob\n", "-bob", strings.Repeat("a", 33)} {
+		if _, err := svc.Join(ctx, JoinRequest{SessionID: SessionNew, Name: name, Tool: "agy", Role: "developer"}); !errors.Is(err, ErrBadName) {
+			t.Errorf("Join(%q) err = %v, want ErrBadName", name, err)
+		}
+	}
+	if _, err := svc.Join(ctx, JoinRequest{SessionID: SessionNew, Name: "bob-2", Tool: "agy", Role: "developer"}); err != nil {
+		t.Fatalf("a valid name was refused: %v", err)
+	}
+}
+
+func TestSend_RefusesUnknownKinds(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	ctx := context.Background()
+	alice := mustJoin(t, svc, SessionNew, "alice")
+	mustJoin(t, svc, alice.SessionID, "bob")
+	if _, err := svc.Send(ctx, alice.SessionID, alice.AgentID, SendRequest{To: "bob", Body: "x", Kind: "task\n[relay"}); err == nil {
+		t.Fatal("an unknown kind was accepted")
+	}
+	if _, err := svc.Send(ctx, alice.SessionID, alice.AgentID, SendRequest{To: "bob", Body: "x", Kind: "question"}); err != nil {
+		t.Fatalf("question refused: %v", err)
+	}
+}
