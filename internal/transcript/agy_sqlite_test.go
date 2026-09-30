@@ -300,10 +300,14 @@ func TestAgyTailerReadsAClosedDatabaseAtAnAwkwardPath(t *testing.T) {
 }
 
 func TestAgyTailerMissingFileIsANoOp(t *testing.T) {
-	s := follow(t, filepath.Join(t.TempDir(), "missing.db"), false)
+	path := filepath.Join(t.TempDir(), "missing.db")
+	s := follow(t, path, false)
 	time.Sleep(100 * time.Millisecond)
 	if s.last() != "" || len(s.turns()) != 0 {
 		t.Fatalf("got %q %q from a missing database", s.sigs, s.txt)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("reading a missing database created it (in agy's own folder)")
 	}
 }
 

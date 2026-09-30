@@ -60,7 +60,7 @@ func AgyDBURI(path string) string {
 	}
 	q := "mode=ro&_pragma=busy_timeout(3000)"
 	if _, err := os.Stat(path + "-wal"); err != nil {
-		q = "immutable=1"
+		q = "mode=ro&immutable=1" // mode=ro too: never create a missing file in agy's folder
 	}
 	return (&url.URL{Scheme: "file", Path: p, RawQuery: q}).String()
 }
