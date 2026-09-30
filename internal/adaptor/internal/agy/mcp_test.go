@@ -20,6 +20,10 @@ var (
 	fakeAgyOnce sync.Once
 	fakeAgyBin  string
 	fakeAgyErr  error
+	// buildEnv is the environment before any test points HOME at a temp
+	// dir: go build under that HOME would fill it with a read-only module
+	// cache (where GOPATH is unset) that t.TempDir cannot remove.
+	buildEnv = os.Environ()
 )
 
 // buildFakeAgy compiles testdata/fakeagy once per test binary run: a
@@ -38,7 +42,9 @@ func buildFakeAgy(t *testing.T) string {
 			name += ".exe" // go build -o with an explicit path does not add it
 		}
 		fakeAgyBin = filepath.Join(dir, name)
-		out, err := exec.Command("go", "build", "-o", fakeAgyBin, "../../../../testdata/fakeagy").CombinedOutput()
+		cmd := exec.Command("go", "build", "-o", fakeAgyBin, "../../../../testdata/fakeagy")
+		cmd.Env = buildEnv
+		out, err := cmd.CombinedOutput()
 		if err != nil {
 			fakeAgyErr = fmt.Errorf("%s: %w", out, err)
 		}

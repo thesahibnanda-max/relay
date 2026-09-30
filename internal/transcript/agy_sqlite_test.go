@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -273,7 +274,11 @@ func TestAgyTailerReassertsState(t *testing.T) {
 // read-only open then fails (confirmed live) unless the file is opened as
 // immutable. Paths with URI-special characters must work too.
 func TestAgyTailerReadsAClosedDatabaseAtAnAwkwardPath(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "a b#c?d%e")
+	name := "a b#c?d%e"
+	if runtime.GOOS == "windows" {
+		name = "a b#c%e" // ? is not allowed in a Windows file name
+	}
+	dir := filepath.Join(t.TempDir(), name)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
