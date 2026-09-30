@@ -104,3 +104,39 @@ func TestResolveGlobalServer_BuiltinMismatchedRequestIsRejected(t *testing.T) {
 		t.Fatal("expected an error rejecting the mismatched server, got nil")
 	}
 }
+
+// The creator dials, and prints for joiners, the same host:port: both get
+// the default port when none is given.
+func TestResolveGlobalServer_NoBuiltinNormalizesTheRequest(t *testing.T) {
+	old := builtinServerURL
+	builtinServerURL = ""
+	defer func() { builtinServerURL = old }()
+	for in, want := range map[string]string{
+		"relay.example.com":            "relay.example.com:5555",
+		"Relay.Example.COM:7000":       "relay.example.com:7000",
+		"ws://relay.example.com:7000/": "relay.example.com:7000",
+		"https://relay.example.com":    "relay.example.com:5555",
+		"[::1]":                        "[::1]:5555",
+		"":                             "",
+	} {
+		if got, tls, err := resolveGlobalServer(in); err != nil || tls || got != want {
+			t.Errorf("resolveGlobalServer(%q) = %q %v %v, want %q", in, got, tls, err, want)
+		}
+	}
+}
+
+// A release build is locked to one host however it is spelled - including a
+// hand-typed join token without a port (which parses as :5555).
+func TestResolveGlobalServer_BuiltinAcceptsItsHostHoweverSpelled(t *testing.T) {
+	old := builtinServerURL
+	builtinServerURL = "relay.example.com"
+	defer func() { builtinServerURL = old }()
+	for _, in := range []string{"relay.example.com", "RELAY.example.com", "https://relay.example.com/", "relay.example.com:443", "relay.example.com:5555"} {
+		if got, tls, err := resolveGlobalServer(in); err != nil || !tls || got != "relay.example.com:443" {
+			t.Errorf("resolveGlobalServer(%q) = %q %v %v", in, got, tls, err)
+		}
+	}
+	if _, _, err := resolveGlobalServer("evil.example.com"); err == nil {
+		t.Error("another host was accepted")
+	}
+}
