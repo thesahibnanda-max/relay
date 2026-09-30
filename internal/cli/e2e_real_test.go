@@ -20,6 +20,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -34,6 +35,8 @@ import (
 
 	"github.com/charmbracelet/x/vt"
 	"github.com/creack/pty"
+
+	"github.com/thesahibnanda-max/relay/internal/transcript"
 )
 
 var (
@@ -128,11 +131,15 @@ func newLive(t *testing.T) *live {
 	cfg := snapshot(filepath.Join(l.gemini, "config", "mcp_config.json"))
 	settings := snapshot(filepath.Join(l.gemini, "antigravity-cli", "settings.json"))
 	allowRelayTools(settings)
+	allowed := snapshot(settings.path) // what relay must leave exactly as it is
 	t.Cleanup(func() {
 		stop := exec.Command(l.relay, "daemon", "stop")
 		stop.Env = l.env // this test's RELAY_HOME: never the user's own daemon
 		_ = stop.Run()
 		cfgOK := cfg.unchanged()
+		if !allowed.unchanged() {
+			t.Errorf("relay changed agy's %s during the test", settings.path)
+		}
 		cfg.restore()
 		settings.restore()
 		os.RemoveAll(l.home)
@@ -364,9 +371,56 @@ func (l *live) waitState(id string, d time.Duration, want ...string) string {
 
 func (l *live) agy(name string, extra ...string) *liveProc {
 	l.t.Helper()
+	since := time.Now()
 	p := l.start("agy", append([]string{"developer", "--session=NEW_LOCAL", "--name=" + name}, extra...)...)
-	p.waitScreen(3*time.Minute, "agy ready after the briefing turn", regexp.MustCompile(`for shortcuts`))
+	l.waitBriefed(p, name, since)
 	return p
+}
+
+// touchedSince lists the conversations agy wrote to since t (earlier runs'
+// conversations, with their own briefings, stay out of it).
+func (l *live) touchedSince(t time.Time) []string {
+	var out []string
+	for f := range l.conversations() {
+		for _, p := range []string{f, f + "-wal"} {
+			if st, err := os.Stat(p); err == nil && !st.ModTime().Before(t) {
+				out = append(out, f)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// conversations lists agy's conversation databases.
+func (l *live) conversations() map[string]bool {
+	out := map[string]bool{}
+	files, _ := filepath.Glob(filepath.Join(l.gemini, "antigravity-cli", "conversations", "*.db"))
+	for _, f := range files {
+		out[f] = true
+	}
+	return out
+}
+
+// waitBriefed waits until name's briefing turn is in one of agy's
+// conversations and agy is idle again ("for shortcuts" alone also shows
+// while agy is still signing in).
+func (l *live) waitBriefed(p *liveProc, name string, since time.Time) {
+	l.t.Helper()
+	mark := `You are "` + name + `", working in a Relay session`
+	deadline := time.Now().Add(3 * time.Minute)
+	for time.Now().Before(deadline) {
+		for _, f := range l.touchedSince(since) {
+			for _, turn := range transcript.AgyUserTurns(context.Background(), f) {
+				if strings.Contains(turn, mark) {
+					p.waitScreen(3*time.Minute, "agy idle after the briefing turn", regexp.MustCompile(`for shortcuts`))
+					return
+				}
+			}
+		}
+		time.Sleep(time.Second)
+	}
+	l.t.Fatalf("%s's briefing never reached a conversation; screen:\n%s", name, p.screen())
 }
 
 // The #50 path end to end on the real agy: tools present, briefing as the
@@ -374,7 +428,17 @@ func (l *live) agy(name string, extra ...string) *liveProc {
 // and answered.
 func TestRealAgyMessageIsDeliveredAndAnswered(t *testing.T) {
 	l := newLive(t)
+	before := l.conversations()
 	bob := l.agy("bob")
+	var created []string
+	for f := range l.conversations() {
+		if !before[f] {
+			created = append(created, f)
+		}
+	}
+	if len(created) != 1 {
+		t.Fatalf("the launch made %d conversations, want 1 (relay typed while agy signed in?): %v", len(created), created)
+	}
 	id := l.send("bob", "What is 17 plus 25? Reply in this terminal with just the number. Do not use any tools.")
 	l.waitState(id, 3*time.Minute, "acknowledged", "done")
 	bob.waitScreen(3*time.Minute, "the answer", regexp.MustCompile(`(?m)^\s*42\s*$`))
@@ -450,11 +514,28 @@ func TestRealAgyToAgyThroughRelayTools(t *testing.T) {
 // /new starts a conversation without the briefing; relay briefs it again.
 func TestRealAgyNewConversationIsBriefed(t *testing.T) {
 	l := newLive(t)
+	since := time.Now()
 	bob := l.agy("bob")
 	bob.pty.Write([]byte("/new"))
 	time.Sleep(time.Second)
 	bob.pty.Write([]byte("\r"))
-	bob.waitScreen(3*time.Minute, "the briefing typed into the new conversation", regexp.MustCompile(`You are "bob", working in a Relay session`))
+	// Both conversations - the first and the one /new made - hold it.
+	deadline := time.Now().Add(3 * time.Minute)
+	for n := 0; n < 2; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the new conversation was never briefed; screen:\n%s", bob.screen())
+		}
+		time.Sleep(time.Second)
+		n = 0
+		for _, f := range l.touchedSince(since) {
+			for _, turn := range transcript.AgyUserTurns(context.Background(), f) {
+				if strings.Contains(turn, `You are "bob", working in a Relay session`) {
+					n++
+					break
+				}
+			}
+		}
+	}
 	id := l.send("bob", "Reply with only the word renewed. No tools.")
 	l.waitState(id, 3*time.Minute, "acknowledged", "done")
 }
@@ -496,4 +577,65 @@ func TestRealAgyGlobalSession(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	bob.pty.Write([]byte("\r"))
 	carol.waitScreen(4*time.Minute, "bob's message typed into carol's agy", regexp.MustCompile(`\[relay \| from bob \(developer\)[\s\S]*ping-global-9`))
+}
+
+// -c resumes the latest conversation: this launch's briefing is added once
+// (after sign-in), and a message after it is answered.
+func TestRealAgyResumeIsBriefedOnce(t *testing.T) {
+	l := newLive(t)
+	bob := l.agy("bob")
+	sid := regexp.MustCompile(`session ([0-9A-Z]{26})`).FindStringSubmatch(bob.output())
+	if sid == nil {
+		t.Fatalf("no session id in:\n%s", bob.output())
+	}
+	bob.quit()
+	since := time.Now()
+	carol := l.start("agy", "developer", "--session="+sid[1], "--name=carol", "--", "-c")
+	l.waitBriefed(carol, "carol", since)
+	id := l.send("carol", "What is 20 plus 22? Reply with just the number. No tools.")
+	l.waitState(id, 3*time.Minute, "acknowledged", "done")
+	n := 0
+	for _, f := range l.touchedSince(since) {
+		for _, turn := range transcript.AgyUserTurns(context.Background(), f) {
+			n += strings.Count(turn, `You are "carol", working in a Relay session (id `+sid[1])
+		}
+	}
+	if n != 1 {
+		t.Fatalf("carol was briefed %d times", n)
+	}
+}
+
+// An urgent message interrupts a long answer (Esc), then is delivered.
+func TestRealAgyUrgentMessageInterrupts(t *testing.T) {
+	l := newLive(t)
+	bob := l.agy("bob")
+	bob.pty.Write([]byte("\x1b[200~Write a 3000-word essay on the history of the printing press. No tools.\x1b[201~"))
+	time.Sleep(500 * time.Millisecond)
+	bob.pty.Write([]byte("\r"))
+	bob.waitScreen(time.Minute, "agy busy", regexp.MustCompile(`esc to cancel`))
+	out := l.run("send", "--priority=interrupt", "bob", "Stop. What is 9 plus 9? Reply with just the number. No tools.")
+	m := sentID.FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("relay send: %s", out)
+	}
+	l.waitState(m[1], 3*time.Minute, "acknowledged", "done")
+	bob.waitScreen(3*time.Minute, "the answer", regexp.MustCompile(`(?m)^\s*18\s*$`))
+}
+
+// Piped stdin that ends ends relay agy (agy wants Ctrl+D twice), cleanly.
+func TestRealAgyEndsWhenPipedStdinEnds(t *testing.T) {
+	l := newLive(t)
+	cmd := exec.Command(l.relay, "agy")
+	cmd.Env, cmd.Dir, cmd.Stdin = l.env, l.cwd, strings.NewReader("")
+	done := make(chan error, 1)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Minute):
+		cmd.Process.Kill()
+		t.Fatal("relay agy did not exit after its stdin ended")
+	}
 }
