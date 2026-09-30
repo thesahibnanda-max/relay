@@ -26,6 +26,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/thesahibnanda-max/relay/internal/globalid"
+	"github.com/thesahibnanda-max/relay/internal/ids"
 	"github.com/thesahibnanda-max/relay/internal/proto"
 )
 
@@ -210,6 +211,13 @@ func (c *Client) dialAndHello(ctx context.Context, h helloFrame) (*websocket.Con
 		if err := json.Unmarshal(env.Payload, &w); err != nil {
 			ws.CloseNow()
 			return nil, welcomeFrame{}, err
+		}
+		// The agent id names directories and files here (run dir, agy
+		// lease): from a server we do not control, only a ULID is safe to
+		// put in a path.
+		if !ids.Valid(w.AgentID) {
+			ws.CloseNow()
+			return nil, welcomeFrame{}, fmt.Errorf("server assigned an invalid agent id %q", w.AgentID)
 		}
 		return ws, w, nil
 	case typeError:

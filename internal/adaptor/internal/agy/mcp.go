@@ -46,6 +46,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/thesahibnanda-max/relay/internal/ids"
 	"github.com/thesahibnanda-max/relay/internal/relayhome"
 )
 
@@ -459,6 +460,9 @@ func withLock(s regState, fn func() error) error {
 // added, so a crash at any point leaves only things the next launch or
 // `relay gc` cleans up. notes are for the user.
 func Register(o Options, agentID string) (notes []string, err error) {
+	if !ids.Valid(agentID) {
+		return nil, fmt.Errorf("invalid agent id %q", agentID) // it names a lease file
+	}
 	s, err := o.state()
 	if err != nil {
 		return nil, err
@@ -533,6 +537,9 @@ func Register(o Options, agentID string) (notes []string, err error) {
 // Unregister ends agentID's lease and, if it was the last live one, removes
 // relay's entry and restores agy's config exactly as the user had it.
 func Unregister(o Options, agentID string) error {
+	if !ids.Valid(agentID) {
+		return fmt.Errorf("invalid agent id %q", agentID)
+	}
 	s, err := o.state()
 	if err != nil {
 		return err

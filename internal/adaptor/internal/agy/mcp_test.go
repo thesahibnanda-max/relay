@@ -521,3 +521,19 @@ func TestFakeAgyLosesWritesWithoutTheLock(t *testing.T) {
 		t.Fatal("fakeagy never lost a concurrent write: it no longer models agy's missing locking")
 	}
 }
+
+// An agent id names a lease file: one that is not a ULID never reaches a path.
+func TestRegisterRefusesAnInvalidAgentID(t *testing.T) {
+	r := newRig(t)
+	for _, bad := range []string{"../../x", "a/b", ""} {
+		if _, err := Register(r.opt, bad); err == nil {
+			t.Fatalf("Register(%q) succeeded", bad)
+		}
+		if err := Unregister(r.opt, bad); err == nil {
+			t.Fatalf("Unregister(%q) succeeded", bad)
+		}
+	}
+	if _, ok := r.read(); ok {
+		t.Fatal("agy's config was touched")
+	}
+}

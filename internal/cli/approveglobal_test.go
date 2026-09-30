@@ -119,7 +119,7 @@ func (f *fakeGlobalServer) serve(w http.ResponseWriter, r *http.Request) {
 	var h wireHello
 	_ = json.Unmarshal(env.Payload, &h)
 
-	welcome := wireWelcome{SessionID: h.Session, AgentID: "agent-1", Name: h.Name, Resumed: h.Token != ""}
+	welcome := wireWelcome{SessionID: h.Session, AgentID: "01ARZ3NDEKTSV4RRFFQ69G5F01", Name: h.Name, Resumed: h.Token != ""}
 	if c.Write(ctx, websocket.MessageText, marshalWire("welcome", welcome)) != nil {
 		return
 	}
