@@ -38,11 +38,11 @@ make fmt          # gofmt -w .
 
 CI drives fakes (`testdata/fakeagent`, `testdata/fakeagy`). Changes to how Relay reads a tool's screen,
 transcript or database, or types into it, also need a run against the real tool, which spends model
-quota. For `agy`, with an authenticated `agy` on your `PATH` and a working directory its folder-trust
-prompt has already been accepted for:
+quota. For `agy`, with an authenticated `agy` on your `PATH` (the tests trust their working directory,
+`RELAY_AGY_CWD`, default `~/.relay-agy-lab/live`, for their own duration):
 
 ```sh
-RELAY_AGY_CWD=~/some/trusted/dir go test -tags e2e_real -run RealAgy -v -timeout 60m -count=1 ./internal/cli
+go test -tags e2e_real -run RealAgy -v -timeout 60m -count=1 ./internal/cli
 ```
 
 It uses your real `~/.gemini` (with an isolated `RELAY_HOME`), fails if agy's config files are not left

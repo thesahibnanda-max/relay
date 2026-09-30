@@ -489,7 +489,9 @@ func (t *tui) turnLoop() {
 	for range t.turnWake {
 		for {
 			t.mu.Lock()
-			if !t.ready || t.busy || t.trusting || len(t.queue) == 0 {
+			// Real agy (1.2.14, seen live) runs the -i prompt while its
+			// folder-trust prompt is still up; anything typed waits for it.
+			if !t.ready || t.busy || len(t.queue) == 0 || (t.trusting && !strings.HasPrefix(t.queue[0], "\x00")) {
 				t.mu.Unlock()
 				break
 			}

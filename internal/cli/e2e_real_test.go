@@ -8,19 +8,19 @@
 //
 // RELAY_AGY_DIR=/dir/with/an/agy pins the agy version under test (put a
 // copy of that version's binary there, named agy). RELAY_AGY_CWD is the
-// working directory agy runs in (default ~/.relay-agy-lab/live, which agy's
-// folder-trust prompt must already have been accepted for).
+// working directory agy runs in (default ~/.relay-agy-lab/live).
 //
-// agy's user-global files are snapshotted before every test and must be
-// byte-identical afterwards (the test fails otherwise, after restoring them):
-// ~/.gemini/config/mcp_config.json and ~/.gemini/antigravity-cli/settings.json.
-// For the duration of a test, "mcp(relay/*)" is added to the latter so agy
-// does not ask before each relay tool call.
+// agy's user-global files are snapshotted before every test and restored
+// after it: ~/.gemini/config/mcp_config.json must come back byte-identical
+// (the test fails otherwise). For the duration of a test, agy's
+// settings.json allows relay's tools ("mcp(relay/*)") and trusts the working
+// directory, and relay must not change it further.
 package cli
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -130,7 +130,7 @@ func newLive(t *testing.T) *live {
 
 	cfg := snapshot(filepath.Join(l.gemini, "config", "mcp_config.json"))
 	settings := snapshot(filepath.Join(l.gemini, "antigravity-cli", "settings.json"))
-	allowRelayTools(settings)
+	prepareAgySettings(t, settings, l.cwd)
 	allowed := snapshot(settings.path) // what relay must leave exactly as it is
 	t.Cleanup(func() {
 		stop := exec.Command(l.relay, "daemon", "stop")
@@ -162,25 +162,39 @@ func agyVersion(agy string, env []string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// allowRelayTools adds "mcp(relay/*)" to agy's permissions (the one-time
-// step the launch note asks users to take).
-func allowRelayTools(f liveFile) {
-	s := string(f.data)
-	if strings.Contains(s, `"mcp(relay/*)"`) {
-		return
+// prepareAgySettings allows relay's tools in agy (what `relay agy` offers at
+// launch) and trusts the test's working directory, so agy neither asks
+// before each relay tool call nor shows its folder-trust prompt. Both are
+// undone when the test ends (newLive restores the file).
+func prepareAgySettings(t *testing.T, f liveFile, cwd string) {
+	t.Helper()
+	settings := map[string]any{}
+	if f.exists && len(bytes.TrimSpace(f.data)) > 0 {
+		if err := json.Unmarshal(f.data, &settings); err != nil {
+			t.Fatalf("agy's %s: %v", f.path, err)
+		}
 	}
-	switch {
-	case !f.exists || strings.TrimSpace(s) == "":
-		s = `{"permissions":{"allow":["mcp(relay/*)"]}}`
-	case strings.Contains(s, `"allow": [`):
-		s = strings.Replace(s, `"allow": [`, `"allow": ["mcp(relay/*)", `, 1)
-	case strings.Contains(s, `"permissions"`):
-		s = strings.Replace(s, `"permissions": {`, `"permissions": {"allow": ["mcp(relay/*)"], `, 1)
-	default:
-		s = strings.Replace(s, "{", `{"permissions": {"allow": ["mcp(relay/*)"]}, `, 1)
+	add := func(list any, v string) []any {
+		l, _ := list.([]any)
+		for _, x := range l {
+			if x == v {
+				return l
+			}
+		}
+		return append(l, v)
 	}
+	perms, _ := settings["permissions"].(map[string]any)
+	if perms == nil {
+		perms = map[string]any{}
+	}
+	perms["allow"] = add(perms["allow"], "mcp(relay/*)")
+	settings["permissions"] = perms
+	settings["trustedWorkspaces"] = add(settings["trustedWorkspaces"], cwd)
+	data, _ := json.MarshalIndent(settings, "", "  ")
 	os.MkdirAll(filepath.Dir(f.path), 0o755)
-	os.WriteFile(f.path, []byte(s), 0o644)
+	if err := os.WriteFile(f.path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (l *live) run(args ...string) string {

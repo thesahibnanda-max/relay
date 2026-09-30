@@ -531,8 +531,9 @@ func TestAgyE2EDeliversWithoutAgysLog(t *testing.T) {
 // agyLogWaitForTests covers collab's agyLogWait and then some.
 const agyLogWaitForTests = 45 * time.Second
 
-// agy's folder-trust prompt comes before anything else: nothing is typed
-// into it; once trusted, the briefing runs, then the message.
+// agy runs the -i briefing while its folder-trust prompt is still up (real
+// agy 1.2.14): the briefing turn ends, but the prompt is a dialog, so
+// nothing is typed into it; once trusted, the message follows.
 func TestAgyE2EHoldsMessagesBehindTheTrustPrompt(t *testing.T) {
 	w := newWorld(t)
 	saved := w.env
@@ -540,9 +541,10 @@ func TestAgyE2EHoldsMessagesBehindTheTrustPrompt(t *testing.T) {
 	bob := w.start("agy", "developer", "--session=NEW_LOCAL", "--name=bob")
 	w.env = saved
 	bob.waitEvent("mcp_ready", "tools", "relay_send")
+	bob.waitEvent("turn_end", "outcome", "") // the briefing, behind the trust prompt
 	id := w.send("bob", "What is 2 plus 2?")
 	time.Sleep(2 * time.Second)
-	if len(bob.events("trusted")) != 0 || len(bob.submits()) != 0 {
+	if len(bob.events("trusted")) != 0 || len(bob.submits()) != 1 {
 		t.Fatalf("typed into the trust prompt: trusted=%v submits=%q", bob.events("trusted"), bob.submits())
 	}
 	bob.pty.Write([]byte("\r")) // the user trusts the folder
