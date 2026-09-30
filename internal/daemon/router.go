@@ -385,8 +385,10 @@ func (s *Server) routeSend(ctx context.Context, sessionID string, from sender, a
 			notes = append(notes, fmt.Sprintf("held for %s: %s", t.Name, detail))
 		}
 		s.log.Info("message accepted", "id", m.ID, "from", from.name, "to", t.Name, "kind", kind, "priority", prio, "state", m.State)
-		if parent != nil {
-			// The reply proves the parent was read and handled.
+		if parent != nil && parent.ToAgent == from.id {
+			// The recipient's reply proves the parent was read and handled. A
+			// follow-up by the parent's own sender proves nothing of the sort:
+			// the parent may still be waiting to be delivered.
 			_, _, _ = s.st.Advance(ctx, parent.ID, store.MsgDone, "answered by "+m.ID)
 		}
 		s.spawn(func() { s.flush(t.ID, false) })
@@ -532,7 +534,10 @@ func (s *Server) waitMessage(ctx context.Context, me *agentConn, a proto.WaitArg
 			res.Reply = &v
 			return res, nil
 		}
-		if store.IsTerminal(m.State) || m.State == store.MsgAcknowledged {
+		// Only a reply or a final state ends the wait: "acknowledged" merely
+		// means the model has the message, seconds after it was typed, and
+		// returning then would make every caller poll for the actual answer.
+		if store.IsTerminal(m.State) {
 			return res, nil
 		}
 		select {

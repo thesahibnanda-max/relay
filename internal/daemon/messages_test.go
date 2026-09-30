@@ -786,3 +786,46 @@ func TestSlowConsumerIsDroppedAndNothingIsLost(t *testing.T) {
 		t.Fatalf("messages lost across the slow-consumer drop: got %d of %d", len(seen), total)
 	}
 }
+
+// relay_wait waits for the answer: "acknowledged" (the model has the
+// message, seconds after it was typed) must not end it, or every caller has
+// to poll for the reply it asked to wait for.
+func TestWaitReturnsTheReplyNotTheAcknowledgement(t *testing.T) {
+	e := startServer(t)
+	sid := e.newSession()
+	alice := e.joinPeer(sid, proto.Hello{Name: "alice", Role: "developer"})
+	bob := e.joinPeer(sid, proto.Hello{Name: "bob", Role: "developer"})
+	m := alice.mustSend(proto.SendArgs{To: "bob", Kind: "question", Body: "how many tests?"})
+	bob.mustDeliver()
+	if r := bob.rpc(proto.OpMsgState, proto.MsgStateArgs{ID: m.ID, State: "acknowledged"}); !r.OK {
+		t.Fatalf("msg_state: %+v", r.Error)
+	}
+	go func() {
+		time.Sleep(800 * time.Millisecond)
+		bob.mustSend(proto.SendArgs{ReplyTo: m.ID, Body: "12"})
+	}()
+	start := time.Now()
+	r := alice.rpc(proto.OpWait, proto.WaitArgs{ID: m.ID, TimeoutS: 4})
+	var w proto.WaitResult
+	json.Unmarshal(r.Result, &w)
+	if !r.OK || w.Reply == nil || w.Reply.Body != "12" {
+		t.Fatalf("wait returned %+v %+v after %v, want the reply", r, w, time.Since(start))
+	}
+	if time.Since(start) < 600*time.Millisecond {
+		t.Fatalf("wait returned before the reply existed (%v)", time.Since(start))
+	}
+}
+
+// A follow-up that points reply_to at one's own, not yet delivered message
+// must not close it: only the recipient's reply proves it was handled.
+func TestFollowUpOnOwnMessageDoesNotCloseIt(t *testing.T) {
+	e := startServer(t)
+	sid := e.newSession()
+	alice := e.joinPeer(sid, proto.Hello{Name: "alice", Role: "developer"})
+	e.joinPeer(sid, proto.Hello{Name: "bob", Role: "developer"})
+	first := alice.mustSend(proto.SendArgs{To: "bob", Body: "do the thing"})
+	alice.mustSend(proto.SendArgs{To: "bob", ReplyTo: first.ID, Body: "and also this"})
+	if got, _ := e.srv.st.GetMessage(bg, first.ID); store.IsTerminal(got.State) {
+		t.Fatalf("the first message was closed (%s) by its own sender's follow-up: never delivered", got.State)
+	}
+}

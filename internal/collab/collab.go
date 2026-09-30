@@ -240,6 +240,9 @@ func (e *sessionEnv) Report(ctx context.Context, id, st string) error {
 
 // ---- control socket (MCP shim) ------------------------------------------------------
 
+// maxWaitS is the longest single relay_wait (the daemon's own cap).
+const maxWaitS = 45
+
 // tool-facing argument shapes (what the model sends)
 type inboxArgs struct {
 	Limit int  `json:"limit"`
@@ -332,8 +335,11 @@ func (s *Session) HandleCtl(ctx context.Context, op string, args json.RawMessage
 		if json.Unmarshal(args, &a) != nil || a.MsgID == "" {
 			return nil, pending, &proto.Error{Code: proto.CodeBadRequest, Message: "msg_id is required"}
 		}
-		if a.TimeoutS <= 0 {
+		if a.TimeoutS <= 0 || a.TimeoutS != a.TimeoutS { // also NaN
 			a.TimeoutS = 20
+		}
+		if a.TimeoutS > maxWaitS {
+			a.TimeoutS = maxWaitS // the router caps it too; this keeps the Duration below from overflowing
 		}
 		var r proto.WaitResult
 		wctx, cancel := context.WithTimeout(ctx, time.Duration(a.TimeoutS*float64(time.Second))+10*time.Second)
