@@ -37,3 +37,18 @@ func FuzzCodexParser(f *testing.F) {
 		`{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["a","b"],"stdout":"o"}}}`,
 		`{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":"notalist"}}}`, `{"payload":1}`, `x`)
 }
+
+// agy's databases and logs are another program's files: nothing in them may
+// crash relay.
+func FuzzAgyReaders(f *testing.F) {
+	f.Add([]byte{0x08, 0x04, 0x10, 0x01, 0x18, 0x0d, 0x4a, 0x02, 'h', 'i'})
+	f.Add([]byte("I0930 x] Created conversation 938faa13-bb0d-4fe0-9a4d-2218dab07166"))
+	f.Add([]byte(`I0930 x] HandleUserInput called with text: "a\"b"`))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		pbString(b, 19, 2)
+		pbString(b, 20, 1)
+		pbUint(b, 3)
+		pbUint(b, 5, 1, 1)
+		ParseAgyLogLine(string(b))
+	})
+}
