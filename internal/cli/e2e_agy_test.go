@@ -39,6 +39,38 @@ func (w *world) readAgyConfig() (string, bool) {
 	return string(data), err == nil
 }
 
+// agyFootprint is footprint without what agy itself writes: its
+// conversations, and its logs (where relay also hands back the log of each
+// launch, under agy's own naming).
+func (w *world) agyFootprint() map[string]string {
+	fp := w.footprint()
+	for p := range fp {
+		for _, own := range []string{"conversations", "log"} {
+			if strings.HasPrefix(filepath.ToSlash(p), "/.gemini/antigravity-cli/"+own+"/") {
+				delete(fp, p)
+			}
+		}
+	}
+	return fp
+}
+
+// assertAgyFootprint checks nothing outside agy's own records changed since
+// before (every other file under the fake home, agy's included).
+func (w *world) assertAgyFootprint(before map[string]string) {
+	w.t.Helper()
+	after := w.agyFootprint()
+	for p, h := range after {
+		if before[p] != h {
+			w.t.Errorf("%s was created or changed", p)
+		}
+	}
+	for p := range before {
+		if _, ok := after[p]; !ok {
+			w.t.Errorf("%s was removed", p)
+		}
+	}
+}
+
 // assertAgyPristine checks agy's config is byte-for-byte what the test
 // wrote, and nothing else of relay's is left in agy's directories.
 func (w *world) assertAgyPristine(orig string) {
@@ -154,6 +186,9 @@ func (w *world) waitState(id, want string) {
 func TestAgyE2EMessageRoundTripAndPristineExit(t *testing.T) {
 	w := newWorld(t)
 	w.writeAgyConfig("")
+	os.MkdirAll(filepath.Join(w.home, ".gemini", "antigravity-cli"), 0o755)
+	os.WriteFile(filepath.Join(w.home, ".gemini", "antigravity-cli", "settings.json"), []byte(`{"trustedWorkspaces":[]}`), 0o644)
+	before := w.agyFootprint()
 	bob := w.startAgy("bob")
 	if !strings.Contains(bob.output(), "mcp(relay/*)") {
 		t.Error("no hint about allowing relay's tools in agy")
@@ -163,6 +198,7 @@ func TestAgyE2EMessageRoundTripAndPristineExit(t *testing.T) {
 	w.waitState(id, "acknowledged")
 	bob.quitAgy()
 	w.assertAgyPristine("")
+	w.assertAgyFootprint(before)
 	logs, _ := filepath.Glob(filepath.Join(w.home, ".gemini", "antigravity-cli", "log", "cli-*.log"))
 	if len(logs) != 1 {
 		t.Fatalf("agy's log was not handed back to agy: %v", logs)

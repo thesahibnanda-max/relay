@@ -261,3 +261,20 @@ func TestAgyVersionOutsideTheTestedRangeWarns(t *testing.T) {
 		}
 	}
 }
+
+// agy's own files are scanned too. Its settings may carry the permission
+// rule a user allowed at relay's offer: that alone is not a stray footprint.
+func TestFootprintCoversAgy(t *testing.T) {
+	env, home := testEnv(t)
+	settings := filepath.Join(home, ".gemini", "antigravity-cli", "settings.json")
+	os.MkdirAll(filepath.Dir(settings), 0o755)
+	os.WriteFile(settings, []byte(`{"permissions":{"allow":["mcp(relay/*)"]}}`), 0o644)
+	if c := find(Run(env), "zero footprint"); c.Status != OK {
+		t.Fatalf("the allowed permission rule was flagged: %+v", c)
+	}
+	gem := filepath.Join(home, ".gemini", "GEMINI.md")
+	os.WriteFile(gem, []byte("You are \"bob\", working in a Relay session (id X)"), 0o644)
+	if c := find(Run(env), "zero footprint"); c.Status != Warn || !strings.Contains(c.Detail, gem) {
+		t.Fatalf("a briefing pasted into agy's GEMINI.md was not flagged: %+v", c)
+	}
+}

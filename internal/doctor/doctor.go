@@ -298,6 +298,9 @@ func checkFootprint(env Env) []Check {
 		filepath.Join(copilotHome, "mcp-config.json"), filepath.Join(copilotHome, "config.json"), filepath.Join(copilotHome, "settings.json"),
 		filepath.Join(env.Cwd, ".mcp.json"), filepath.Join(env.Cwd, ".claude", "settings.json"), filepath.Join(env.Cwd, ".claude", "settings.local.json"),
 		filepath.Join(env.Cwd, "CLAUDE.md"), filepath.Join(env.Cwd, "AGENTS.md"), filepath.Join(env.Cwd, ".codex", "config.toml"),
+		// agy (its MCP config, where relay's entry lives while in use, is checkAgy's).
+		filepath.Join(env.Home, ".gemini", "antigravity-cli", "settings.json"), filepath.Join(env.Home, ".gemini", "GEMINI.md"),
+		filepath.Join(env.Cwd, "GEMINI.md"),
 	}
 	// Copilot's hooks live one per file in a directory, not a fixed path, so
 	// they need a glob rather than a literal entry in the files list above.
