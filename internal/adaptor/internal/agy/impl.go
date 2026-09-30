@@ -82,6 +82,10 @@ func (a *AgyAdaptor) Prepare(spec launch.Spec) (launch.Plan, error) {
 			plan.Args = append([]string{"--log-file", plan.ToolLog}, plan.Args...)
 		}
 		plan.VerifySubmit = true
+		// Confirmed live (1.2.14): prompts typed while agy is still signing
+		// in are each put in a conversation of their own before the -i
+		// briefing runs. Wait for agy's database to report that first turn done.
+		plan.StartupGate = spec.WithMCP
 	}
 	if spec.Briefing != "" {
 		plan.Args = withBriefing(plan.Args, spec.Briefing)

@@ -37,8 +37,9 @@ type native struct {
 	codexOnce   sync.Once
 	copilotOnce sync.Once
 	agyOnce     sync.Once
-	toolLog     string // the log the tool writes for this launch (agy)
-	briefing    string // re-typed when the tool switches to a fresh conversation (agy)
+	toolLog     string          // the log the tool writes for this launch (agy)
+	briefing    string          // typed into a conversation that lacks it (agy)
+	briefed     map[string]bool // conversations known to hold the briefing (agy)
 }
 
 // SetToolLog names the diagnostic log the tool writes for this launch.
@@ -53,17 +54,77 @@ func (s *Session) SetToolLog(path string) {
 func (s *Session) SetBriefing(b string) {
 	s.nat.mu.Lock()
 	s.nat.briefing = strings.TrimSpace(b)
+	if s.nat.briefed == nil {
+		s.nat.briefed = map[string]bool{}
+	}
 	s.nat.mu.Unlock()
 }
 
-// rebrief queues the briefing to be typed into a conversation that started
-// without it.
-func (s *Session) rebrief() {
-	s.nat.mu.Lock()
+// briefingMark is what identifies this launch's briefing in a conversation:
+// its first sentence, up to the session id.
+func (s *Session) briefingMark() string {
 	b := s.nat.briefing
+	if i := strings.Index(b, ")"); i > 0 {
+		return b[:i+1]
+	}
+	return b
+}
+
+// noteBriefed records that the live conversation contains the briefing.
+func (s *Session) noteBriefed(userText string) {
+	s.nat.mu.Lock()
+	defer s.nat.mu.Unlock()
+	if m := s.briefingMark(); m != "" && strings.Contains(userText, m) {
+		s.nat.briefed[s.nat.trPath] = true
+	}
+}
+
+// openGateIfLeftBriefed opens the startup gate when agy moves on from a
+// conversation that holds the briefing: startup is over even if that turn
+// never finished where relay could see it (/new while it ran). Conversations
+// agy made for prompts that raced its sign-in hold no briefing and keep the
+// gate shut.
+func (s *Session) openGateIfLeftBriefed(ctx context.Context, next string) {
+	if !s.gateClosed.Load() {
+		return
+	}
+	s.nat.mu.Lock()
+	prev, m := s.nat.trPath, s.briefingMark()
+	known := s.nat.briefed[prev]
 	s.nat.mu.Unlock()
-	if b != "" {
-		s.bus.AddBootstrap(b)
+	if prev == "" || prev == next || m == "" {
+		return
+	}
+	if !known {
+		for _, t := range transcript.AgyUserTurns(ctx, prev) {
+			if strings.Contains(t, m) {
+				known = true
+				break
+			}
+		}
+	}
+	if known {
+		s.nat.mu.Lock()
+		s.nat.briefed[prev] = true
+		s.nat.mu.Unlock()
+		s.openGate()
+	}
+}
+
+// briefIfNeeded types the briefing into the live conversation, once, if it
+// went idle without it - after /new, or a conversation agy switched to on
+// its own. Typed as a turn of its own, it says there is no task yet, or the
+// model goes exploring behind permission prompts.
+func (s *Session) briefIfNeeded() {
+	s.nat.mu.Lock()
+	path, b := s.nat.trPath, s.nat.briefing
+	need := b != "" && path != "" && !s.nat.briefed[path]
+	if need {
+		s.nat.briefed[path] = true // once per conversation, whatever happens next
+	}
+	s.nat.mu.Unlock()
+	if need && !s.gateClosed.Load() {
+		s.bus.AddBootstrap(b + "\n\nThis message is only your briefing and there is no task yet: reply with one short line and wait for work to arrive.")
 	}
 }
 
@@ -144,22 +205,30 @@ func (s *Session) followAgy(ctx context.Context) {
 	if logPath == "" {
 		return
 	}
-	seen := 0
+	subagents := map[string]bool{} // goroutines starting a subagent's conversation
 	f := &transcript.AgyLogFollower{Path: logPath, Fn: func(ev transcript.AgyLogEvent) {
 		if ev.HasInput {
 			s.Accepted(ev.Input)
 			return
 		}
+		if ev.SubagentStart {
+			subagents[ev.Goroutine] = true
+			return
+		}
 		if ev.Conversation == "" {
 			return
 		}
-		seen++
-		if !s.setAgyTranscript(transcript.AgyConversationDB(ev.Conversation), !ev.Created) {
-			return
+		if ev.Created && subagents[ev.Goroutine] {
+			delete(subagents, ev.Goroutine)
+			return // a subagent's conversation, not the one on screen
 		}
-		if seen > 1 {
-			s.rebrief()
-		}
+		// The newest conversation is the live one (agy may create several
+		// while signing in, one per prompt that raced it; /new creates one).
+		// Whether it needs the briefing is decided from its own contents,
+		// once it is idle (see onRecord).
+		path := transcript.AgyConversationDB(ev.Conversation)
+		s.openGateIfLeftBriefed(ctx, path)
+		s.setAgyTranscript(path, !ev.Created)
 	}}
 	f.Run(ctx)
 }
@@ -178,7 +247,15 @@ func (s *Session) setAgyTranscript(path string, resumed bool) bool {
 	}
 	ctx, cancel := context.WithCancel(s.nat.ctx)
 	s.nat.trPath, s.nat.trCancel = path, cancel
-	tl := &transcript.AgyDBTailer{Path: path, Fn: s.onRecord, SkipExisting: resumed}
+	fn := func(r transcript.Record) {
+		s.nat.mu.Lock()
+		live := s.nat.trPath == path
+		s.nat.mu.Unlock()
+		if live { // a record from a conversation already switched away from is stale
+			s.onRecord(r)
+		}
+	}
+	tl := &transcript.AgyDBTailer{Path: path, Fn: fn, SkipExisting: resumed}
 	go tl.Run(ctx)
 	return true
 }
@@ -208,6 +285,9 @@ func (s *Session) onRecord(rec transcript.Record) {
 	upload := s.nat.upload
 	s.nat.mu.Unlock()
 	for _, t := range rec.Turns {
+		if t.Role == "user" && s.tool == "agy" {
+			s.noteBriefed(t.Text)
+		}
 		if upload && s.lk != nil {
 			at := t.TS
 			if at.IsZero() {
@@ -237,6 +317,13 @@ func (s *Session) onRecord(rec transcript.Record) {
 		h.Signal(state.Signal{Source: "agydb", State: state.Busy, Conf: state.High, TTL: agyStateTTL})
 	case transcript.SigAgyIdle:
 		h.Signal(state.Signal{Source: "agydb", State: state.Idle, Conf: state.High, TTL: agyStateTTL})
+		if rec.Fresh && s.gateClosed.Load() {
+			// agy creates the conversation a moment before it writes the
+			// -i briefing into it: not the end of a turn.
+			return
+		}
+		s.openGate() // the first turn (the briefing) is done
+		s.briefIfNeeded()
 	case transcript.SigAgyDialog:
 		h.Signal(state.Signal{Source: "agydb-dialog", State: state.Dialog, Conf: state.High, TTL: agyStateTTL})
 	case transcript.SigAgyDialogClear:

@@ -110,6 +110,22 @@ func (t *AgyDBTailer) Run(ctx context.Context) {
 	}
 }
 
+// AgyUserTurns reads, once, the text of every finished user turn in an agy
+// conversation database (none if it cannot be read).
+func AgyUserTurns(ctx context.Context, path string) []string {
+	var out []string
+	a := &agyTail{t: &AgyDBTailer{Path: path, Fn: func(r Record) {
+		for _, t := range r.Turns {
+			if t.Role == "user" {
+				out = append(out, t.Text)
+			}
+		}
+	}}, reported: map[int64]bool{}}
+	defer a.close()
+	a.poll(ctx)
+	return out
+}
+
 func (a *agyTail) close() {
 	if a.db != nil {
 		a.db.Close()
@@ -200,7 +216,7 @@ func (a *agyTail) poll(ctx context.Context) {
 	if busy {
 		state = SigAgyBusy
 	}
-	rec := Record{Turns: turns}
+	rec := Record{Turns: turns, Fresh: len(steps) == 0}
 	if state != a.state || time.Since(a.lastSent) >= agyReassert {
 		rec.Signal, a.state, a.lastSent = state, state, time.Now()
 	}

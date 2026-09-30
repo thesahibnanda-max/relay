@@ -566,6 +566,7 @@ func prepareLaunch(a adaptor.Adaptor, p Parsed, role roles.Role, lk collab.Link,
 	}
 	col.SetToolLog(plan.ToolLog)
 	col.SetVerifySubmit(plan.VerifySubmit)
+	col.SetStartupGate(plan.StartupGate)
 	col.SetBriefing(spec.Briefing)
 	if spec.Briefing != "" && !plan.BriefingDelivered {
 		col.Bus().AddBootstrap(strings.TrimSpace(spec.Briefing))

@@ -432,6 +432,16 @@ func (t *tui) key(k string) {
 			t.done <- 0
 			return
 		}
+		if !t.ready {
+			// Real agy (1.2.14, confirmed live): a prompt accepted while it
+			// is still signing in gets a conversation of its own.
+			t.conv.close()
+			if c, err := createConversation(t.cwd); err == nil {
+				t.conv = c
+				t.log("server.go:1248] Created conversation " + c.id)
+				event("conversation_created", "id", c.id, "why", "prompt during sign-in")
+			}
+		}
 		t.queue = append(t.queue, text)
 		if t.busy || !t.ready {
 			event("queued", "text", text)
@@ -514,6 +524,10 @@ func (t *tui) runTurn(text string) {
 		}
 		t.conv = c
 		t.log("server.go:1248] Created conversation " + c.id)
+		// Real agy creates the database a moment before the first step is in it.
+		t.mu.Unlock()
+		time.Sleep(400 * time.Millisecond)
+		t.mu.Lock()
 	}
 	conv := t.conv
 	t.history = append(t.history, rule, "> "+strings.ReplaceAll(text, "\n", "\r\n  "))

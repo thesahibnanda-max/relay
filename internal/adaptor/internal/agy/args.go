@@ -19,6 +19,9 @@ var subcommands = map[string]bool{
 	"mic-serve": true, "models": true, "plugin": true, "plugins": true, "remote-control": true, "update": true,
 }
 
+// briefingTurnTail ends a briefing delivered as a conversation turn.
+const briefingTurnTail = "This message is only your briefing and there is no task yet: reply with one short line and wait for work to arrive."
+
 // argv is agy's command line as agy itself will read it.
 type argv struct {
 	subcommand  string // first positional argument, if it names a subcommand
@@ -84,6 +87,10 @@ func (a argv) nonInteractive() bool { return a.subcommand != "" || a.print || a.
 // through -i. A user's own -i prompt is kept, after the briefing, in the same
 // first turn.
 func withBriefing(args []string, briefing string) []string {
+	// Here the briefing is a turn of its own, not a system prompt: without
+	// saying there is nothing to do yet, the model goes exploring (confirmed
+	// live: shell commands behind permission prompts, before any real task).
+	briefing += "\n\n" + briefingTurnTail
 	a := parseArgv(args)
 	out := append([]string(nil), args...)
 	if !a.hasPromptI {

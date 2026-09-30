@@ -17,9 +17,9 @@ func TestParseAgyLogLine(t *testing.T) {
 		ok   bool
 	}{
 		{`I0930 03:17:17.904660     387 server.go:1248] Created conversation 938faa13-bb0d-4fe0-9a4d-2218dab07166`,
-			AgyLogEvent{Conversation: "938faa13-bb0d-4fe0-9a4d-2218dab07166", Created: true}, true},
+			AgyLogEvent{Conversation: "938faa13-bb0d-4fe0-9a4d-2218dab07166", Created: true, Goroutine: "387"}, true},
 		{`I0930 03:02:42.888371       1 common.go:401] Resuming conversation b70117b6-85fa-4e46-b572-452adb0b2af6` + "\n",
-			AgyLogEvent{Conversation: "b70117b6-85fa-4e46-b572-452adb0b2af6"}, true},
+			AgyLogEvent{Conversation: "b70117b6-85fa-4e46-b572-452adb0b2af6", Goroutine: "1"}, true},
 		{`I0930 03:17:26.232245     605 input_loop.go:107] HandleUserInput called with text: "second convo, reply \"OK2\"\n"`,
 			AgyLogEvent{Input: "second convo, reply \"OK2\"\n", HasInput: true}, true},
 		{`I0930 03:17:17.906672     387 conversation_manager.go:887] Streaming conversation 938faa13-bb0d-4fe0-9a4d-2218dab07166`, AgyLogEvent{}, false},
@@ -78,5 +78,19 @@ func TestAgyConversationDBUsesHome(t *testing.T) {
 	want := filepath.Join(home, ".gemini", "antigravity-cli", "conversations", "x.db")
 	if got := AgyConversationDB("x"); got != want {
 		t.Fatalf("%q, want %q", got, want)
+	}
+}
+
+func TestParseAgyLogLineSubagentStart(t *testing.T) {
+	ev, ok := ParseAgyLogLine(`I0930 12:29:46.231549     302 conversation_manager.go:512] Starting new conversation (agent=true)`)
+	if !ok || !ev.SubagentStart || ev.Goroutine != "302" {
+		t.Fatalf("%+v %v", ev, ok)
+	}
+	if _, ok := ParseAgyLogLine(`I0930 12:29:46.231549     302 conversation_manager.go:512] Starting new conversation (agent=false)`); ok {
+		t.Fatal("a main conversation start is not an event")
+	}
+	ev, _ = ParseAgyLogLine(`I0930 12:29:46.254904     302 server.go:1248] Created conversation 18543113-0cbd-49ba-8bfd-d1b56e58b8c3`)
+	if ev.Goroutine != "302" || !ev.Created {
+		t.Fatalf("%+v", ev)
 	}
 }

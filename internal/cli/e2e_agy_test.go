@@ -360,3 +360,28 @@ func TestAgyE2EEndsWhenPipedStdinEnds(t *testing.T) {
 		t.Fatal("relay agy never exited after its stdin ended")
 	}
 }
+
+// agy's screen looks ready while it is still signing in; prompts typed then
+// each got a conversation of their own before the -i briefing ran (real agy
+// 1.2.14). Relay types nothing until agy's own records say the briefing turn
+// is done - one conversation, one briefing, the messages after it.
+func TestAgyE2EWaitsForTheBriefingTurnBeforeTyping(t *testing.T) {
+	w := newWorld(t)
+	saved := w.env
+	w.env = append(append([]string(nil), w.env...), "FAKEAGY_LOGIN_MS=3000")
+	bob := w.start("agy", "developer", "--session=NEW_LOCAL", "--name=bob")
+	w.env = saved
+	bob.waitEvent("mcp_ready", "tools", "relay_send")
+	id1 := w.send("bob", "What is 1 plus 1?")
+	id2 := w.send("bob", "What is 2 plus 2?")
+	bob.waitEvent("answer", "text", "4")
+	w.waitState(id1, "acknowledged")
+	w.waitState(id2, "acknowledged")
+	subs := bob.submits()
+	if len(subs) != 3 || !strings.Contains(subs[0], `You are "bob"`) {
+		t.Fatalf("want the briefing first, then the two messages; got %q", subs)
+	}
+	if ev := bob.events("conversation_created"); len(ev) != 0 {
+		t.Fatalf("relay typed while agy was signing in: %v", ev)
+	}
+}

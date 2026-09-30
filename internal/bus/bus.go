@@ -86,6 +86,9 @@ func New(env Env) *Bus {
 	return &Bus{env: env, now: time.Now, seen: map[string]struct{}{}, acked: map[string]struct{}{}, wake: make(chan struct{}, 1)}
 }
 
+// Poke makes the scheduler look again now (e.g. a gate outside the bus opened).
+func (b *Bus) Poke() { b.poke() }
+
 func (b *Bus) poke() {
 	select {
 	case b.wake <- struct{}{}:
@@ -111,6 +114,18 @@ func (b *Bus) Add(m proto.MessageView) {
 // AddBootstrap queues a one-time briefing to be typed when the tool first
 // becomes ready (used when the tool has no system-prompt flag we can use).
 func (b *Bus) AddBootstrap(text string) {
+	// Not de-duplicated like a message: a tool can need briefing again (agy
+	// after /new). One waiting briefing is enough: a newer one replaces it.
+	b.mu.Lock()
+	for _, p := range b.queue {
+		if p.ID == BootstrapID && !p.inflight {
+			p.Body = text
+			b.mu.Unlock()
+			return
+		}
+	}
+	delete(b.seen, BootstrapID)
+	b.mu.Unlock()
 	b.Add(proto.MessageView{ID: BootstrapID, From: "relay", Kind: "notify", Priority: P1, Body: text})
 }
 

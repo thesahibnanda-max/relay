@@ -58,7 +58,7 @@ func TestParseArgvFollowsAgysOwnFlagParsing(t *testing.T) {
 }
 
 func TestWithBriefing(t *testing.T) {
-	const b = "BRIEF"
+	b := "BRIEF\n\n" + briefingTurnTail
 	cases := []struct{ in, want []string }{
 		{nil, []string{"-i", b}},
 		{[]string{"--model", "m"}, []string{"-i", b, "--model", "m"}},
@@ -67,7 +67,7 @@ func TestWithBriefing(t *testing.T) {
 		{[]string{"--model", "m", "-i", ""}, []string{"--model", "m", "-i", b}},
 	}
 	for _, c := range cases {
-		if got := withBriefing(c.in, b); !reflect.DeepEqual(got, c.want) {
+		if got := withBriefing(c.in, "BRIEF"); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("withBriefing(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
@@ -105,7 +105,7 @@ func TestPrepareRegistersBriefsAndCleanupRestores(t *testing.T) {
 		t.Fatalf("plan %+v err %v", plan, err)
 	}
 	wantLog := filepath.Join(sp.RunDir, logFile)
-	want := []string{"-i", sp.Briefing, "--log-file", wantLog, "--model", "m"}
+	want := []string{"-i", sp.Briefing + "\n\n" + briefingTurnTail, "--log-file", wantLog, "--model", "m"}
 	if !reflect.DeepEqual(plan.Args, want) || plan.ToolLog != wantLog {
 		t.Fatalf("args %q log %q, want %q %q", plan.Args, plan.ToolLog, want, wantLog)
 	}

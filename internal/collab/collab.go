@@ -57,6 +57,27 @@ type Session struct {
 	verifySubmit atomic.Bool
 	acceptMu     sync.Mutex
 	acceptedAt   time.Time
+
+	gateClosed atomic.Bool // see SetStartupGate
+}
+
+// startupGateMax bounds the startup gate: if the tool's records never say
+// its first turn ended, delivery starts anyway (falling back to the screen).
+const startupGateMax = 3 * time.Minute
+
+// SetStartupGate holds delivery until the tool's own records report its
+// first turn finished (agy: the -i briefing), or startupGateMax passes.
+func (s *Session) SetStartupGate(on bool) {
+	s.gateClosed.Store(on)
+	if on {
+		time.AfterFunc(startupGateMax, s.openGate)
+	}
+}
+
+func (s *Session) openGate() {
+	if s.gateClosed.CompareAndSwap(true, false) {
+		s.bus.Poke()
+	}
 }
 
 // New creates the session before the daemon connection exists (its Deliver and
@@ -174,7 +195,11 @@ func (e *sessionEnv) handle() *agent.Handle { return e.s.handle.Load() }
 
 func (e *sessionEnv) Snapshot() state.Snapshot {
 	if h := e.handle(); h != nil {
-		return h.Snapshot()
+		snap := h.Snapshot()
+		if e.s.gateClosed.Load() && snap.State != state.Dialog {
+			snap.State = state.Starting // the startup gate: not ready for input yet
+		}
+		return snap
 	}
 	return state.Snapshot{State: state.Starting}
 }

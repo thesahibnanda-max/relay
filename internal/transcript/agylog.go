@@ -22,6 +22,10 @@ import (
 var (
 	agyLogConversation = regexp.MustCompile(`\] (Created|Resuming) conversation ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\s*$`)
 	agyLogInput        = regexp.MustCompile(`\] HandleUserInput called with text: (".*")\s*$`)
+	agyLogStart        = regexp.MustCompile(`\] Starting new conversation \(agent=(true|false)\)`)
+	// agyLogGoroutine is the glog header's goroutine column:
+	// "I0930 12:29:46.254904     302 server.go:1248] ...".
+	agyLogGoroutine = regexp.MustCompile(`^[IWEF]\d{4} [\d:.]+\s+(\d+) `)
 )
 
 // AgyLogEvent is one thing agy's log says.
@@ -30,12 +34,24 @@ type AgyLogEvent struct {
 	Created      bool   // ...that it just created (vs resumed)
 	Input        string // a prompt agy accepted
 	HasInput     bool
+	// SubagentStart: an agent (subagent) conversation is being started on
+	// Goroutine; the conversation that goroutine creates next is not the
+	// one on screen.
+	SubagentStart bool
+	Goroutine     string
 }
 
 // ParseAgyLogLine reads one log line.
 func ParseAgyLogLine(line string) (AgyLogEvent, bool) {
+	gid := ""
+	if m := agyLogGoroutine.FindStringSubmatch(line); m != nil {
+		gid = m[1]
+	}
+	if m := agyLogStart.FindStringSubmatch(line); m != nil {
+		return AgyLogEvent{SubagentStart: m[1] == "true", Goroutine: gid}, m[1] == "true"
+	}
 	if m := agyLogConversation.FindStringSubmatch(line); m != nil {
-		return AgyLogEvent{Conversation: m[2], Created: m[1] == "Created"}, true
+		return AgyLogEvent{Conversation: m[2], Created: m[1] == "Created", Goroutine: gid}, true
 	}
 	if m := agyLogInput.FindStringSubmatch(line); m != nil {
 		text, err := strconv.Unquote(m[1])

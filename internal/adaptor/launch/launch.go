@@ -61,6 +61,10 @@ type Plan struct {
 	// VerifySubmit: the tool reports accepted prompts (in ToolLog), so the
 	// agent checks every injected message was taken and resubmits if not.
 	VerifySubmit bool
+	// StartupGate: nothing is typed until the tool's own records say its
+	// first turn (the briefing, delivered by flag) has finished - its screen
+	// looks ready long before it accepts input into a conversation.
+	StartupGate bool
 }
 
 // Passthrough is a Plan that runs the tool exactly as the user asked.

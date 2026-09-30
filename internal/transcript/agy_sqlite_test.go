@@ -322,3 +322,18 @@ func TestPBReader(t *testing.T) {
 		pbUint(junk, 1, 2)
 	}
 }
+
+func TestAgyUserTurnsReadsOnce(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conv.db")
+	c := newConv(t, path, true)
+	c.step(0, 14, 3, userPayload("the briefing"))
+	c.step(1, 15, 3, answerPayload("ok"))
+	c.step(2, 14, 8, userPayload("still being written"))
+	got := AgyUserTurns(context.Background(), path)
+	if len(got) != 1 || got[0] != "the briefing" {
+		t.Fatalf("%q", got)
+	}
+	if got := AgyUserTurns(context.Background(), filepath.Join(t.TempDir(), "missing.db")); len(got) != 0 {
+		t.Fatalf("%q from a missing database", got)
+	}
+}

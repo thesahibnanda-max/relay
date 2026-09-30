@@ -577,3 +577,27 @@ func TestInterruptNeverAbortsTheTurnRelayJustStarted(t *testing.T) {
 		t.Fatalf("an urgent message must still interrupt the user's own turn (escs=%d)", escs)
 	}
 }
+
+// A tool can need its briefing again (agy after /new): a second briefing is
+// never dropped as a duplicate, and a waiting one is replaced, not doubled.
+func TestBootstrapCanBeGivenAgain(t *testing.T) {
+	env := newEnv()
+	b := New(env)
+	ctx := context.Background()
+	b.AddBootstrap("brief one")
+	b.step(ctx)
+	env.set(func(f *fakeEnv) { f.st = snap(state.Busy) })
+	b.step(ctx)
+	env.set(func(f *fakeEnv) { f.st = snap(state.Idle) })
+	b.step(ctx)
+	b.AddBootstrap("brief two")
+	b.AddBootstrap("brief three")
+	if b.Pending() != 1 {
+		t.Fatalf("%d briefings waiting, want 1", b.Pending())
+	}
+	b.step(ctx)
+	inj, _, _ := env.get()
+	if len(inj) != 2 || inj[0] != "brief one" || inj[1] != "brief three" {
+		t.Fatalf("typed %q", inj)
+	}
+}
