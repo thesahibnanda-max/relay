@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/thesahibnanda-max/relay/internal/adaptor/launch"
 	"github.com/thesahibnanda-max/relay/internal/relayhome"
 	"github.com/thesahibnanda-max/relay/internal/state"
+	"github.com/thesahibnanda-max/relay/internal/transcript"
 )
 
 // markerFile records, inside the launch's own RunDir, that Prepare holds a
@@ -21,6 +23,17 @@ type AgyAdaptor struct{}
 func (a *AgyAdaptor) Name() string { return "agy" }
 
 func (a *AgyAdaptor) Binary() string { return "agy" }
+
+// TestedVersion reports whether the agy that printed version (its --version
+// output) is one relay was verified against, and which ones those are. An
+// unparseable version is not flagged.
+func (a *AgyAdaptor) TestedVersion(version string) (ok bool, tested string) {
+	tested = transcript.AgyTestedMin + " to " + transcript.AgyTestedMax
+	v := versionRe.FindString(version)
+	return v == "" || transcript.AgyVersionTested(v), tested
+}
+
+var versionRe = regexp.MustCompile(`\d+\.\d+\.\d+`)
 
 // EOFPresses: agy exits only on a second Ctrl+D ("press ctrl+d again to
 // exit", confirmed live), so piped stdin ending sends two.

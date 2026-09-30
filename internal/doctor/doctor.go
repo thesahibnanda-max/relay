@@ -262,7 +262,14 @@ func checkTools(env Env) []Check {
 		if ver != "" {
 			d += " (" + ver + ")"
 		}
-		out = append(out, Check{Name: "tool: " + name, Status: OK, Detail: d})
+		c := Check{Name: "tool: " + name, Status: OK, Detail: d}
+		if t, ok := a.(interface{ TestedVersion(string) (bool, string) }); ok && ver != "" {
+			if good, tested := t.TestedVersion(ver); !good {
+				c.Status, c.Detail = Warn, d+": not a version relay was verified against (tested: "+tested+")"
+				c.Fix = "relay " + name + " still runs; if messages misbehave, install a tested version or report it"
+			}
+		}
+		out = append(out, c)
 	}
 	return out
 }

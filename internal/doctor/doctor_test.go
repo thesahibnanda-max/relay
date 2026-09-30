@@ -250,3 +250,14 @@ func TestMissingToolsAndUnsupportedPlatform(t *testing.T) {
 		t.Fatalf("relay data on a Windows drive under WSL is a hazard: %+v", c)
 	}
 }
+
+// agy is checked against the versions relay was verified with.
+func TestAgyVersionOutsideTheTestedRangeWarns(t *testing.T) {
+	env, _ := testEnv(t)
+	for ver, want := range map[string]Status{"9.9.9": Warn, "1.2.14": OK, "unknown": OK} {
+		env.ToolVersion = func(b string) (string, string, error) { return "/x/" + b, ver, nil }
+		if c := find(Run(env), "tool: agy"); c.Status != want {
+			t.Fatalf("agy %s: %+v, want %v", ver, c, want)
+		}
+	}
+}

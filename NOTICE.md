@@ -29,7 +29,8 @@ Two more caveats:
 
 * **Tool versions.** Relay depends on how the tools behave: their hook formats, their log-file formats and
   what their screens look like. It was built and verified against **Claude Code 2.1.282**, **Codex 0.155.1**,
-  **GitHub Copilot CLI 1.0.88** and **Antigravity CLI (`agy`) 1.2.11**. If a tool changes in an update, parts
+  **GitHub Copilot CLI 1.0.88** and **Antigravity CLI (`agy`) 1.2.12 to 1.2.14** (for any other `agy`
+  version, `relay doctor` warns and `relay agy` says so when the session ends). If a tool changes in an update, parts
   of Relay may need adjusting - Copilot CLI in particular ships near-daily updates, and its per-session
   event log is explicitly undocumented and unstable upstream, so re-verify after upgrading it. `agy`'s own
   conversation-database schema and MCP config format are likewise undocumented upstream, and `agy` support

@@ -114,7 +114,10 @@ alt-screen and dialog text; if it falls behind it reports *desynced* and deliver
   below - Copilot has no flag to deliver the briefing any other way). This format is undocumented and
   explicitly marked unstable upstream; permission dialogs are recognised from the screen only.
 
-* **agy (Antigravity CLI)**: two sources, both confirmed live against agy 1.2.12/1.2.13. Relay passes
+* **agy (Antigravity CLI)**: two sources, both confirmed live against agy 1.2.12 to 1.2.14. If either is
+  not what relay expects (no log, a log without agy's usual line format, or a conversation database it
+  cannot read), relay stops waiting on them, delivers by the screen alone like the other tools, and says
+  so when the session ends. Relay passes
   `--log-file <run dir>/agy.log`; agy's log names the conversation this very process is on (`Created
   conversation <id>` at start and after `/new`, `Resuming conversation <id>` on `-c`) and every prompt it
   accepts (`HandleUserInput called with text: ...`). That conversation's SQLite database
