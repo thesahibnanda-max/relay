@@ -45,10 +45,18 @@ and they behave exactly as before.
 
 One exception: Google's Antigravity CLI (`agy`) has no per-launch way to register an MCP server at
 all - the only mechanism it offers is `agy mcp add`, which writes into its own global, persistent
-config. Relay uses that anyway, but only for the one launch: it registers a uniquely-named entry,
-removes it on exit (or on the next `relay <tool>` launch or `relay gc`, if the process was killed
-before it could), and locks around every change so it can never race `agy`'s own config file. `relay
-doctor`/`relay gc` flag and clean up anything left behind.
+config. Relay uses that, as narrowly as it can: while at least one `relay agy` agent is running, agy's
+config has one entry named `relay`, and the last agent to exit removes it and writes the file back
+byte for byte as it was (or deletes it, if it did not exist). The entry only works for an `agy` that
+Relay itself started - any other `agy` session sees a server with no tools - and every change is
+made under a lock, so concurrent launches never race `agy`'s own config file. If Relay is killed
+before it can clean up, the next `relay agy` launch or `relay gc` finishes the job, and `relay
+doctor` says so.
+
+`agy` asks before every MCP tool call. To let an agent use Relay's tools without a prompt each time,
+allow them once: choose *always allow ... (Persist to settings.json)* at the first prompt, or add
+`"mcp(relay/*)"` to `permissions.allow` in `~/.gemini/antigravity-cli/settings.json`. Relay never
+answers those prompts and never types into them.
 
 Linux, macOS, WSL and native Windows. One static binary, no cgo.
 

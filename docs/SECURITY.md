@@ -38,10 +38,13 @@ It does not defend against another process running as *your own user* (which cou
   directories are created and verified (owned by you, not a symlink, mode 0700) before use.
 * **Agents act only as themselves.** Identity comes from the connection, not from message fields. A
   resume token (stored only as a hash) is needed to reclaim an agent.
-* **Messages are untrusted input.** Bodies are stripped of all control bytes before typing (so a message
-  can never close the bracketed paste or send escape sequences; this invariant is fuzzed); message headers
-  cannot be forged (`[relay |` in a body is defanged, roles/tools/names are restricted to a plain charset,
-  and delivery confirmation only trusts a real header line). Relay **never auto-approves** a tool
+* **Messages are untrusted input.** Bodies are stripped of all control bytes and Unicode bidi overrides
+  before anything else looks at them, and again before typing (so a message can never close the bracketed
+  paste or send escape sequences; this invariant is fuzzed); message headers cannot be forged (`[relay |`
+  and look-alikes in a body are defanged after that cleaning, so no later stripping step can reassemble
+  one; header fields are restricted to a plain charset on the receiving side too, since a global
+  session's server is not trusted to police names; and delivery confirmation only trusts a real header
+  line). Relay **never auto-approves** a tool
   permission dialog and never types into one. The model's briefing tells it to treat teammates like any
   untrusted input.
 * **Human-only approval.** `--approve-inbound` holds mail until a person approves it; there is no MCP tool
@@ -54,7 +57,13 @@ It does not defend against another process running as *your own user* (which cou
   `secret=...` style assignments before text crosses to another agent. It is regex-based: a safety net, not
   a guarantee.
 * **Zero footprint.** Relay never writes tool config or project files (see README); `relay doctor` scans
-  for stray Relay registrations, and an automated test hashes the config dirs around a full session.
+  for stray Relay registrations, and an automated test hashes the config dirs around a full session. The
+  one exception is agy, which has no per-launch registration: while a relay agy agent runs, agy's
+  user-global MCP config has one `relay` entry. Every agy process on the machine spawns it, so it is
+  scoped by environment: it serves tools only to the agy Relay launched for that agent (matching
+  `RELAY_AGENT_ID` and run directory) and offers nothing to any other agy session - an unrelated agy, or a
+  second relay agy agent, can never act as another agent. The file is restored byte for byte when the last
+  relay agy agent exits.
 
 ## Things to be aware of
 

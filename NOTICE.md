@@ -191,14 +191,24 @@ writes into its own single, global, permanent config file (`~/.gemini/config/mcp
 that mechanism anyway, because it is the only way to give an `agy` agent the same abilities as the others,
 but keeps it as close to "zero footprint" as that allows:
 
-* It registers a uniquely-named entry (never a fixed name, since `agy`'s config is shared by every `agy`
-  agent you have running at once) and removes it the moment that one agent exits.
-* If Relay is killed outright (`kill -9`, a crash, a power loss) before it can clean up, the leftover entry
-  is inert - it points at files Relay already deleted - and is removed automatically the next time you run
-  `relay agy ...` or `relay gc`. `relay doctor` also flags one if you run it first.
-* Every change is made under Relay's own lock, so it can never race or corrupt `agy`'s config even with
-  several `agy` agents starting or stopping at once (a real bug in `agy` itself otherwise: concurrent
-  `agy mcp add` calls with no lock of its own can silently lose one).
+* While at least one `relay agy` agent is running, the file has one entry named `relay`. When the last
+  one exits, Relay removes it and writes the file back exactly as it was, byte for byte (or deletes it
+  again, if it did not exist before). If you changed the file yourself in the meantime, your version is
+  kept.
+* The entry only works for an `agy` that Relay itself started: every other `agy` session on your
+  machine sees a server that offers no tools at all.
+* If Relay is killed outright (`kill -9`, a crash, a power loss) before it can clean up, the next
+  `relay agy ...` or `relay gc` finishes the cleanup. `relay doctor` tells you if one is pending.
+* Every change is made under a lock next to that file, so it can never race or corrupt `agy`'s config
+  even with several `agy` agents starting or stopping at once (a real bug in `agy` itself otherwise:
+  concurrent `agy mcp add` calls with no lock of its own can silently lose one).
+* `agy` keeps its own session log; Relay asks `agy` to write it into Relay's per-launch folder (it is
+  how Relay knows which conversation is live and that a message was really received) and moves it back
+  into `agy`'s own log folder when the session ends.
+
+`agy` asks before every MCP tool call, Relay's included. To let an agent use Relay's tools without a
+prompt each time, allow them once: choose *always allow ... (Persist to settings.json)* at the first
+prompt, or add `"mcp(relay/*)"` to `permissions.allow` in `~/.gemini/antigravity-cli/settings.json`.
 
 ---
 

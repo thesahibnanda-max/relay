@@ -34,6 +34,22 @@ make cross        # cross-compile every supported platform into ./dist
 make fmt          # gofmt -w .
 ```
 
+### Live tests against the real tools
+
+CI drives fakes (`testdata/fakeagent`, `testdata/fakeagy`). Changes to how Relay reads a tool's screen,
+transcript or database, or types into it, also need a run against the real tool, which spends model
+quota. For `agy`, with an authenticated `agy` on your `PATH` and a working directory its folder-trust
+prompt has already been accepted for:
+
+```sh
+RELAY_AGY_CWD=~/some/trusted/dir go test -tags e2e_real -run RealAgy -v -timeout 60m -count=1 ./internal/cli
+```
+
+It uses your real `~/.gemini` (with an isolated `RELAY_HOME`), fails if agy's config files are not left
+byte-identical, and restores them either way. `RELAY_AGY_DIR=/dir` runs a specific agy version found
+there (a copy of its binary named `agy`). Real Claude/Codex/Copilot tests live in `internal/agent`
+(`-tags e2e_real -run Real`).
+
 ### Website (`ui/`)
 
 The marketing site is plain HTML/CSS/JS under `ui/site/`; Node is only used for local preview and
