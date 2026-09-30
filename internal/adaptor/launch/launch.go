@@ -58,6 +58,9 @@ type Plan struct {
 	// agent follows for authoritative state (agy: which conversation is live,
 	// which prompts were accepted).
 	ToolLog string
+	// ToolLogFrom is where in ToolLog this launch's lines start (a user's
+	// own log file may hold earlier runs).
+	ToolLogFrom int64
 	// VerifySubmit: the tool reports accepted prompts (in ToolLog), so the
 	// agent checks every injected message was taken and resubmits if not.
 	VerifySubmit bool

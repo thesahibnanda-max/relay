@@ -132,6 +132,7 @@ type AgyLogFollower struct {
 	Path  string
 	Fn    func(AgyLogEvent)
 	Every time.Duration // poll interval (default 200ms)
+	From  int64         // offset to start reading at
 
 	lines, glog atomic.Int64
 }
@@ -145,7 +146,7 @@ func (f *AgyLogFollower) Run(ctx context.Context) {
 	if every == 0 {
 		every = 200 * time.Millisecond
 	}
-	var off int64
+	off := f.From
 	var partial []byte
 	for {
 		if file, err := os.Open(f.Path); err == nil {

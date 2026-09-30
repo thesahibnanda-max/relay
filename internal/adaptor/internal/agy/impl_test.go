@@ -230,3 +230,23 @@ func TestScreenRulesRecogniseAgysDialogs(t *testing.T) {
 		t.Errorf("the busy screen was not recognised: %+v %v", sig, ok)
 	}
 }
+
+// A user's own --log-file may hold earlier runs: this launch's lines start
+// where the file ends now, so old conversations and prompts are not replayed.
+func TestPrepareReadsAUsersOwnLogFromItsEnd(t *testing.T) {
+	r := newRig(t)
+	r.write("")
+	log := filepath.Join(t.TempDir(), "my.log")
+	os.WriteFile(log, []byte("I0930 old run] Created conversation 938faa13-bb0d-4fe0-9a4d-2218dab07166\n"), 0o644)
+	a := &AgyAdaptor{}
+	sp := spec(t, r, "--log-file", log)
+	plan, err := a.Prepare(sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Cleanup(sp)
+	st, _ := os.Stat(log)
+	if plan.ToolLog != log || plan.ToolLogFrom != st.Size() {
+		t.Fatalf("log %q from %d, want %q from %d", plan.ToolLog, plan.ToolLogFrom, log, st.Size())
+	}
+}

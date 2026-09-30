@@ -5,14 +5,21 @@ import (
 	"strings"
 	"time"
 
-	"github.com/thesahibnanda-max/relay/internal/agent"
+	"github.com/thesahibnanda-max/relay/internal/state"
 	"github.com/thesahibnanda-max/relay/internal/transcript"
 )
 
-const (
-	submitWait    = 4 * time.Second // how long a tool may take to report an accepted prompt
-	submitRetries = 2               // extra Enter presses before giving up
-)
+// submitWait is how long a tool may take to report an accepted prompt.
+var submitWait = 4 * time.Second
+
+const submitRetries = 2 // extra Enter presses before giving up
+
+// submitter is what confirmSubmit needs of the running tool (*agent.Handle).
+type submitter interface {
+	Screen() []string
+	Snapshot() state.Snapshot
+	PressEnter(ctx context.Context) error
+}
 
 // SetVerifySubmit turns on checking that the tool accepted each injected
 // message (only for tools that report accepted prompts - see Accepted).
@@ -37,8 +44,9 @@ func (s *Session) acceptedSince(t time.Time) bool {
 // it does not, and the text is still sitting in the tool's input box (typed
 // but not submitted), it presses Enter again. A message the tool queued or a
 // dialog swallowed is not in the input box, so it is never resubmitted into
-// something else.
-func (s *Session) confirmSubmit(h *agent.Handle, text string, at time.Time) {
+// something else - and nothing is pressed while a dialog is open, where Enter
+// would answer it.
+func (s *Session) confirmSubmit(h submitter, text string, at time.Time) {
 	for try := 0; try <= submitRetries; try++ {
 		deadline := time.Now().Add(submitWait)
 		for time.Now().Before(deadline) {
@@ -47,7 +55,7 @@ func (s *Session) confirmSubmit(h *agent.Handle, text string, at time.Time) {
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
-		if try == submitRetries || !inputHolds(h.Screen(), text) {
+		if try == submitRetries || h.Snapshot().State == state.Dialog || !inputHolds(h.Screen(), text) {
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

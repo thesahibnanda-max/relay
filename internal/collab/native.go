@@ -41,14 +41,16 @@ type native struct {
 	copilotOnce sync.Once
 	agyOnce     sync.Once
 	toolLog     string          // the log the tool writes for this launch (agy)
+	toolLogFrom int64           // ...and where this launch's lines start in it
 	briefing    string          // typed into a conversation that lacks it (agy)
 	briefed     map[string]bool // conversations known to hold the briefing (agy)
 }
 
-// SetToolLog names the diagnostic log the tool writes for this launch.
-func (s *Session) SetToolLog(path string) {
+// SetToolLog names the diagnostic log the tool writes for this launch, and
+// where in it this launch's lines start.
+func (s *Session) SetToolLog(path string, from int64) {
 	s.nat.mu.Lock()
-	s.nat.toolLog = path
+	s.nat.toolLog, s.nat.toolLogFrom = path, from
 	s.nat.mu.Unlock()
 }
 
@@ -240,13 +242,13 @@ func (s *Session) followCopilot(ctx context.Context) {
 // briefing, so it is typed again.
 func (s *Session) followAgy(ctx context.Context) {
 	s.nat.mu.Lock()
-	logPath := s.nat.toolLog
+	logPath, from := s.nat.toolLog, s.nat.toolLogFrom
 	s.nat.mu.Unlock()
 	if logPath == "" {
 		return
 	}
-	subagents := map[string]bool{} // goroutines starting a subagent's conversation
-	f := &transcript.AgyLogFollower{Path: logPath}
+	subagents := map[string]time.Time{} // goroutines starting a subagent's conversation, and when
+	f := &transcript.AgyLogFollower{Path: logPath, From: from}
 	f.Fn = func(ev transcript.AgyLogEvent) {
 		if ev.Version != "" {
 			if !transcript.AgyVersionTested(ev.Version) {
@@ -259,15 +261,17 @@ func (s *Session) followAgy(ctx context.Context) {
 			return
 		}
 		if ev.SubagentStart {
-			subagents[ev.Goroutine] = true
+			subagents[ev.Goroutine] = time.Now()
 			return
 		}
 		if ev.Conversation == "" {
 			return
 		}
-		if ev.Created && subagents[ev.Goroutine] {
+		if at, ok := subagents[ev.Goroutine]; ok && ev.Created {
 			delete(subagents, ev.Goroutine)
-			return // a subagent's conversation, not the one on screen
+			if time.Since(at) < subagentCreateWait {
+				return // a subagent's conversation, not the one on screen
+			}
 		}
 		// The newest conversation is the live one (agy may create several
 		// while signing in, one per prompt that raced it; /new creates one).
@@ -280,6 +284,11 @@ func (s *Session) followAgy(ctx context.Context) {
 	go s.watchAgyLog(ctx, f, agyLogWait)
 	f.Run(ctx)
 }
+
+// subagentCreateWait bounds how long after a subagent starts its
+// conversation is created: a start never followed by one must not make a
+// later /new on the same goroutine pass for a subagent.
+const subagentCreateWait = 10 * time.Second
 
 // agyLogWait is how long after launch agy's log must show its usual format.
 const agyLogWait = 30 * time.Second

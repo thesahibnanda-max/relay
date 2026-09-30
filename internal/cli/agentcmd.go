@@ -595,7 +595,7 @@ func prepareLaunch(a adaptor.Adaptor, p Parsed, role roles.Role, lk collab.Link,
 		cleanup()
 		return plan.Args, nil, false, func() {}
 	}
-	col.SetToolLog(plan.ToolLog)
+	col.SetToolLog(plan.ToolLog, plan.ToolLogFrom)
 	col.SetVerifySubmit(plan.VerifySubmit)
 	col.SetStartupGate(plan.StartupGate)
 	col.SetBriefing(spec.Briefing)

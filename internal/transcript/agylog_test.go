@@ -129,3 +129,25 @@ func TestAgyLogFollowerCountsLines(t *testing.T) {
 	lines, glog := f.Seen()
 	t.Fatalf("lines %d glog %d, want 2 1", lines, glog)
 }
+
+func TestAgyLogFollowerStartsAtFrom(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agy.log")
+	old := "I0930 03:17:17.904660     387 server.go:1248] Created conversation 938faa13-bb0d-4fe0-9a4d-2218dab07166\n"
+	os.WriteFile(path, []byte(old+"I0930 03:17:18.000000     387 server.go:1248] Created conversation b70117b6-85fa-4e46-b572-452adb0b2af6\n"), 0o644)
+	var mu sync.Mutex
+	var got []string
+	f := &AgyLogFollower{Path: path, From: int64(len(old)), Every: 10 * time.Millisecond, Fn: func(ev AgyLogEvent) {
+		mu.Lock()
+		got = append(got, ev.Conversation)
+		mu.Unlock()
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go f.Run(ctx)
+	time.Sleep(100 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 1 || got[0] != "b70117b6-85fa-4e46-b572-452adb0b2af6" {
+		t.Fatalf("got %q, want only the conversation after From", got)
+	}
+}

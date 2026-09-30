@@ -91,8 +91,12 @@ func (a *AgyAdaptor) Prepare(spec launch.Spec) (launch.Plan, error) {
 		// agy's own log names the conversation this process is on and every
 		// prompt it accepts (see collab's followAgy). Each launch gets its
 		// own, handed back to agy's log directory on exit; a user's own
-		// --log-file is simply read instead.
+		// --log-file is read instead, from its end as it is now (agy appends,
+		// so what is there already is earlier runs).
 		plan.ToolLog = av.logFile
+		if st, err := os.Stat(plan.ToolLog); plan.ToolLog != "" && err == nil {
+			plan.ToolLogFrom = st.Size()
+		}
 		if plan.ToolLog == "" {
 			plan.ToolLog = filepath.Join(spec.RunDir, logFile)
 			plan.Args = append([]string{"--log-file", plan.ToolLog}, plan.Args...)
