@@ -3,7 +3,6 @@
 package cli
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -87,24 +86,6 @@ func (w *world) assertAgyPristine(orig string) {
 			w.t.Fatalf("%s left behind", p)
 		}
 	}
-}
-
-func (a *relayProc) events(ev string) []map[string]string {
-	f, err := os.Open(a.logPath)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-	var out []map[string]string
-	sc := bufio.NewScanner(f)
-	sc.Buffer(nil, 1<<20)
-	for sc.Scan() {
-		var m map[string]string
-		if json.Unmarshal(sc.Bytes(), &m) == nil && m["ev"] == ev {
-			out = append(out, m)
-		}
-	}
-	return out
 }
 
 func (a *relayProc) waitEvent(ev, key, contains string) map[string]string {

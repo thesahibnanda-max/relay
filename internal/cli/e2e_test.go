@@ -178,6 +178,25 @@ type relayProc struct {
 	done    chan struct{}
 }
 
+// events reads the fake tool's event log (fakeagy's "ev" lines).
+func (a *relayProc) events(ev string) []map[string]string {
+	f, err := os.Open(a.logPath)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var out []map[string]string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(nil, 1<<20)
+	for sc.Scan() {
+		var m map[string]string
+		if json.Unmarshal(sc.Bytes(), &m) == nil && m["ev"] == ev {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // sharedSessionArgs reports whether args requests any shared session
 // (--session=NEW, NEW_LOCAL, a bare id, or a global token) - every one of
 // them makes relay pause after printing the "others join with" banner,
