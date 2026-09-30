@@ -54,7 +54,7 @@ func buildEchoArgs(t *testing.T) string {
 		}
 	})
 	if echoArgsErr != nil {
-		t.Skip("cannot build echoargs (is `go` on PATH?):", echoArgsErr)
+		skipOrFail(t, "echoargs", echoArgsErr)
 	}
 	return echoArgsBin
 }
