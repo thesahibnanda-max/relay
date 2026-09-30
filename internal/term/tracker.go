@@ -90,6 +90,7 @@ func (t *Tracker) scanKeyboardModes(p []byte) {
 type item struct {
 	data    []byte
 	barrier chan struct{}
+	gen     uint64 // drops that had happened when this chunk was queued
 }
 
 // Tracker feeds tool output into a virtual terminal on its own goroutine.
@@ -104,18 +105,25 @@ type Tracker struct {
 	modes Modes
 
 	desynced atomic.Bool
-	dropped  atomic.Uint64
+	dropped  atomic.Uint64 // chunks dropped so far: also the queue's "generation"
 }
 
 // New creates a tracker with the given terminal size.
 func New(cols, rows int) *Tracker {
+	t := newTracker(cols, rows, queueSize)
+	go t.run()
+	return t
+}
+
+// newTracker builds a tracker without starting its processing goroutine.
+func newTracker(cols, rows, queue int) *Tracker {
 	if cols <= 0 {
 		cols = 80
 	}
 	if rows <= 0 {
 		rows = 24
 	}
-	t := &Tracker{in: make(chan item, queueSize), quit: make(chan struct{}), done: make(chan struct{}), em: vt.NewEmulator(cols, rows)}
+	t := &Tracker{in: make(chan item, queue), quit: make(chan struct{}), done: make(chan struct{}), em: vt.NewEmulator(cols, rows)}
 	t.em.SetCallbacks(vt.Callbacks{
 		EnableMode:  func(m ansi.Mode) { t.setMode(m, true) },
 		DisableMode: func(m ansi.Mode) { t.setMode(m, false) },
@@ -128,7 +136,6 @@ func New(cols, rows int) *Tracker {
 	// the user's real terminal already answers those queries, and forwarding
 	// ours to the tool would make it see every reply twice.
 	go func() { _, _ = io.Copy(io.Discard, t.em) }()
-	go t.run()
 	return t
 }
 
@@ -155,7 +162,7 @@ func (t *Tracker) Feed(p []byte) {
 	}
 	cp := append([]byte(nil), p...)
 	select {
-	case t.in <- item{data: cp}:
+	case t.in <- item{data: cp, gen: t.dropped.Load()}:
 	default:
 		t.dropped.Add(1)
 		t.desynced.Store(true)
@@ -177,7 +184,9 @@ func (t *Tracker) run() {
 			_, _ = t.em.Write(it.data)
 			t.scanKeyboardModes(it.data)
 			t.mu.Unlock()
-			if t.desynced.Load() && isFullRedraw(it.data) {
+			// Only a redraw queued after the last drop repairs the screen: one
+			// queued before it cannot account for the output that was lost.
+			if t.desynced.Load() && it.gen == t.dropped.Load() && isFullRedraw(it.data) {
 				t.desynced.Store(false)
 			}
 		}

@@ -133,3 +133,25 @@ func TestKeyboardModesAndResetSequence(t *testing.T) {
 		t.Fatalf("reset %q", got)
 	}
 }
+
+// A redraw queued BEFORE output was dropped cannot account for that output:
+// only a redraw queued after the last drop brings the tracker back in sync.
+func TestDesyncRecoversOnlyOnARedrawAfterTheDrop(t *testing.T) {
+	tr := newTracker(80, 24, 1)
+	tr.Feed([]byte("\x1b[2Jold screen")) // queued (fills the queue)
+	tr.Feed([]byte("lost output"))       // dropped
+	if !tr.Desynced() {
+		t.Fatal("a drop must desync")
+	}
+	go tr.run()
+	defer tr.Close()
+	tr.Sync()
+	if !tr.Desynced() {
+		t.Fatal("recovered on a redraw that was queued before the drop")
+	}
+	tr.Feed([]byte("\x1b[2Jnew screen"))
+	tr.Sync()
+	if tr.Desynced() {
+		t.Fatal("a redraw after the drop must recover")
+	}
+}
