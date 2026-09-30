@@ -144,15 +144,43 @@ func keepLog(spec launch.Spec) {
 // permissionGranted reports whether the user already allows relay's tools in
 // agy's own settings (read-only; relay never writes that file).
 func permissionGranted() bool {
-	home, err := geminiHome()
+	home, err := os.UserHomeDir()
 	if err != nil {
 		return false
 	}
-	data, err := os.ReadFile(filepath.Join(home, "antigravity-cli", "settings.json"))
-	if err != nil {
-		return false
+	ok, _ := RelayToolsAllowed(home)
+	return ok
+}
+
+// PermissionQuestion is how the launch offer starts (tests look for it).
+const PermissionQuestion = "relay: agy asks before every relay tool call."
+
+// OfferToolPermission returns the question to ask before an interactive
+// launch whose agy settings do not yet allow relay's tools; ok is false when
+// there is nothing to offer (already allowed, not interactive, or settings
+// relay cannot read - agy's own prompt still works then).
+func (a *AgyAdaptor) OfferToolPermission(userArgs []string) (question string, ok bool) {
+	if parseArgv(userArgs).nonInteractive() {
+		return "", false
 	}
-	return strings.Contains(string(data), `"mcp(`+ServerName+`/*)"`)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", false
+	}
+	if allowed, err := RelayToolsAllowed(home); err != nil || allowed {
+		return "", false
+	}
+	return fmt.Sprintf("%s Allow them from now on, by adding %q to permissions.allow in %s? [y/N] ", PermissionQuestion, relayToolsRule, settingsPath(home)), true
+}
+
+// GrantToolPermission allows relay's tools in agy's settings (the user said
+// yes to OfferToolPermission).
+func (a *AgyAdaptor) GrantToolPermission() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	return AllowRelayTools(home)
 }
 
 // Cleanup ends this launch's registration lease; the last relay agy agent to

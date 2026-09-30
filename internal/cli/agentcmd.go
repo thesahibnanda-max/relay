@@ -126,6 +126,19 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, in io.Reader, errw io.W
 	col.Bind(lk, a.Name(), role.Name)
 	col.SetUploadTurns(p.Record != RecordOff)
 
+	// agy asks before each relay tool call unless its settings allow them:
+	// offered at every interactive launch until they do, never written
+	// without a yes.
+	if o, ok := a.(toolPermissionOffer); ok && lk != nil && perr == nil && shouldPauseForBannerAck(in) {
+		if q, ok := o.OfferToolPermission(p.ToolArgs); ok && askYes(in, errw, q) {
+			if err := o.GrantToolPermission(); err != nil {
+				fmt.Fprintf(errw, "relay: could not update %s's settings: %v\n", a.Name(), err)
+			} else {
+				fmt.Fprintf(errw, "relay: done: %s will run relay's tools without asking\n", a.Name())
+			}
+		}
+	}
+
 	toolArgs, extraEnv, attach, cleanup := prepareLaunch(a, p, role, lk, shared, paths, perr == nil, col, errw, bin)
 	defer cleanup()
 	env = append(env, extraEnv...)
@@ -157,6 +170,21 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, in io.Reader, errw io.W
 		fmt.Fprintf(errw, "relay: %v\n", err)
 	}
 	return code
+}
+
+// toolPermissionOffer is an adaptor whose tool asks before each relay tool
+// call unless the user allows them once in its own settings (agy).
+type toolPermissionOffer interface {
+	OfferToolPermission(userArgs []string) (question string, ok bool)
+	GrantToolPermission() error
+}
+
+// askYes prints question and reports whether the answer is yes (default no).
+func askYes(in io.Reader, out io.Writer, question string) bool {
+	fmt.Fprint(out, question)
+	line, _ := bufio.NewReader(in).ReadString('\n')
+	a := strings.ToLower(strings.TrimSpace(line))
+	return a == "y" || a == "yes"
 }
 
 // sessionBannerAckEnvVar lets an advanced/scripted interactive user skip the

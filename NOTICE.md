@@ -207,9 +207,11 @@ but keeps it as close to "zero footprint" as that allows:
   how Relay knows which conversation is live and that a message was really received) and moves it back
   into `agy`'s own log folder when the session ends.
 
-`agy` asks before every MCP tool call, Relay's included. To let an agent use Relay's tools without a
-prompt each time, allow them once: choose *always allow ... (Persist to settings.json)* at the first
-prompt, or add `"mcp(relay/*)"` to `permissions.allow` in `~/.gemini/antigravity-cli/settings.json`.
+`agy` asks before every MCP tool call, Relay's included. Until Relay's tools are allowed, every
+interactive `relay agy` launch offers to allow them from then on, and only a `y` makes Relay add
+`"mcp(relay/*)"` to `permissions.allow` in `~/.gemini/antigravity-cli/settings.json` (nothing else in
+that file changes). You can also choose *always allow ... (Persist to settings.json)* at agy's first
+prompt.
 
 ---
 

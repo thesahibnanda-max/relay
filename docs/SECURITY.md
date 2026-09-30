@@ -63,7 +63,9 @@ It does not defend against another process running as *your own user* (which cou
   scoped by environment: it serves tools only to the agy Relay launched for that agent (matching
   `RELAY_AGENT_ID` and run directory) and offers nothing to any other agy session - an unrelated agy, or a
   second relay agy agent, can never act as another agent. The file is restored byte for byte when the last
-  relay agy agent exits.
+  relay agy agent exits. Separately, and only when you answer `y` to the offer `relay agy` makes at
+  launch, Relay adds `"mcp(relay/*)"` to agy's `settings.json` so agy stops asking before each relay tool
+  call; that one change stays until you remove it.
 
 ## Things to be aware of
 

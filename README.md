@@ -53,10 +53,11 @@ made under a lock, so concurrent launches never race `agy`'s own config file. If
 before it can clean up, the next `relay agy` launch or `relay gc` finishes the job, and `relay
 doctor` says so.
 
-`agy` asks before every MCP tool call. To let an agent use Relay's tools without a prompt each time,
-allow them once: choose *always allow ... (Persist to settings.json)* at the first prompt, or add
-`"mcp(relay/*)"` to `permissions.allow` in `~/.gemini/antigravity-cli/settings.json`. Relay never
-answers those prompts and never types into them.
+`agy` asks before every MCP tool call. Until Relay's tools are allowed, every interactive `relay agy`
+launch offers to allow them from then on; only a `y` makes Relay add `"mcp(relay/*)"` to
+`permissions.allow` in `~/.gemini/antigravity-cli/settings.json` (keeping everything else in the file).
+You can also choose *always allow ... (Persist to settings.json)* at agy's first prompt. Relay never
+answers agy's own prompts and never types into them.
 
 Linux, macOS, WSL and native Windows. One static binary, no cgo.
 

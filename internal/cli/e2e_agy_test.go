@@ -430,3 +430,36 @@ func TestAgyE2EWarnsAboutAnUntestedVersion(t *testing.T) {
 		t.Fatalf("warned about a tested agy:\n%s", out)
 	}
 }
+
+// Every interactive relay agy launch offers to allow relay's tools in agy's
+// settings until they are: "no" leaves the file alone (and is asked again
+// next time), "yes" adds the rule and keeps everything else.
+func TestAgyE2EOffersToAllowRelaysTools(t *testing.T) {
+	w := newWorld(t)
+	settings := filepath.Join(w.home, ".gemini", "antigravity-cli", "settings.json")
+	os.MkdirAll(filepath.Dir(settings), 0o755)
+	os.WriteFile(settings, []byte(`{"trustedWorkspaces":["/w"]}`), 0o644)
+
+	bob := w.startAgy("bob")
+	if !strings.Contains(bob.output(), permissionQuestion) {
+		t.Fatalf("no offer; output:\n%s", bob.output())
+	}
+	bob.quitAgy()
+	if got, _ := os.ReadFile(settings); string(got) != `{"trustedWorkspaces":["/w"]}` {
+		t.Fatalf("answering no changed agy's settings: %s", got)
+	}
+
+	w.permissionAnswer = "y"
+	carol := w.startAgy("carol")
+	carol.quitAgy()
+	got, _ := os.ReadFile(settings)
+	if !strings.Contains(string(got), `"mcp(relay/*)"`) || !strings.Contains(string(got), `"/w"`) {
+		t.Fatalf("settings after yes: %s", got)
+	}
+
+	dave := w.startAgy("dave") // allowed now: nothing to offer
+	dave.quitAgy()
+	if strings.Contains(dave.output(), permissionQuestion) {
+		t.Fatal("offered again after the tools were allowed")
+	}
+}

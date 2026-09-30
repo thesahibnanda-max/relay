@@ -105,7 +105,13 @@ type world struct {
 	relay string // RELAY_HOME
 	bin   string
 	env   []string
+	// permissionAnswer answers relay agy's offer to allow relay's tools in
+	// agy's settings (default "n").
+	permissionAnswer string
 }
+
+// permissionQuestion starts relay agy's launch offer (agy.PermissionQuestion).
+const permissionQuestion = "relay: agy asks before every relay tool call."
 
 func newWorld(t *testing.T) *world {
 	t.Helper()
@@ -221,12 +227,21 @@ func (w *world) startWithAck(tool string, ack bool, args ...string) *relayProc {
 			w.t.Fatalf("acknowledging the session banner: %v", err)
 		}
 	}
+	answer := w.permissionAnswer // agy's launch offer to allow relay's tools: "no" unless a test says
+	if answer == "" {
+		answer = "n"
+	}
+	asked := false
 	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, err := a.pty.Read(buf)
 			a.mu.Lock()
 			a.out.Write(buf[:n])
+			if !asked && tool == "agy" && strings.Contains(a.out.String(), permissionQuestion) {
+				asked = true
+				a.pty.Write([]byte(answer + "\n"))
+			}
 			a.mu.Unlock()
 			if err != nil {
 				close(a.done)
