@@ -194,6 +194,10 @@ type lease struct {
 	AgentID string    `json:"agent_id"`
 	PID     int       `json:"pid"`
 	Started time.Time `json:"started"`
+	// Ident is the process's pid and start time (relayhome.ProcessIdentity):
+	// once relay is killed, a process that later gets the same pid does not
+	// keep the lease alive. Empty in leases older relays wrote.
+	Ident string `json:"ident,omitempty"`
 }
 
 type snapshot struct {
@@ -208,6 +212,7 @@ type regState struct {
 	cacheDir string // where agy caches the tool schemas of ServerName
 	agyBin   string
 	alive    func(pid int) bool
+	ident    func(pid int) string
 }
 
 func (s regState) leasePath(agentID string) string {
@@ -229,7 +234,7 @@ func (s regState) liveLeases() []string {
 		if err != nil || json.Unmarshal(data, &l) != nil {
 			continue
 		}
-		if s.alive(l.PID) {
+		if s.alive(l.PID) && (l.Ident == "" || s.ident(l.PID) == "" || s.ident(l.PID) == l.Ident) {
 			live = append(live, l.AgentID)
 		}
 	}
@@ -267,7 +272,7 @@ func (s regState) writeLease(agentID string) error {
 	if err := os.MkdirAll(filepath.Join(s.dir, "leases"), 0o700); err != nil {
 		return err
 	}
-	data, _ := json.Marshal(lease{AgentID: agentID, PID: os.Getpid(), Started: time.Now()})
+	data, _ := json.Marshal(lease{AgentID: agentID, PID: os.Getpid(), Started: time.Now(), Ident: s.ident(os.Getpid())})
 	return writeFileAtomic(s.leasePath(agentID), data, 0o600)
 }
 
@@ -407,6 +412,8 @@ type Options struct {
 	LegacyMarker string
 	// Alive reports whether a pid is running (relayhome.PIDAlive by default).
 	Alive func(pid int) bool
+	// Ident names a running process (relayhome.ProcessIdentity by default).
+	Ident func(pid int) string
 	// Home is the user's home directory (default: the real one).
 	Home string
 }
@@ -419,9 +426,12 @@ func (o Options) state() (regState, error) {
 			return regState{}, err
 		}
 	}
-	alive := o.Alive
+	alive, ident := o.Alive, o.Ident
 	if alive == nil {
 		alive = relayhome.PIDAlive
+	}
+	if ident == nil {
+		ident = relayhome.ProcessIdentity
 	}
 	return regState{
 		dir:      filepath.Join(gem, "config", stateDirName),
@@ -429,6 +439,7 @@ func (o Options) state() (regState, error) {
 		cacheDir: filepath.Join(gem, "antigravity-cli", "mcp", ServerName),
 		agyBin:   o.AgyBin,
 		alive:    alive,
+		ident:    ident,
 	}, nil
 }
 

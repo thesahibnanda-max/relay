@@ -537,3 +537,18 @@ func TestRegisterRefusesAnInvalidAgentID(t *testing.T) {
 		t.Fatal("agy's config was touched")
 	}
 }
+
+// relay killed outright, and its pid later reused by some other process: the
+// lease is dead all the same, so the entry is cleaned up.
+func TestLeaseOfAReusedPIDIsDead(t *testing.T) {
+	r := newRig(t)
+	r.write("")
+	r.register(agentA)
+	r.opt.Ident = func(int) string { return "someone-else" } // the pid now names another process
+	if _, err := Sweep(r.opt); err != nil {
+		t.Fatal(err)
+	}
+	if data, ok := r.read(); !ok || data != "" {
+		t.Fatalf("config %q exists=%v: the reused pid kept relay's entry alive", data, ok)
+	}
+}
