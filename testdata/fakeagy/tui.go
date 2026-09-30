@@ -123,6 +123,7 @@ func runTUI(args []string) int {
 	}
 	os.MkdirAll(filepath.Dir(logFile), 0o755)
 	t.logw, _ = os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	t.log("server.go:1637] Language server version: " + version())
 	t.allowAll = mcpAllowed()
 
 	if old, err := term.MakeRaw(int(os.Stdin.Fd())); err == nil {
@@ -206,7 +207,7 @@ func (t *tui) render() {
 		t.out.WriteString(b.String())
 		return
 	}
-	b.WriteString("Antigravity CLI 1.2.13 (fake)\r\n\r\n")
+	b.WriteString("Antigravity CLI " + version() + " (fake)\r\n\r\n")
 	h := t.history
 	if len(h) > 14 {
 		h = h[len(h)-14:]

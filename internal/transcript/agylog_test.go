@@ -94,3 +94,38 @@ func TestParseAgyLogLineSubagentStart(t *testing.T) {
 		t.Fatalf("%+v", ev)
 	}
 }
+
+func TestParseAgyLogLineVersion(t *testing.T) {
+	ev, ok := ParseAgyLogLine(`I0930 12:51:53.658619      53 server.go:1637] Language server version: 1.2.14`)
+	if !ok || ev.Version != "1.2.14" {
+		t.Fatalf("%+v %v", ev, ok)
+	}
+}
+
+func TestAgyVersionTested(t *testing.T) {
+	for v, want := range map[string]bool{"1.2.12": true, "1.2.14": true, "1.2.11": false, "1.2.15": false, "1.3.0": false, "2.0": false, "x": false} {
+		if got := AgyVersionTested(v); got != want {
+			t.Errorf("AgyVersionTested(%q) = %v", v, got)
+		}
+	}
+}
+
+// The follower counts what it reads, so a log whose lines relay no longer
+// recognises is noticed rather than silently ignored.
+func TestAgyLogFollowerCountsLines(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agy.log")
+	os.WriteFile(path, []byte("I0930 12:51:53.657045      53 server.go:1586] Starting\nsomething else entirely\n"), 0o644)
+	f := &AgyLogFollower{Path: path, Fn: func(AgyLogEvent) {}, Every: 10 * time.Millisecond}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go f.Run(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if lines, glog := f.Seen(); lines == 2 && glog == 1 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	lines, glog := f.Seen()
+	t.Fatalf("lines %d glog %d, want 2 1", lines, glog)
+}

@@ -59,6 +59,10 @@ type Session struct {
 	acceptedAt   time.Time
 
 	gateClosed atomic.Bool // see SetStartupGate
+	gateTimer  *time.Timer
+
+	warnMu   sync.Mutex
+	warnings []string
 }
 
 // startupGateMax bounds the startup gate: if the tool's records never say
@@ -70,8 +74,33 @@ const startupGateMax = 3 * time.Minute
 func (s *Session) SetStartupGate(on bool) {
 	s.gateClosed.Store(on)
 	if on {
-		time.AfterFunc(startupGateMax, s.openGate)
+		s.gateTimer = time.AfterFunc(startupGateMax, func() {
+			if s.gateClosed.Load() {
+				s.warn(s.tool + " never reported its first turn finished; relay started delivering messages after " + startupGateMax.String() + " anyway")
+			}
+			s.openGate()
+		})
 	}
+}
+
+// warn records something the user should know; it is printed once the tool
+// has exited (a full-screen tool leaves nowhere safe to print before).
+func (s *Session) warn(msg string) {
+	s.warnMu.Lock()
+	defer s.warnMu.Unlock()
+	for _, w := range s.warnings {
+		if w == msg {
+			return
+		}
+	}
+	s.warnings = append(s.warnings, msg)
+}
+
+// Warnings returns what warn recorded.
+func (s *Session) Warnings() []string {
+	s.warnMu.Lock()
+	defer s.warnMu.Unlock()
+	return append([]string(nil), s.warnings...)
 }
 
 func (s *Session) openGate() {
@@ -132,6 +161,9 @@ func (s *Session) Attach(h *agent.Handle, approveInbound bool) {
 
 // Stop ends scheduling; queued messages remain in the daemon.
 func (s *Session) Stop() {
+	if s.gateTimer != nil {
+		s.gateTimer.Stop()
+	}
 	if s.cancel != nil {
 		s.cancel()
 	}

@@ -74,7 +74,14 @@ type AgyDBTailer struct {
 	// conversation), only the state is.
 	SkipExisting bool
 	Every        time.Duration // poll interval (default 250ms)
+	// Unreadable, if set, is called once if the database cannot be read -
+	// missing, or not in the schema relay knows - for agyUnreadableAfter.
+	Unreadable func()
 }
+
+// agyUnreadableAfter is how long a conversation database may stay unreadable
+// (agy creating or checkpointing it) before the tailer reports it.
+const agyUnreadableAfter = 10 * time.Second
 
 type agyStep struct {
 	idx            int64
@@ -91,6 +98,21 @@ type agyTail struct {
 	state    string
 	dialog   bool
 	lastSent time.Time
+
+	failingSince time.Time // first failed poll since the last good one
+	reportedBad  bool
+}
+
+// failed records a poll that could not read the database.
+func (a *agyTail) failed() {
+	a.close()
+	if a.failingSince.IsZero() {
+		a.failingSince = time.Now()
+	}
+	if !a.reportedBad && a.t.Unreadable != nil && time.Since(a.failingSince) >= agyUnreadableAfter {
+		a.reportedBad = true
+		a.t.Unreadable()
+	}
 }
 
 func (t *AgyDBTailer) Run(ctx context.Context) {
@@ -161,12 +183,12 @@ func (a *agyTail) poll(ctx context.Context) {
 		}
 	case sql.ErrNoRows:
 	default:
-		a.close() // reopen next time (the database may have been checkpointed/closed)
+		a.failed() // reopen next time (the database may have been checkpointed/closed)
 		return
 	}
 	rows, err := a.db.QueryContext(ctx, `SELECT idx, step_type, status FROM steps ORDER BY idx`)
 	if err != nil {
-		a.close()
+		a.failed()
 		return
 	}
 	var steps []agyStep
@@ -179,9 +201,10 @@ func (a *agyTail) poll(ctx context.Context) {
 	err = rows.Err()
 	rows.Close()
 	if err != nil {
-		a.close()
+		a.failed()
 		return
 	}
+	a.failingSince = time.Time{}
 
 	if !a.seeded {
 		a.seeded = true

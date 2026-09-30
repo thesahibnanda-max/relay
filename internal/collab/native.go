@@ -3,7 +3,9 @@ package collab
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -244,7 +246,14 @@ func (s *Session) followAgy(ctx context.Context) {
 		return
 	}
 	subagents := map[string]bool{} // goroutines starting a subagent's conversation
-	f := &transcript.AgyLogFollower{Path: logPath, Fn: func(ev transcript.AgyLogEvent) {
+	f := &transcript.AgyLogFollower{Path: logPath}
+	f.Fn = func(ev transcript.AgyLogEvent) {
+		if ev.Version != "" {
+			if !transcript.AgyVersionTested(ev.Version) {
+				s.warn(fmt.Sprintf("agy %s has not been verified with this relay (tested: %s to %s); if messages misbehave, please report it", ev.Version, transcript.AgyTestedMin, transcript.AgyTestedMax))
+			}
+			return
+		}
 		if ev.HasInput {
 			s.Accepted(ev.Input)
 			return
@@ -267,8 +276,36 @@ func (s *Session) followAgy(ctx context.Context) {
 		path := transcript.AgyConversationDB(ev.Conversation)
 		s.openGateIfLeftBriefed(ctx, path)
 		s.setAgyTranscript(path, !ev.Created)
-	}}
+	}
+	go s.watchAgyLog(ctx, f, agyLogWait)
 	f.Run(ctx)
+}
+
+// agyLogWait is how long after launch agy's log must show its usual format.
+const agyLogWait = 30 * time.Second
+
+// watchAgyLog checks, once, that agy is writing the log relay reads. If not
+// (agy changed where or how it logs), relay stops waiting on records it will
+// never recognise.
+func (s *Session) watchAgyLog(ctx context.Context, f interface{ Seen() (int64, int64) }, after time.Duration) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(after):
+	}
+	switch lines, glog := f.Seen(); {
+	case lines == 0:
+		s.agyUnrecognised("agy wrote nothing to the log relay reads")
+	case glog == 0:
+		s.agyUnrecognised("agy's log is not in the format this relay knows")
+	}
+}
+
+// agyUnrecognised gives up on agy's own records: delivery goes by agy's
+// screen alone, and the user is told why.
+func (s *Session) agyUnrecognised(why string) {
+	s.warn(why + ": relay delivered messages by watching agy's screen alone. Update relay, or report it with your agy version")
+	s.openGate()
 }
 
 // setAgyTranscript follows a (new) agy conversation database, dropping the
@@ -295,7 +332,9 @@ func (s *Session) setAgyTranscript(path string, resumed bool) bool {
 			s.onAgyRecord(path, r)
 		}
 	}
-	tl := &transcript.AgyDBTailer{Path: path, Fn: fn, SkipExisting: resumed}
+	tl := &transcript.AgyDBTailer{Path: path, Fn: fn, SkipExisting: resumed, Unreadable: func() {
+		s.agyUnrecognised("agy's conversation database " + filepath.Base(path) + " could not be read")
+	}}
 	go tl.Run(ctx)
 	return true
 }

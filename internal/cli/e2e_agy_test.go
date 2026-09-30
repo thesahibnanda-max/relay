@@ -412,3 +412,21 @@ func TestAgyE2EResumeWaitsForTheBriefingTurn(t *testing.T) {
 		t.Fatalf("relay typed while agy was signing in: %v", ev)
 	}
 }
+
+// An agy version relay was not verified against still runs, and the user is
+// told so when the session ends (not over agy's screen).
+func TestAgyE2EWarnsAboutAnUntestedVersion(t *testing.T) {
+	w := newWorld(t)
+	bob := w.startAgy("bob", "FAKEAGY_VERSION=9.9.9")
+	bob.waitEvent("turn_end", "outcome", "")
+	bob.quitAgy()
+	if out := bob.output(); !strings.Contains(out, "relay: warning: agy 9.9.9 has not been verified") {
+		t.Fatalf("no warning about the untested version; output:\n%s", out)
+	}
+	carol := w.startAgy("carol") // a tested version: nothing to warn about
+	carol.waitEvent("turn_end", "outcome", "")
+	carol.quitAgy()
+	if out := carol.output(); strings.Contains(out, "relay: warning") {
+		t.Fatalf("warned about a tested agy:\n%s", out)
+	}
+}

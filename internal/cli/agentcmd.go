@@ -145,6 +145,9 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, in io.Reader, errw io.W
 		},
 	})
 	col.Stop()
+	for _, w := range col.Warnings() {
+		fmt.Fprintf(errw, "relay: warning: %s\n", w)
+	}
 	cleanup()      // remove the per-launch files before we say goodbye
 	lg.Close(code) // also emits the exit event to the daemon via the tee
 	if lk != nil {

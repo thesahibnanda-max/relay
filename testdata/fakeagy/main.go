@@ -1,6 +1,6 @@
 // fakeagy is a scripted stand-in for the real `agy` binary (Google's
 // Antigravity CLI), faithful to what was confirmed live against agy
-// 1.2.12/1.2.13, so the agy adaptor can be tested end to end without a real,
+// 1.2.12-1.2.14, so the agy adaptor can be tested end to end without a real,
 // authenticated agy or a real ~/.gemini:
 //
 //   - `mcp add/remove/list` (mcpcmd.go) edit $HOME/.gemini/config/mcp_config.json
@@ -51,8 +51,16 @@ func main() {
 		os.Exit(mcpCommand(args[1:]))
 	}
 	if len(args) > 0 && (args[0] == "--version" || args[0] == "-version") {
-		fmt.Println("1.2.13")
+		fmt.Println(version())
 		return
 	}
 	os.Exit(runTUI(args))
+}
+
+// version is the agy version faked (FAKEAGY_VERSION overrides it).
+func version() string {
+	if v := os.Getenv("FAKEAGY_VERSION"); v != "" {
+		return v
+	}
+	return "1.2.14"
 }

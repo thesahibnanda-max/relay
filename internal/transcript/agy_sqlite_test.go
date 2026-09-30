@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -308,6 +309,24 @@ func TestAgyTailerMissingFileIsANoOp(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err == nil {
 		t.Fatal("reading a missing database created it (in agy's own folder)")
+	}
+}
+
+// A database relay cannot read (not agy's schema, or never created) is
+// reported once, so relay can stop relying on it rather than wait forever.
+func TestAgyTailerReportsAnUnreadableDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conv.db")
+	os.WriteFile(path, []byte("not a database"), 0o644)
+	var n atomic.Int32
+	tl := &AgyDBTailer{Path: path, Fn: func(Record) {}, Every: 5 * time.Millisecond, Unreadable: func() { n.Add(1) }}
+	a := &agyTail{t: tl, reported: map[int64]bool{}}
+	defer a.close()
+	a.poll(context.Background())
+	a.failingSince = time.Now().Add(-agyUnreadableAfter) // as if it had been failing that long
+	a.poll(context.Background())
+	a.poll(context.Background())
+	if n.Load() != 1 {
+		t.Fatalf("reported %d times, want once", n.Load())
 	}
 }
 
