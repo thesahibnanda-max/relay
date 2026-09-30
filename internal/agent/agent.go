@@ -46,7 +46,14 @@ type tool interface {
 // exits; a lingering grandchild holding the PTY open would otherwise hang us.
 const drainTimeout = 250 * time.Millisecond
 
+// eofRepeatGap separates repeated EOF presses so the tool reads them as two keys.
+const eofRepeatGap = 300 * time.Millisecond
+
 type Config struct {
+	// EOFPresses is how many EOF keys end the tool when piped stdin ends
+	// (default 1).
+	EOFPresses int
+
 	Tool string
 	Bin  string
 	Args []string
@@ -292,7 +299,14 @@ func Run(cfg Config) (int, error) {
 			}
 			if err != nil {
 				if !isTTY && errors.Is(err, io.EOF) {
-					_, _ = mux.WriteUser(eofSignal()) // piped stdin ended
+					// Piped stdin ended. Some tools ask for EOF twice before
+					// exiting (agy: "press ctrl+d again to exit").
+					for i := 0; i < max(1, cfg.EOFPresses); i++ {
+						if i > 0 {
+							time.Sleep(eofRepeatGap)
+						}
+						_, _ = mux.WriteUser(eofSignal())
+					}
 				}
 				return
 			}
@@ -304,6 +318,17 @@ func Run(cfg Config) (int, error) {
 	select {
 	case <-outDone:
 	case <-time.After(drainTimeout):
+	}
+	if isTTY {
+		// Whatever the tool left switched on (it crashed, or was killed before
+		// restoring the terminal) is switched off, so the shell gets back the
+		// terminal it had.
+		tracker.Sync()
+		if reset := tracker.Modes().ResetSequence(); reset != "" {
+			outMu.Lock()
+			_, _ = io.WriteString(cfg.Out, reset)
+			outMu.Unlock()
+		}
 	}
 
 	return t.ExitCode(waitErr), nil

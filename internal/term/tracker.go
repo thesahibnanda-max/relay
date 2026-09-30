@@ -5,7 +5,10 @@ package term
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,10 +21,69 @@ const queueSize = 2048 // chunks; ~64 MB worst case at 32 KB each
 
 // Modes are the terminal modes the tool has switched on.
 type Modes struct {
-	BracketedPaste bool // ?2004
-	AltScreen      bool // ?1049 / ?1047
-	FocusEvents    bool // ?1004
-	Mouse          bool // any of ?1000 ?1002 ?1003
+	BracketedPaste  bool // ?2004
+	AltScreen       bool // ?1049 / ?1047
+	FocusEvents     bool // ?1004
+	Mouse           bool // any of ?1000 ?1002 ?1003
+	CursorHidden    bool // ?25 reset
+	KittyKeyboard   int  // kitty keyboard flags pushed (CSI > f u) and not yet popped
+	ModifyOtherKeys bool // xterm CSI > 4 ; n m with n > 0
+}
+
+// ResetSequence undoes, on the user's terminal, every mode the tool left
+// switched on - e.g. when it crashed or was killed before restoring them - so
+// the user's shell is not left with a hidden cursor, mouse reporting, or
+// keys arriving in an encoding it does not read. Empty when nothing is left.
+func (m Modes) ResetSequence() string {
+	var b strings.Builder
+	if m.KittyKeyboard > 0 {
+		fmt.Fprintf(&b, "\x1b[<%du", m.KittyKeyboard)
+	}
+	if m.ModifyOtherKeys {
+		b.WriteString("\x1b[>4m")
+	}
+	if m.Mouse {
+		b.WriteString("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l")
+	}
+	if m.FocusEvents {
+		b.WriteString("\x1b[?1004l")
+	}
+	if m.BracketedPaste {
+		b.WriteString("\x1b[?2004l")
+	}
+	if m.AltScreen {
+		b.WriteString("\x1b[?1049l")
+	}
+	if m.CursorHidden {
+		b.WriteString("\x1b[?25h")
+	}
+	return b.String()
+}
+
+// keyboardModes matches the keyboard-protocol switches the VT emulator does
+// not report: kitty's push (CSI > flags u) and pop (CSI < n u), and xterm's
+// modifyOtherKeys (CSI > 4 ; n m).
+var keyboardModes = regexp.MustCompile(`\x1b\[([<>])(\d*)(?:;(\d*))?([um])`)
+
+func (t *Tracker) scanKeyboardModes(p []byte) {
+	for _, m := range keyboardModes.FindAllSubmatch(p, -1) {
+		dir, a, b, final := m[1][0], string(m[2]), string(m[3]), m[4][0]
+		switch {
+		case final == 'u' && dir == '>':
+			t.modes.KittyKeyboard++
+		case final == 'u' && dir == '<':
+			n, err := strconv.Atoi(a)
+			if err != nil || n < 1 {
+				n = 1
+			}
+			if t.modes.KittyKeyboard -= n; t.modes.KittyKeyboard < 0 {
+				t.modes.KittyKeyboard = 0
+			}
+		case final == 'm' && dir == '>' && a == "4":
+			n, _ := strconv.Atoi(b)
+			t.modes.ModifyOtherKeys = n > 0
+		}
+	}
 }
 
 // item is either output bytes or a barrier (Sync) marker.
@@ -79,6 +141,8 @@ func (t *Tracker) setMode(m ansi.Mode, on bool) {
 		t.modes.FocusEvents = on
 	case ansi.ModeMouseNormal, ansi.ModeMouseButtonEvent, ansi.ModeMouseAnyEvent:
 		t.modes.Mouse = on
+	case ansi.ModeTextCursorEnable:
+		t.modes.CursorHidden = !on
 	}
 }
 
@@ -111,6 +175,7 @@ func (t *Tracker) run() {
 			}
 			t.mu.Lock()
 			_, _ = t.em.Write(it.data)
+			t.scanKeyboardModes(it.data)
 			t.mu.Unlock()
 			if t.desynced.Load() && isFullRedraw(it.data) {
 				t.desynced.Store(false)

@@ -336,3 +336,27 @@ func TestAgyE2EAnswersAnotherAgent(t *testing.T) {
 	}
 	alice.waitSubmit("the answer is 42")
 }
+
+// agy asks for Ctrl+D twice ("press ctrl+d again to exit"); relay must end it
+// when piped stdin ends instead of hanging forever.
+func TestAgyE2EEndsWhenPipedStdinEnds(t *testing.T) {
+	w := newWorld(t)
+	cmd := exec.Command(filepath.Join(w.bin, binName("relay")), "agy")
+	cmd.Env = w.env
+	cmd.Dir = t.TempDir()
+	cmd.Stdin = strings.NewReader("")
+	done := make(chan error, 1)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("relay agy: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		cmd.Process.Kill()
+		t.Fatal("relay agy never exited after its stdin ended")
+	}
+}

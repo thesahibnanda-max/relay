@@ -22,6 +22,10 @@ func (a *AgyAdaptor) Name() string { return "agy" }
 
 func (a *AgyAdaptor) Binary() string { return "agy" }
 
+// EOFPresses: agy exits only on a second Ctrl+D ("press ctrl+d again to
+// exit", confirmed live), so piped stdin ending sends two.
+func (a *AgyAdaptor) EOFPresses() int { return 2 }
+
 // Deliberately nil: --dangerously-skip-permissions bypasses every permission
 // dialog, matching Copilot's own --allow-all precedent - useful only for
 // this adaptor's own automated tests, never for a real launch.

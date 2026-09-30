@@ -130,8 +130,12 @@ func runAgent(p Parsed, factory *adaptor.AdaptorFactory, in io.Reader, errw io.W
 	defer cleanup()
 	env = append(env, extraEnv...)
 
+	eofPresses := 1
+	if e, ok := a.(interface{ EOFPresses() int }); ok {
+		eofPresses = e.EOFPresses()
+	}
 	code, err := agent.Run(agent.Config{
-		Tool: a.Name(), Bin: bin, Args: toolArgs, Env: env,
+		Tool: a.Name(), Bin: bin, Args: toolArgs, Env: env, EOFPresses: eofPresses,
 		Interceptor: chain, Log: lg, RecordInject: p.Record == RecordRaw,
 		ScreenRules: a.ScreenRules(),
 		OnStart: func(h *agent.Handle) {

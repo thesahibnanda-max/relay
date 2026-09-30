@@ -101,3 +101,35 @@ func TestFeedAfterCloseIsSafe(t *testing.T) {
 	tr.Sync()
 	tr.Close()
 }
+
+// agy's startup and exit sequences (confirmed live): it pushes kitty flags
+// and sets modifyOtherKeys, and undoes both on a clean exit.
+func TestKeyboardModesAndResetSequence(t *testing.T) {
+	tr := New(80, 24)
+	defer tr.Close()
+	tr.Feed([]byte("\x1b[?2004h\x1b[>1u\x1b[>4;2m\x1b[?25l"))
+	tr.Sync()
+	m := tr.Modes()
+	if m.KittyKeyboard != 1 || !m.ModifyOtherKeys || !m.CursorHidden || !m.BracketedPaste {
+		t.Fatalf("modes %+v", m)
+	}
+	want := "\x1b[<1u\x1b[>4m\x1b[?2004l\x1b[?25h"
+	if got := m.ResetSequence(); got != want {
+		t.Fatalf("reset %q, want %q", got, want)
+	}
+	tr.Feed([]byte("\x1b[<1u\x1b[>4m\x1b[?2004l\x1b[?25h")) // agy's own clean exit
+	tr.Sync()
+	if got := tr.Modes().ResetSequence(); got != "" {
+		t.Fatalf("a tool that restored everything must leave nothing to reset, got %q", got)
+	}
+	tr.Feed([]byte("\x1b[>1u\x1b[>3u\x1b[<5u\x1b[>4;0m"))
+	tr.Sync()
+	if m := tr.Modes(); m.KittyKeyboard != 0 || m.ModifyOtherKeys {
+		t.Fatalf("over-popping and modifyOtherKeys 0: %+v", m)
+	}
+	tr.Feed([]byte("\x1b[?1049h\x1b[?1000h\x1b[?1004h"))
+	tr.Sync()
+	if got := tr.Modes().ResetSequence(); got != "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?1049l" {
+		t.Fatalf("reset %q", got)
+	}
+}
