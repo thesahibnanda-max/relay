@@ -624,3 +624,35 @@ func TestBootstrapCanBeGivenAgain(t *testing.T) {
 		t.Fatalf("typed %q", inj)
 	}
 }
+
+// A briefing is typed before anything that was already waiting: a message
+// means nothing to a model that has not been told what relay is.
+func TestBootstrapGoesFirst(t *testing.T) {
+	env := newEnv()
+	b := New(env)
+	b.Add(msg("01ARZ3NDEKTSV4RRFFQ69G5FAV", P1, "older high"))
+	b.AddBootstrap("brief")
+	b.step(context.Background())
+	inj, _, _ := env.get()
+	if len(inj) != 1 || inj[0] != "brief" {
+		t.Fatalf("typed %q", inj)
+	}
+}
+
+// A waiting briefing can be withdrawn; messages stay.
+func TestWithdrawBootstrap(t *testing.T) {
+	env := newEnv()
+	env.set(func(f *fakeEnv) { f.st = snap(state.Busy) })
+	b := New(env)
+	b.Add(msg("01ARZ3NDEKTSV4RRFFQ69G5FAV", P2, "task"))
+	b.AddBootstrap("brief")
+	b.WithdrawBootstrap()
+	if b.Pending() != 1 {
+		t.Fatalf("%d waiting, want the message only", b.Pending())
+	}
+	env.set(func(f *fakeEnv) { f.st = snap(state.Idle) })
+	b.step(context.Background())
+	if inj, _, _ := env.get(); len(inj) != 1 || strings.Contains(inj[0], "brief") {
+		t.Fatalf("typed %q", inj)
+	}
+}

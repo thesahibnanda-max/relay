@@ -67,6 +67,12 @@ type Plan struct {
 	StartupGate bool
 }
 
+// BriefingTurnTail ends a briefing typed as a conversation turn of its own
+// (not a system prompt): without saying there is nothing to do yet, the model
+// goes exploring (agy, confirmed live: shell commands behind permission
+// prompts, before any real task).
+const BriefingTurnTail = "This message is only your briefing and there is no task yet: reply with one short line and wait for work to arrive."
+
 // Passthrough is a Plan that runs the tool exactly as the user asked.
 func Passthrough(spec Spec, why string) Plan {
 	p := Plan{Args: append([]string(nil), spec.UserArgs...), Passthrough: true}

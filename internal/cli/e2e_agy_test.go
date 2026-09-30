@@ -385,3 +385,30 @@ func TestAgyE2EWaitsForTheBriefingTurnBeforeTyping(t *testing.T) {
 		t.Fatalf("relay typed while agy was signing in: %v", ev)
 	}
 }
+
+// Resuming a conversation (-c): its old turns are history, not the end of
+// the briefing turn. Relay still waits for this launch's -i briefing to
+// finish before typing (nothing typed while agy signs in), and briefs once.
+func TestAgyE2EResumeWaitsForTheBriefingTurn(t *testing.T) {
+	w := newWorld(t)
+	bob := w.startAgy("bob")
+	bob.waitEvent("turn_end", "outcome", "")
+	session, _ := bob.identity()
+	bob.quitAgy()
+
+	saved := w.env
+	w.env = append(append([]string(nil), w.env...), "FAKEAGY_LOGIN_MS=3000")
+	carol := w.start("agy", "developer", "--session="+session, "--name=carol", "--", "-c")
+	w.env = saved
+	carol.waitEvent("mcp_ready", "tools", "relay_send")
+	id := w.send("carol", "What is 2 plus 2?")
+	carol.waitEvent("answer", "text", "4")
+	w.waitState(id, "acknowledged")
+	subs := carol.submits()
+	if len(subs) != 2 || !strings.Contains(subs[0], `You are "carol"`) {
+		t.Fatalf("want this launch's briefing, then the message; got %q", subs)
+	}
+	if ev := carol.events("conversation_created"); len(ev) != 0 {
+		t.Fatalf("relay typed while agy was signing in: %v", ev)
+	}
+}

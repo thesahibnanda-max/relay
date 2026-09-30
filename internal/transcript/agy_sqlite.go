@@ -216,7 +216,7 @@ func (a *agyTail) poll(ctx context.Context) {
 	if busy {
 		state = SigAgyBusy
 	}
-	rec := Record{Turns: turns, Fresh: len(steps) == 0}
+	rec := Record{Turns: turns}
 	if state != a.state || time.Since(a.lastSent) >= agyReassert {
 		rec.Signal, a.state, a.lastSent = state, state, time.Now()
 	}

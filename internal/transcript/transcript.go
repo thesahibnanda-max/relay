@@ -35,9 +35,6 @@ const (
 type Record struct {
 	Turns  []Turn
 	Signal string
-	// Fresh (agy): the conversation has no steps yet - just created, its
-	// first prompt not written. Idle, but not a finished turn.
-	Fresh bool
 }
 
 // Parser turns a line into a Record. Lines it does not understand yield an empty Record.

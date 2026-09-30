@@ -1,6 +1,10 @@
 package agy
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/thesahibnanda-max/relay/internal/adaptor/launch"
+)
 
 // agy parses its command line with Go's flag package: flags come first (one
 // or two dashes, "-f v" or "-f=v"), flag parsing stops at the first
@@ -18,9 +22,6 @@ var subcommands = map[string]bool{
 	"agent": true, "agents": true, "changelog": true, "help": true, "install": true, "mcp": true,
 	"mic-serve": true, "models": true, "plugin": true, "plugins": true, "remote-control": true, "update": true,
 }
-
-// briefingTurnTail ends a briefing delivered as a conversation turn.
-const briefingTurnTail = "This message is only your briefing and there is no task yet: reply with one short line and wait for work to arrive."
 
 // argv is agy's command line as agy itself will read it.
 type argv struct {
@@ -87,11 +88,13 @@ func (a argv) nonInteractive() bool { return a.subcommand != "" || a.print || a.
 // through -i. A user's own -i prompt is kept, after the briefing, in the same
 // first turn.
 func withBriefing(args []string, briefing string) []string {
-	// Here the briefing is a turn of its own, not a system prompt: without
-	// saying there is nothing to do yet, the model goes exploring (confirmed
-	// live: shell commands behind permission prompts, before any real task).
-	briefing += "\n\n" + briefingTurnTail
 	a := parseArgv(args)
+	// Here the briefing is a turn of its own, not a system prompt. It says
+	// there is no task yet - unless the user gave one with -i, or the
+	// conversation being resumed may be mid-task.
+	if strings.TrimSpace(a.interactive) == "" && !a.resume {
+		briefing += "\n\n" + launch.BriefingTurnTail
+	}
 	out := append([]string(nil), args...)
 	if !a.hasPromptI {
 		return append([]string{"-i", briefing}, out...)

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/thesahibnanda-max/relay/internal/adaptor/launch"
 	"github.com/thesahibnanda-max/relay/internal/bus"
 	"github.com/thesahibnanda-max/relay/internal/hooks"
 	"github.com/thesahibnanda-max/relay/internal/proto"
@@ -70,13 +71,27 @@ func (s *Session) briefingMark() string {
 	return b
 }
 
-// noteBriefed records that the live conversation contains the briefing.
-func (s *Session) noteBriefed(userText string) {
+// noteBriefed records that conversation path holds the briefing, if
+// userText (a user turn in it) contains it. A briefing still waiting to be
+// typed is then withdrawn: this conversation already has one (the -i
+// briefing of a conversation agy resumed, say).
+func (s *Session) noteBriefed(path, userText string) {
+	s.nat.mu.Lock()
+	m := s.briefingMark()
+	hit := m != "" && strings.Contains(userText, m)
+	if hit {
+		s.nat.briefed[path] = true
+	}
+	s.nat.mu.Unlock()
+	if hit {
+		s.bus.WithdrawBootstrap()
+	}
+}
+
+func (s *Session) briefedIn(path string) bool {
 	s.nat.mu.Lock()
 	defer s.nat.mu.Unlock()
-	if m := s.briefingMark(); m != "" && strings.Contains(userText, m) {
-		s.nat.briefed[s.nat.trPath] = true
-	}
+	return s.nat.briefed[path]
 }
 
 // openGateIfLeftBriefed opens the startup gate when agy moves on from a
@@ -111,21 +126,44 @@ func (s *Session) openGateIfLeftBriefed(ctx context.Context, next string) {
 	}
 }
 
-// briefIfNeeded types the briefing into the live conversation, once, if it
-// went idle without it - after /new, or a conversation agy switched to on
-// its own. Typed as a turn of its own, it says there is no task yet, or the
-// model goes exploring behind permission prompts.
-func (s *Session) briefIfNeeded() {
+// briefIfNeeded types the briefing into conversation path, once, if it is
+// still the live one and went idle without it - after /new, or a
+// conversation agy switched to on its own.
+func (s *Session) briefIfNeeded(path string) {
 	s.nat.mu.Lock()
-	path, b := s.nat.trPath, s.nat.briefing
-	need := b != "" && path != "" && !s.nat.briefed[path]
+	b := s.nat.briefing
+	need := b != "" && path != "" && path == s.nat.trPath && !s.nat.briefed[path]
 	if need {
 		s.nat.briefed[path] = true // once per conversation, whatever happens next
 	}
 	s.nat.mu.Unlock()
-	if need && !s.gateClosed.Load() {
-		s.bus.AddBootstrap(b + "\n\nThis message is only your briefing and there is no task yet: reply with one short line and wait for work to arrive.")
+	if need {
+		s.bus.AddBootstrap(b + "\n\n" + launch.BriefingTurnTail)
 	}
+}
+
+// onAgyRecord handles a record from agy conversation path, the live one.
+func (s *Session) onAgyRecord(path string, rec transcript.Record) {
+	for _, t := range rec.Turns {
+		if t.Role == "user" {
+			s.noteBriefed(path, t.Text)
+		}
+	}
+	s.onRecord(rec)
+	if rec.Signal != transcript.SigAgyIdle || s.handle.Load() == nil {
+		return
+	}
+	if s.gateClosed.Load() {
+		// Only this launch's briefing turn ending opens the gate: a resumed
+		// conversation's history, a conversation agy made for a prompt that
+		// raced its sign-in, or one just created and still empty going idle
+		// is not that.
+		if !s.briefedIn(path) {
+			return
+		}
+		s.openGate()
+	}
+	s.briefIfNeeded(path)
 }
 
 // SetUploadTurns controls whether conversation turns are sent to the daemon
@@ -247,12 +285,14 @@ func (s *Session) setAgyTranscript(path string, resumed bool) bool {
 	}
 	ctx, cancel := context.WithCancel(s.nat.ctx)
 	s.nat.trPath, s.nat.trCancel = path, cancel
+	// A briefing still waiting was meant for the conversation just left.
+	defer s.bus.WithdrawBootstrap()
 	fn := func(r transcript.Record) {
 		s.nat.mu.Lock()
 		live := s.nat.trPath == path
 		s.nat.mu.Unlock()
 		if live { // a record from a conversation already switched away from is stale
-			s.onRecord(r)
+			s.onAgyRecord(path, r)
 		}
 	}
 	tl := &transcript.AgyDBTailer{Path: path, Fn: fn, SkipExisting: resumed}
@@ -285,9 +325,6 @@ func (s *Session) onRecord(rec transcript.Record) {
 	upload := s.nat.upload
 	s.nat.mu.Unlock()
 	for _, t := range rec.Turns {
-		if t.Role == "user" && s.tool == "agy" {
-			s.noteBriefed(t.Text)
-		}
 		if upload && s.lk != nil {
 			at := t.TS
 			if at.IsZero() {
@@ -317,13 +354,6 @@ func (s *Session) onRecord(rec transcript.Record) {
 		h.Signal(state.Signal{Source: "agydb", State: state.Busy, Conf: state.High, TTL: agyStateTTL})
 	case transcript.SigAgyIdle:
 		h.Signal(state.Signal{Source: "agydb", State: state.Idle, Conf: state.High, TTL: agyStateTTL})
-		if rec.Fresh && s.gateClosed.Load() {
-			// agy creates the conversation a moment before it writes the
-			// -i briefing into it: not the end of a turn.
-			return
-		}
-		s.openGate() // the first turn (the briefing) is done
-		s.briefIfNeeded()
 	case transcript.SigAgyDialog:
 		h.Signal(state.Signal{Source: "agydb-dialog", State: state.Dialog, Conf: state.High, TTL: agyStateTTL})
 	case transcript.SigAgyDialogClear:

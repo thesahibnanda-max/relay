@@ -58,13 +58,16 @@ func TestParseArgvFollowsAgysOwnFlagParsing(t *testing.T) {
 }
 
 func TestWithBriefing(t *testing.T) {
-	b := "BRIEF\n\n" + briefingTurnTail
+	b := "BRIEF\n\n" + launch.BriefingTurnTail // no task yet: it says so
 	cases := []struct{ in, want []string }{
 		{nil, []string{"-i", b}},
 		{[]string{"--model", "m"}, []string{"-i", b, "--model", "m"}},
-		{[]string{"-i", "do x"}, []string{"-i", b + "\n\n---\n\ndo x"}},
-		{[]string{"--prompt-interactive=do x", "-c"}, []string{"--prompt-interactive=" + b + "\n\n---\n\ndo x", "-c"}},
+		{[]string{"-i", "do x"}, []string{"-i", "BRIEF\n\n---\n\ndo x"}},
+		{[]string{"--prompt-interactive=do x"}, []string{"--prompt-interactive=BRIEF\n\n---\n\ndo x"}},
 		{[]string{"--model", "m", "-i", ""}, []string{"--model", "m", "-i", b}},
+		// A resumed conversation may be mid-task: never "there is no task".
+		{[]string{"-c"}, []string{"-i", "BRIEF", "-c"}},
+		{[]string{"--conversation", "abc"}, []string{"-i", "BRIEF", "--conversation", "abc"}},
 	}
 	for _, c := range cases {
 		if got := withBriefing(c.in, "BRIEF"); !reflect.DeepEqual(got, c.want) {
@@ -105,7 +108,7 @@ func TestPrepareRegistersBriefsAndCleanupRestores(t *testing.T) {
 		t.Fatalf("plan %+v err %v", plan, err)
 	}
 	wantLog := filepath.Join(sp.RunDir, logFile)
-	want := []string{"-i", sp.Briefing + "\n\n" + briefingTurnTail, "--log-file", wantLog, "--model", "m"}
+	want := []string{"-i", sp.Briefing + "\n\n" + launch.BriefingTurnTail, "--log-file", wantLog, "--model", "m"}
 	if !reflect.DeepEqual(plan.Args, want) || plan.ToolLog != wantLog {
 		t.Fatalf("args %q log %q, want %q %q", plan.Args, plan.ToolLog, want, wantLog)
 	}

@@ -124,9 +124,24 @@ func (b *Bus) AddBootstrap(text string) {
 			return
 		}
 	}
-	delete(b.seen, BootstrapID)
+	b.seq++
+	b.queue = append(b.queue, &pending{MessageView: proto.MessageView{ID: BootstrapID, From: "relay", Kind: "notify", Priority: P1, Body: text}, arrived: b.now(), seq: b.seq})
 	b.mu.Unlock()
-	b.Add(proto.MessageView{ID: BootstrapID, From: "relay", Kind: "notify", Priority: P1, Body: text})
+	b.poke()
+}
+
+// WithdrawBootstrap drops a briefing that is still waiting to be typed (the
+// conversation it was meant for is gone, or turned out to hold one).
+func (b *Bus) WithdrawBootstrap() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	kept := b.queue[:0]
+	for _, p := range b.queue {
+		if p.ID != BootstrapID || p.inflight {
+			kept = append(kept, p)
+		}
+	}
+	b.queue = kept
 }
 
 func (b *Bus) rememberLocked(id string) {
@@ -223,11 +238,16 @@ func (b *Bus) effective(p *pending) int {
 	return prio
 }
 
-// orderedLocked returns the queue most urgent first, first come first served
-// within a level.
+// orderedLocked returns the queue briefing first, then most urgent first,
+// first come first served within a level.
 func (b *Bus) orderedLocked() []*pending {
 	out := append([]*pending(nil), b.queue...)
 	sort.SliceStable(out, func(i, j int) bool {
+		// The briefing first: a message means nothing to a model that has
+		// not been told what relay is.
+		if bi, bj := out[i].ID == BootstrapID, out[j].ID == BootstrapID; bi != bj {
+			return bi
+		}
 		ei, ej := b.effective(out[i]), b.effective(out[j])
 		if ei != ej {
 			return ei < ej
