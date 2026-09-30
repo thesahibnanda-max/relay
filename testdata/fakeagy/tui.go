@@ -31,6 +31,7 @@ import (
 //	RELAY_CALL <tool> <json args>   call an MCP tool (asks permission unless allowed)
 //	RUN <command>                   ask "Run this command?" (nothing is run)
 //	SLEEP <ms>                      stay busy that long
+//	SUBAGENT                        run a subagent in a conversation of its own
 
 var (
 	evMu sync.Mutex
@@ -122,7 +123,9 @@ func runTUI(args []string) int {
 		logFile = filepath.Join(geminiDir(), "antigravity-cli", "log", "cli-"+time.Now().Format("20060102_150405")+".log")
 	}
 	os.MkdirAll(filepath.Dir(logFile), 0o755)
-	t.logw, _ = os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if os.Getenv("FAKEAGY_NO_LOG") != "1" { // an agy that does not honour --log-file
+		t.logw, _ = os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	}
 	t.log("server.go:1637] Language server version: " + version())
 	t.allowAll = mcpAllowed()
 
@@ -184,9 +187,12 @@ func mcpAllowed() bool {
 	return strings.Contains(string(data), `"mcp(relay/*)"`)
 }
 
-func (t *tui) log(line string) {
+func (t *tui) log(line string) { t.logG(os.Getpid(), line) }
+
+// logG writes a glog line from goroutine gid.
+func (t *tui) logG(gid int, line string) {
 	if t.logw != nil {
-		fmt.Fprintf(t.logw, "I%s %6d %s\n", time.Now().Format("0102 15:04:05.000000"), os.Getpid(), line)
+		fmt.Fprintf(t.logw, "I%s %6d %s\n", time.Now().Format("0102 15:04:05.000000"), gid, line)
 	}
 }
 
@@ -381,6 +387,7 @@ func (t *tui) key(k string) {
 		if k == "enter" {
 			t.trusting = false
 			event("trusted")
+			t.wake() // the -i prompt and anything queued run now
 		}
 		t.render()
 		return
@@ -420,7 +427,11 @@ func (t *tui) key(k string) {
 			break
 		}
 		if text == "/new" || text == "/clear" {
-			t.conv.close()
+			if t.busy {
+				t.cancel = true // the running turn ends, then its conversation closes
+			} else {
+				t.conv.close()
+			}
 			c, err := createConversation(t.cwd)
 			if err == nil {
 				t.conv = c
@@ -500,7 +511,29 @@ var (
 	relayCall = regexp.MustCompile(`(?m)^RELAY_CALL (\S+) (\{.*\})\s*$`)
 	runCmd    = regexp.MustCompile(`(?m)^RUN (.+)$`)
 	sleepMS   = regexp.MustCompile(`(?m)^SLEEP (\d+)$`)
+	subagent  = regexp.MustCompile(`(?m)^SUBAGENT$`)
 )
+
+// runSubagent plays a subagent the way real agy logs one: on a goroutine of
+// its own, "Starting new conversation (agent=true)" then "Created
+// conversation" for a database that is not the one on screen.
+func (t *tui) runSubagent() {
+	gid := os.Getpid() + 1
+	t.mu.Lock()
+	t.logG(gid, "conversation_manager.go:512] Starting new conversation (agent=true)")
+	c, err := createConversation(t.cwd)
+	if err != nil {
+		t.mu.Unlock()
+		return
+	}
+	t.logG(gid, "server.go:1248] Created conversation "+c.id)
+	t.mu.Unlock()
+	c.step(stepUser, statusDone, userPayload("subagent task"))
+	c.step(stepModel, statusDone, answerPayload("subagent done"))
+	c.endTurn(4)
+	c.close()
+	event("subagent", "id", c.id)
+}
 
 func turnDelay() time.Duration {
 	if v, err := strconv.Atoi(os.Getenv("FAKEAGY_TURN_MS")); err == nil && v >= 0 {
@@ -558,6 +591,9 @@ func (t *tui) runTurn(text string) {
 			t.history = append(t.history, note)
 		}
 		conv.endTurn(outcome)
+		if conv != t.conv {
+			conv.close() // /new switched away during this turn
+		}
 		t.mu.Unlock()
 		event("turn_end", "outcome", strconv.Itoa(outcome))
 	}
@@ -592,6 +628,9 @@ func (t *tui) runTurn(text string) {
 			end(2, "  ⎿  Interrupted")
 			return
 		}
+	}
+	if subagent.MatchString(text) {
+		t.runSubagent()
 	}
 	for _, m := range runCmd.FindAllStringSubmatch(text, -1) {
 		idx, ok := ask("Run this command?", "run_command",

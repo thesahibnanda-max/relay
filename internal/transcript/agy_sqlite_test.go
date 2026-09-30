@@ -263,12 +263,11 @@ func TestAgyTailerReassertsState(t *testing.T) {
 			mu.Unlock()
 		}
 	}}).Run(ctx)
-	time.Sleep(agyReassert + 500*time.Millisecond)
-	mu.Lock()
-	defer mu.Unlock()
-	if n < 2 {
-		t.Fatalf("idle sent %d times in %v, want a re-send", n, agyReassert+500*time.Millisecond)
-	}
+	waitAgy(t, "idle re-sent", func() bool { // (a fixed sleep would race a slow first open)
+		mu.Lock()
+		defer mu.Unlock()
+		return n >= 2
+	})
 }
 
 // agy checkpoints and drops -wal/-shm when it closes a conversation; a

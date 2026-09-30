@@ -128,27 +128,35 @@ func now() []byte {
 	return pbLen(5, pbLen(1, pbVar(1, uint64(t.Unix())), pbVar(2, uint64(t.Nanosecond()))))
 }
 
+// exec runs a write, reporting any failure: a fake that silently models an
+// impossible state (writing to a closed database) would hide real bugs.
+func (c *conversation) exec(q string, args ...any) {
+	if _, err := c.db.Exec(q, args...); err != nil {
+		event("db_error", "err", err.Error(), "conversation", c.id)
+	}
+}
+
 // step appends a step and returns its idx.
 func (c *conversation) step(typ, status int, payload []byte) int {
 	idx := c.next
 	c.next++
-	c.db.Exec("INSERT INTO steps(idx, step_type, status, step_payload) VALUES(?,?,?,?)", idx, typ, status, cat(now(), payload))
+	c.exec("INSERT INTO steps(idx, step_type, status, step_payload) VALUES(?,?,?,?)", idx, typ, status, cat(now(), payload))
 	return idx
 }
 
 func (c *conversation) setStatus(idx, status int) {
-	c.db.Exec("UPDATE steps SET status=? WHERE idx=?", status, idx)
+	c.exec("UPDATE steps SET status=? WHERE idx=?", status, idx)
 }
 
 func (c *conversation) setPayload(idx int, payload []byte) {
-	c.db.Exec("UPDATE steps SET step_payload=? WHERE idx=?", cat(now(), payload), idx)
+	c.exec("UPDATE steps SET step_payload=? WHERE idx=?", cat(now(), payload), idx)
 }
 
 // endTurn writes agy's end-of-turn row: outcome 4 completed, 2 cancelled.
 func (c *conversation) endTurn(outcome int) {
 	last := c.next - 1
 	data := cat(pbVar(1, uint64(outcome)), pbVar(2, 1), pbVar(3, uint64(last)), pbLen(9, []byte(newUUID())))
-	c.db.Exec("INSERT INTO executor_metadata(idx, data) VALUES(?,?)", c.turns, data)
+	c.exec("INSERT INTO executor_metadata(idx, data) VALUES(?,?)", c.turns, data)
 	c.turns++
 	c.turnEnd = last
 }

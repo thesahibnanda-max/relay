@@ -250,7 +250,18 @@ func (w *world) startWithAck(tool string, ack bool, args ...string) *relayProc {
 		}
 	}()
 	w.t.Cleanup(func() {
-		a.pty.Write([]byte("\x03\x03"))
+		if tool == "agy" {
+			// agy ends on a second Ctrl+D (Ctrl+C only clears its input), and
+			// its fake reports any write that failed.
+			a.pty.Write([]byte{0x04})
+			time.Sleep(150 * time.Millisecond)
+			a.pty.Write([]byte{0x04})
+			if ev := a.events("db_error"); len(ev) > 0 {
+				w.t.Errorf("fake agy database errors: %v", ev)
+			}
+		} else {
+			a.pty.Write([]byte("\x03\x03"))
+		}
 		select {
 		case <-a.done:
 		case <-time.After(3 * time.Second):

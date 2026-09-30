@@ -2,10 +2,12 @@ package adaptor
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 
 	"github.com/thesahibnanda-max/relay/internal/relayhome"
@@ -17,21 +19,40 @@ import (
 // it without ever touching a real agy install.
 func buildFakeAgyOnPath(t *testing.T) {
 	t.Helper()
-	dir := t.TempDir()
-	name := "agy"
-	if runtime.GOOS == "windows" {
-		name = "agy.exe"
-	}
-	bin := filepath.Join(dir, name)
-	out, err := exec.Command("go", "build", "-o", bin, "../../testdata/fakeagy").CombinedOutput()
-	if err != nil {
+	fakeAgyOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "fakeagy-path")
+		if err != nil {
+			fakeAgyErr = err
+			return
+		}
+		name := "agy"
+		if runtime.GOOS == "windows" {
+			name = "agy.exe"
+		}
+		cmd := exec.Command("go", "build", "-o", filepath.Join(dir, name), "../../testdata/fakeagy")
+		cmd.Env = buildEnv
+		if out, err := cmd.CombinedOutput(); err != nil {
+			fakeAgyErr = fmt.Errorf("%s: %w", out, err)
+		}
+		fakeAgyDir = dir
+	})
+	if fakeAgyErr != nil {
 		if _, lerr := exec.LookPath("go"); lerr != nil {
 			t.Skip("cannot build fakeagy without go on PATH")
 		}
-		t.Fatalf("cannot build fakeagy: %s: %v", out, err)
+		t.Fatal("cannot build fakeagy:", fakeAgyErr)
 	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PATH", fakeAgyDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
+
+var (
+	fakeAgyOnce sync.Once
+	fakeAgyDir  string
+	fakeAgyErr  error
+	// buildEnv is the environment before any test points HOME at a temp
+	// dir, where go build would leave a module cache t.TempDir cannot remove.
+	buildEnv = os.Environ()
+)
 
 // Entries older relay versions registered per launch ("relay-<id>" running
 // `mcp --dir <run dir>`): gc removes the ones whose owner is gone.

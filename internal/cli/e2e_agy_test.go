@@ -5,6 +5,7 @@ package cli
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -498,4 +499,92 @@ func TestAgyE2EOffersToAllowRelaysTools(t *testing.T) {
 	if strings.Contains(dave.output(), permissionQuestion) {
 		t.Fatal("offered again after the tools were allowed")
 	}
+}
+
+// A subagent's conversation is logged as created, but it is not the one on
+// screen: relay stays on the main conversation (no briefing typed into the
+// subagent's, nothing lost on the main one).
+func TestAgyE2ESubagentDoesNotTakeOverTheConversation(t *testing.T) {
+	w := newWorld(t)
+	bob := w.startAgy("bob")
+	bob.waitEvent("turn_end", "outcome", "")
+	id1 := w.send("bob", "SUBAGENT\nWhat is 3 plus 4?")
+	bob.waitEvent("answer", "text", "7")
+	w.waitState(id1, "acknowledged")
+	if len(bob.events("subagent")) != 1 {
+		t.Fatal("the fake ran no subagent")
+	}
+	id2 := w.send("bob", "What is 1 plus 1?")
+	bob.waitEvent("answer", "text", "2")
+	w.waitState(id2, "acknowledged")
+	n := 0
+	for _, s := range bob.submits() {
+		if strings.Contains(s, `You are "bob"`) {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("briefed %d times; submits %q", n, bob.submits())
+	}
+}
+
+// An agy that writes no log (a future version ignoring --log-file): relay
+// stops waiting on records it will never see, delivers by the screen, and
+// says why when the session ends.
+func TestAgyE2EDeliversWithoutAgysLog(t *testing.T) {
+	w := newWorld(t)
+	bob := w.startAgy("bob", "FAKEAGY_NO_LOG=1")
+	id := w.send("bob", "What is 6 times 7?")
+	deadline := time.Now().Add(agyLogWaitForTests)
+	for time.Now().Before(deadline) && !strings.Contains(fmt.Sprint(bob.events("answer")), "42") {
+		time.Sleep(200 * time.Millisecond)
+	}
+	bob.waitEvent("answer", "text", "42")
+	w.waitState(id, "injected")
+	bob.quitAgy()
+	if !strings.Contains(bob.output(), "relay: warning: agy wrote nothing to the log relay reads") {
+		t.Fatalf("no warning; output:\n%s", bob.output())
+	}
+}
+
+// agyLogWaitForTests covers collab's agyLogWait and then some.
+const agyLogWaitForTests = 45 * time.Second
+
+// agy's folder-trust prompt comes before anything else: nothing is typed
+// into it; once trusted, the briefing runs, then the message.
+func TestAgyE2EHoldsMessagesBehindTheTrustPrompt(t *testing.T) {
+	w := newWorld(t)
+	saved := w.env
+	w.env = append(append([]string(nil), w.env...), "FAKEAGY_TRUST=prompt")
+	bob := w.start("agy", "developer", "--session=NEW_LOCAL", "--name=bob")
+	w.env = saved
+	bob.waitEvent("mcp_ready", "tools", "relay_send")
+	id := w.send("bob", "What is 2 plus 2?")
+	time.Sleep(2 * time.Second)
+	if len(bob.events("trusted")) != 0 || len(bob.submits()) != 0 {
+		t.Fatalf("typed into the trust prompt: trusted=%v submits=%q", bob.events("trusted"), bob.submits())
+	}
+	bob.pty.Write([]byte("\r")) // the user trusts the folder
+	bob.waitEvent("answer", "text", "4")
+	w.waitState(id, "acknowledged")
+	if subs := bob.submits(); len(subs) != 2 || !strings.Contains(subs[0], `You are "bob"`) {
+		t.Fatalf("want the briefing, then the message; got %q", subs)
+	}
+}
+
+// An urgent message interrupts a long turn (Esc), then is delivered.
+func TestAgyE2EUrgentMessageInterruptsALongTurn(t *testing.T) {
+	w := newWorld(t)
+	bob := w.startAgy("bob")
+	bob.waitEvent("turn_end", "outcome", "")
+	bob.pty.Write([]byte("SLEEP 20000"))
+	time.Sleep(200 * time.Millisecond)
+	bob.pty.Write([]byte("\r"))
+	bob.waitEvent("submit", "text", "SLEEP 20000")
+	out, errs, code := w.runRelay("send", "--priority=interrupt", "bob", "What is 5 plus 5?")
+	if code != 0 {
+		t.Fatalf("relay send: %d %q %q", code, out, errs)
+	}
+	bob.waitEvent("turn_end", "outcome", "2") // the long turn, cancelled
+	bob.waitEvent("answer", "text", "10")
 }
