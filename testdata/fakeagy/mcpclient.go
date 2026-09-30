@@ -24,6 +24,7 @@ type mcpServer struct {
 	next  int
 	wait  map[int]chan map[string]any
 	tools []string
+	dead  bool
 }
 
 func startMCPServers() map[string]*mcpServer {
@@ -89,6 +90,15 @@ func startMCPServers() map[string]*mcpServer {
 }
 
 func (s *mcpServer) readLoop(r io.Reader) {
+	defer func() { // the server went away: nobody waits for it any more
+		s.mu.Lock()
+		for id, ch := range s.wait {
+			close(ch)
+			delete(s.wait, id)
+		}
+		s.dead = true
+		s.mu.Unlock()
+	}()
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 1<<20), 1<<24)
 	for sc.Scan() {
@@ -118,6 +128,10 @@ func (s *mcpServer) notify(method string) {
 // request sends one JSON-RPC request and waits for its result.
 func (s *mcpServer) request(method string, params any) (map[string]any, bool) {
 	s.mu.Lock()
+	if s.dead {
+		s.mu.Unlock()
+		return nil, false
+	}
 	s.next++
 	id := s.next
 	ch := make(chan map[string]any, 1)
@@ -128,7 +142,10 @@ func (s *mcpServer) request(method string, params any) (map[string]any, bool) {
 		return nil, false
 	}
 	select {
-	case m := <-ch:
+	case m, open := <-ch:
+		if !open {
+			return nil, false
+		}
 		res, ok := m["result"].(map[string]any)
 		return res, ok
 	case <-time.After(60 * time.Second):

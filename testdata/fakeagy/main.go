@@ -26,6 +26,10 @@
 //	                       (input is queued, as agy does)
 //	FAKEAGY_TRUST          "prompt": show the folder-trust dialog first
 //	FAKEAGY_NO_MCP         "1": do not spawn MCP servers
+//	FAKEAGY_TURN_MS        how long each model step takes (default 150)
+//	FAKEAGY_ALLOW_MCP      "1": never ask before an MCP tool call
+//	FAKEAGY_SWALLOW_ENTER  ignore this many Enters that follow a paste (the
+//	                       "typed but never submitted" symptom of issue #50)
 package main
 
 import (

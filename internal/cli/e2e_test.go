@@ -60,10 +60,8 @@ func buildBinaries(t *testing.T) string {
 				return
 			}
 		}
-		// agy's own `mcp add`/`mcp remove` subcommands, used only by the gc/
-		// doctor-level tests below - fakeagy has no interactive session mode,
-		// so it does not stand in for `relay agy ...` itself (see fakeagy's
-		// own doc comment).
+		// fakeagy stands in for agy: its MCP subcommands and its interactive
+		// session (see its own doc comment).
 		if err := os.Symlink(filepath.Join(binDir, binName("fakeagy")), filepath.Join(binDir, binName("agy"))); err != nil {
 			buildErr = err
 			return
@@ -206,7 +204,7 @@ func (w *world) startWithAck(tool string, ack bool, args ...string) *relayProc {
 	w.t.Helper()
 	a := &relayProc{t: w.t, logPath: filepath.Join(w.t.TempDir(), tool+".jsonl"), done: make(chan struct{})}
 	a.cmd = exec.Command(filepath.Join(w.bin, binName("relay")), append([]string{tool}, args...)...)
-	a.cmd.Env = append(append([]string(nil), w.env...), "FAKE_LOG="+a.logPath, "FAKE_BUSY_MS=300")
+	a.cmd.Env = append(append([]string(nil), w.env...), "FAKE_LOG="+a.logPath, "FAKEAGY_LOG="+a.logPath, "FAKE_BUSY_MS=300")
 	a.cmd.Dir = w.t.TempDir()
 	var err error
 	a.pty, err = pty.StartWithSize(a.cmd, &pty.Winsize{Rows: 30, Cols: 100})

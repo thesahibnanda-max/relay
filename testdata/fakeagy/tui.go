@@ -78,6 +78,7 @@ type tui struct {
 	allowAll bool
 	done     chan int
 	turnWake chan struct{}
+	swallow  int // FAKEAGY_SWALLOW_ENTER: Enters after a paste to ignore (issue #50's symptom)
 }
 
 var agyValueFlags = map[string]bool{
@@ -115,6 +116,7 @@ func runTUI(args []string) int {
 		evW, _ = os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	}
 	t := &tui{out: os.Stdout, done: make(chan int, 1), turnWake: make(chan struct{}, 1)}
+	t.swallow, _ = strconv.Atoi(os.Getenv("FAKEAGY_SWALLOW_ENTER"))
 	t.cwd, _ = os.Getwd()
 	if logFile == "" {
 		logFile = filepath.Join(geminiDir(), "antigravity-cli", "log", "cli-"+time.Now().Format("20060102_150405")+".log")
@@ -406,6 +408,11 @@ func (t *tui) key(k string) {
 	}
 	switch k {
 	case "enter":
+		if t.swallow > 0 && t.pastes > 0 {
+			t.swallow--
+			event("enter_swallowed")
+			break
+		}
 		text := strings.TrimSpace(t.input)
 		t.input, t.pastes = "", 0
 		if text == "" {
