@@ -154,20 +154,24 @@ func (s *Session) onAgyRecord(path string, rec transcript.Record) {
 		}
 	}
 	s.onRecord(rec)
-	if rec.Signal != transcript.SigAgyIdle || s.handle.Load() == nil {
+	if s.handle.Load() == nil {
 		return
 	}
+	idle := rec.Signal == transcript.SigAgyIdle
 	if s.gateClosed.Load() {
 		// Only this launch's briefing turn ending opens the gate: a resumed
 		// conversation's history, a conversation agy made for a prompt that
 		// raced its sign-in, or one just created and still empty going idle
-		// is not that.
-		if !s.briefedIn(path) {
+		// is not that. The end counts even if the user's next turn already
+		// runs (it can start before relay ever sees agy idle).
+		if !(idle || rec.TurnEnded) || !s.briefedIn(path) {
 			return
 		}
 		s.openGate()
 	}
-	s.briefIfNeeded(path)
+	if idle {
+		s.briefIfNeeded(path)
+	}
 }
 
 // SetUploadTurns controls whether conversation turns are sent to the daemon

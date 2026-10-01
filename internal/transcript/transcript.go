@@ -35,6 +35,9 @@ const (
 type Record struct {
 	Turns  []Turn
 	Signal string
+	// TurnEnded (agy): a turn ended since the last record, even if the next
+	// one is already running.
+	TurnEnded bool
 }
 
 // Parser turns a line into a Record. Lines it does not understand yield an empty Record.

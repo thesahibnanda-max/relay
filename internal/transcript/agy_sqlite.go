@@ -101,6 +101,7 @@ type agyTail struct {
 
 	failingSince time.Time // first failed poll since the last good one
 	reportedBad  bool
+	lastDone     int64 // the last finished turn's last step idx, as last reported
 }
 
 // failed records a poll that could not read the database.
@@ -120,7 +121,7 @@ func (t *AgyDBTailer) Run(ctx context.Context) {
 	if every == 0 {
 		every = 250 * time.Millisecond
 	}
-	a := &agyTail{t: t, reported: map[int64]bool{}}
+	a := newAgyTail(t)
 	defer a.close()
 	for {
 		a.poll(ctx)
@@ -136,16 +137,20 @@ func (t *AgyDBTailer) Run(ctx context.Context) {
 // conversation database (none if it cannot be read).
 func AgyUserTurns(ctx context.Context, path string) []string {
 	var out []string
-	a := &agyTail{t: &AgyDBTailer{Path: path, Fn: func(r Record) {
+	a := newAgyTail(&AgyDBTailer{Path: path, Fn: func(r Record) {
 		for _, t := range r.Turns {
 			if t.Role == "user" {
 				out = append(out, t.Text)
 			}
 		}
-	}}, reported: map[int64]bool{}}
+	}})
 	defer a.close()
 	a.poll(ctx)
 	return out
+}
+
+func newAgyTail(t *AgyDBTailer) *agyTail {
+	return &agyTail{t: t, reported: map[int64]bool{}, lastDone: -1}
 }
 
 func (a *agyTail) close() {
@@ -206,14 +211,17 @@ func (a *agyTail) poll(ctx context.Context) {
 	}
 	a.failingSince = time.Time{}
 
+	ended := lastDone > a.lastDone
 	if !a.seeded {
 		a.seeded = true
 		if a.t.SkipExisting {
 			for _, s := range steps {
 				a.reported[s.idx] = true
 			}
+			ended = false // history
 		}
 	}
+	a.lastDone = max(a.lastDone, lastDone)
 
 	var turns []Turn
 	for _, s := range steps {
@@ -239,8 +247,10 @@ func (a *agyTail) poll(ctx context.Context) {
 	if busy {
 		state = SigAgyBusy
 	}
-	rec := Record{Turns: turns}
-	if state != a.state || time.Since(a.lastSent) >= agyReassert {
+	rec := Record{Turns: turns, TurnEnded: ended}
+	// New turns and ends always carry the state: a whole turn can begin and
+	// end between two polls, leaving it unchanged.
+	if state != a.state || len(turns) > 0 || ended || time.Since(a.lastSent) >= agyReassert {
 		rec.Signal, a.state, a.lastSent = state, state, time.Now()
 	}
 	if len(rec.Turns) > 0 || rec.Signal != "" {

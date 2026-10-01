@@ -318,7 +318,7 @@ func TestAgyTailerReportsAnUnreadableDatabase(t *testing.T) {
 	os.WriteFile(path, []byte("not a database"), 0o644)
 	var n atomic.Int32
 	tl := &AgyDBTailer{Path: path, Fn: func(Record) {}, Every: 5 * time.Millisecond, Unreadable: func() { n.Add(1) }}
-	a := &agyTail{t: tl, reported: map[int64]bool{}}
+	a := newAgyTail(tl)
 	defer a.close()
 	a.poll(context.Background())
 	a.failingSince = time.Now().Add(-agyUnreadableAfter) // as if it had been failing that long
@@ -362,5 +362,72 @@ func TestAgyUserTurnsReadsOnce(t *testing.T) {
 	}
 	if got := AgyUserTurns(context.Background(), filepath.Join(t.TempDir(), "missing.db")); len(got) != 0 {
 		t.Fatalf("%q from a missing database", got)
+	}
+}
+
+// A whole turn can start and end between two polls. Its turns then come
+// with the state: a consumer waiting for "this turn is done" (agy's startup
+// gate) must not wait for the next re-send of an unchanged idle.
+func TestAgyTailerReportsStateWithNewTurns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conv.db")
+	c := newConv(t, path, true)
+	var recs []Record
+	a := newAgyTail(&AgyDBTailer{Path: path, Fn: func(r Record) { recs = append(recs, r) }})
+	defer a.close()
+	a.poll(context.Background()) // empty: idle
+	c.step(0, 14, 3, userPayload("the briefing"))
+	c.step(1, 15, 3, answerPayload("ok"))
+	c.endTurn(0, 4, 1)
+	a.poll(context.Background())
+	last := recs[len(recs)-1]
+	if len(last.Turns) != 2 || last.Signal != SigAgyIdle {
+		t.Fatalf("turns %d signal %q, want 2 turns with %q", len(last.Turns), last.Signal, SigAgyIdle)
+	}
+}
+
+// A turn can end and the next begin between two polls: the end is still
+// reported (the state alone says "busy" and never showed the idle between).
+func TestAgyTailerReportsATurnEndedBetweenPolls(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conv.db")
+	c := newConv(t, path, true)
+	var recs []Record
+	a := newAgyTail(&AgyDBTailer{Path: path, Fn: func(r Record) { recs = append(recs, r) }})
+	defer a.close()
+	a.poll(context.Background())
+	c.step(0, 14, 3, userPayload("the briefing"))
+	c.step(1, 15, 3, answerPayload("ok"))
+	c.endTurn(0, 4, 1)
+	c.step(2, 14, 3, userPayload("the user's next prompt")) // already running
+	a.poll(context.Background())
+	last := recs[len(recs)-1]
+	if !last.TurnEnded || last.Signal != SigAgyBusy {
+		t.Fatalf("ended=%v signal=%q, want a reported end while busy", last.TurnEnded, last.Signal)
+	}
+	a.poll(context.Background())
+	n := 0
+	for _, r := range recs {
+		if r.TurnEnded {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("the end reported %d times", n)
+	}
+}
+
+// A resumed conversation's old turn ends are history, not news.
+func TestAgyTailerSkipsOldTurnEndsOfAResumedConversation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conv.db")
+	c := newConv(t, path, true)
+	c.step(0, 14, 3, userPayload("old"))
+	c.endTurn(0, 4, 0)
+	var recs []Record
+	a := newAgyTail(&AgyDBTailer{Path: path, SkipExisting: true, Fn: func(r Record) { recs = append(recs, r) }})
+	defer a.close()
+	a.poll(context.Background())
+	for _, r := range recs {
+		if r.TurnEnded {
+			t.Fatal("an old turn end was reported")
+		}
 	}
 }
