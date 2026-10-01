@@ -24,7 +24,10 @@ export default defineConfig({
     ...(CI
       ? [
           { name: 'chrome', use: { ...devices['Desktop Chrome'], channel: 'chrome' } },
-          { name: 'mobile-safari', use: { ...devices['iPhone 14'] } },
+          // Reduced motion: on CI's WebKit the site's never-ending animations keep
+          // elements from ever counting as "stable", so clicks and scrolls time out
+          // at random. Motion itself is covered by the other projects.
+          { name: 'mobile-safari', use: { ...devices['iPhone 14'], contextOptions: { reducedMotion: 'reduce' } } },
         ]
       : []),
   ],
