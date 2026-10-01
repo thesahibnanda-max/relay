@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"strconv"
 	"strings"
+
+	"github.com/thesahibnanda-max/relay/internal/globalid"
 )
 
 // builtinServerURL is empty in any build without the release ldflag (every
@@ -49,10 +52,39 @@ func builtinServer() (hostPort string, ok bool) {
 func resolveGlobalServer(requested string) (hostPort string, forceTLS bool, err error) {
 	builtin, ok := builtinServer()
 	if !ok {
-		return requested, false, nil // today's exact behavior - caller handles requested == ""
+		// The dial target and the token printed for others to join with must
+		// name the same port: both get globalid's default when none is given
+		// (dialing a bare host used the WebSocket default port instead, so
+		// joiners reached a different port than the session's creator).
+		return normalizeServer(requested, strconv.Itoa(globalid.DefaultPort)), false, nil
 	}
-	if requested != "" && requested != builtin {
-		return "", false, fmt.Errorf("relay: custom global servers are not supported in this build - every global session uses %s (got %q)", builtin, requested)
+	if requested != "" {
+		// The build is locked to one host; however the user spells it
+		// (scheme, case, a port or none) it is that host or it is refused.
+		want, _, _ := net.SplitHostPort(builtin)
+		got, _, _ := net.SplitHostPort(normalizeServer(requested, "443"))
+		if !strings.EqualFold(got, want) {
+			return "", false, fmt.Errorf("relay: custom global servers are not supported in this build - every global session uses %s (got %q)", builtin, requested)
+		}
 	}
 	return builtin, true, nil
+}
+
+// normalizeServer turns what a user may type for a server (host, host:port,
+// a ws/wss/http/https URL, any case, a trailing slash) into lower-case
+// "host:port", adding defaultPort when none is given. "" stays "".
+func normalizeServer(s, defaultPort string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if u, err := url.Parse(s); err == nil && u.Host != "" && strings.Contains(s, "://") {
+		s = u.Host
+	}
+	s = strings.TrimRight(s, "/")
+	if _, _, err := net.SplitHostPort(s); err != nil {
+		s = net.JoinHostPort(strings.Trim(s, "[]"), defaultPort)
+	}
+	host, port, _ := net.SplitHostPort(s)
+	return net.JoinHostPort(strings.ToLower(host), port)
 }

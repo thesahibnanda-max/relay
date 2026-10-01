@@ -2,30 +2,38 @@
 // `agy`, not the marketing name "antigravity"). Unlike Claude/Codex/Copilot,
 // agy has no per-invocation MCP-server-registration flag: the only way to
 // register one is `agy mcp add`, which writes into agy's own persistent,
-// global ~/.gemini/config/mcp_config.json. This file holds the add/remove/
-// sweep/restore logic that makes registering there anyway safe under
-// relay's real, concurrent, crash-prone usage pattern - see the design
-// decisions in the accepted plan for issue #16 for the reasoning; in short:
+// user-global ~/.gemini/config/mcp_config.json. This file makes registering
+// there anyway safe under relay's real, concurrent, crash-prone usage.
 //
-//   - Every add/remove/sweep runs under agyFlock (lock_unix.go/lock_windows.go),
-//     because agy itself does no locking at all around this file - confirmed
-//     live: 10 concurrent `agy mcp add` calls silently lost one addition.
-//   - Content fidelity on remove is trusted entirely to `agy mcp remove`
-//     itself (confirmed live to restore pre-existing content byte-identical);
-//     relay never re-implements or second-guesses that by writing its own
-//     copy of the file back.
-//   - The only gap `agy mcp remove` leaves is existence: on a machine where
-//     the file never existed before, remove leaves a trivial empty shell
-//     instead of true nonexistence. restoreLocked closes that gap, but only
-//     when it can prove doing so is safe (see its own doc comment) - a naive
-//     snapshot-and-restore would risk destroying a sibling agent's live
-//     registration and is deliberately not what this does.
-//   - A per-launch staleness sweep (sweepLocked) removes any leftover
-//     relay-* entry whose owning run directory is gone, covering the one
-//     case signal-based cleanup cannot reach: `kill -9` of relay itself.
+// Design (every point below was confirmed live against agy 1.2.12/1.2.13):
+//
+//   - One stable entry, "relay", running `relay mcp --from-env`. Every agy
+//     process on the machine spawns every entry in that file, as its own
+//     child, with its own environment. So the entry cannot name a run
+//     directory; instead the server finds it in RELAY_RUN_DIR and serves
+//     tools only when RELAY_AGENT_ID matches that directory's owner - which
+//     is only ever true for the agy relay itself launched. An unrelated agy
+//     session gets a valid server with no tools. A stable name also keeps
+//     agy's per-server state (its tool-schema cache and any `mcp(relay/*)`
+//     permission rule the user adds) from multiplying per launch.
+//   - Leases: each launch writes a lease (its relay pid) before adding the
+//     entry, and removes it on exit. The entry and every trace of relay are
+//     removed when the last live lease goes; a lease whose pid is dead
+//     (kill -9) is simply ignored, so the next launch or `relay gc` finishes
+//     the cleanup.
+//   - Byte-exact restore: agy rewrites the whole file on every add/remove
+//     (sorted keys, 2-space indent, and {"mcpServers": {}} where there was
+//     nothing), so the first launch snapshots the original bytes and the
+//     last one writes them back - but only if nothing else changed the file
+//     in between (compared semantically); otherwise agy's version stands.
+//   - Every read-modify-write of agy's file happens under one per-user lock
+//     next to that file (agy itself does no locking: concurrent `agy mcp
+//     add` calls lose updates), and the lock and state live there too, so
+//     relays with different RELAY_HOMEs still exclude each other.
 package agy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -33,35 +41,46 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/thesahibnanda-max/relay/internal/ids"
 	"github.com/thesahibnanda-max/relay/internal/relayhome"
 )
 
+// lockNotice is how long a launch waits on another relay's lock before
+// saying so.
+var lockNotice = 2 * time.Second
+
+// lockWait bounds how long a launch waits for another relay's agy
+// bookkeeping: longer than the worst case of one full Register (a capped
+// legacy sweep plus one add, each command bounded by cmdTimeout). A variable
+// only so tests can shorten it.
+var lockWait = 90 * time.Second
+
 const (
-	lockWait    = 5 * time.Second
-	cmdTimeout  = 15 * time.Second
-	entryPrefix = "relay-"
+	// ServerName is the one MCP entry relay registers with agy.
+	ServerName = "relay"
+	cmdTimeout = 15 * time.Second
+	// legacyPrefix is the per-launch naming older relay versions used.
+	legacyPrefix = "relay-"
+	// maxLegacySweep caps legacy removals per lock hold, so a large leftover
+	// pile can never starve a launch waiting on the lock; the rest go next time.
+	maxLegacySweep = 3
+	stateDirName   = ".relay-agy"
 )
 
-// EntryName is the MCP server name relay registers for one launch: never the
-// bare "relay" (unlike Claude/Copilot's single, per-launch, ephemeral config
-// file), because agy's mcp_config.json is one file shared by every
-// concurrently running agy agent - a fixed name would collide.
-func EntryName(runDir string) string {
-	return entryPrefix + filepath.Base(runDir)
-}
+// serverArgs is the exact argv relay's own entry runs (after the relay
+// binary), and how relay recognises the entry as its own.
+var serverArgs = []string{"mcp", "--from-env"}
 
-// geminiHome resolves the directory agy itself uses. GEMINI_HOME is not
-// confirmed to be honored by the real agy binary (unlike CODEX_HOME/
-// COPILOT_HOME, which the real Codex/Copilot binaries do honor); it exists
-// here only so tests can point a fake agy binary and this package at the
-// same temporary HOME without needing the real environment variable.
+// geminiHome is the directory agy itself uses. agy resolves it from the
+// user's home directory and honours no override (confirmed: no GEMINI_HOME in
+// the binary), so relay must not honour one either - it would make relay
+// bookkeep a different file than the one `agy mcp add` edits.
 func geminiHome() (string, error) {
-	if h := os.Getenv("GEMINI_HOME"); h != "" {
-		return h, nil
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -78,153 +97,318 @@ func ConfigPath() (string, error) {
 	return filepath.Join(home, "config", "mcp_config.json"), nil
 }
 
-// mcpServer is the subset of agy's own per-entry schema this package reads.
-// Confirmed live: {"command": "...", "args": [...], "disabled": false} -
-// command and args are separate JSON fields, never one concatenated string.
-type mcpServer struct {
-	Command string   `json:"command"`
-	Args    []string `json:"args"`
+// ---- reading agy's config ----------------------------------------------------
+
+// entry is the part of one agy MCP entry relay reads. Decoded leniently:
+// agy itself accepts (and preserves) odd shapes such as a string "args", so
+// relay must never fail on a user entry it does not own.
+type entry struct {
+	Command string
+	Args    []string
 }
 
-type mcpConfig struct {
-	MCPServers map[string]mcpServer `json:"mcpServers"`
+type config struct {
+	Servers map[string]entry
 }
 
-// readConfig reads agy's config file. A missing file is not an error: it
-// reports existed=false so callers can tell "no entries" from "no file".
-func readConfig(path string) (cfg mcpConfig, existed bool, err error) {
-	data, err := os.ReadFile(path)
+// ErrUnparseable means agy's config is not valid JSON. agy then refuses every
+// `agy mcp` command too, so relay leaves the file alone and says why.
+var ErrUnparseable = errors.New("agy cannot read its own MCP config")
+
+// readConfig reads agy's config. A missing, empty or whitespace-only file is
+// an empty config, exactly as agy treats it (confirmed live).
+func readConfig(path string) (cfg config, raw []byte, existed bool, err error) {
+	cfg.Servers = map[string]entry{}
+	raw, err = os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return mcpConfig{}, false, nil
+		return cfg, nil, false, nil
 	}
 	if err != nil {
-		return mcpConfig{}, false, err
+		return cfg, nil, false, err
 	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return mcpConfig{}, true, fmt.Errorf("parse %s: %w", path, err)
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return cfg, raw, true, nil
 	}
-	return cfg, true, nil
-}
-
-// isTrivialEmptyShell reports whether data is exactly what `agy mcp remove`
-// leaves behind on a machine that never had the file before -
-// {"mcpServers": {}} - checked structurally (key set and emptiness), not by
-// byte comparison, so formatting differences don't matter.
-func isTrivialEmptyShell(data []byte) bool {
 	var top map[string]json.RawMessage
-	if err := json.Unmarshal(data, &top); err != nil || len(top) != 1 {
-		return false
-	}
-	raw, ok := top["mcpServers"]
-	if !ok {
-		return false
+	if err := json.Unmarshal(raw, &top); err != nil {
+		return cfg, raw, true, fmt.Errorf("%w (%s: %v); fix or empty that file, then relaunch", ErrUnparseable, path, err)
 	}
 	var servers map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &servers); err != nil {
-		return false
+	if s, ok := top["mcpServers"]; ok {
+		_ = json.Unmarshal(s, &servers) // a non-object here is agy's problem, not ours: treat as no servers
 	}
-	return len(servers) == 0
+	for name, v := range servers {
+		var e struct {
+			Command any `json:"command"`
+			Args    any `json:"args"`
+		}
+		_ = json.Unmarshal(v, &e)
+		var out entry
+		out.Command, _ = e.Command.(string)
+		if list, ok := e.Args.([]any); ok {
+			for _, a := range list {
+				if s, ok := a.(string); ok {
+					out.Args = append(out.Args, s)
+				}
+			}
+		}
+		cfg.Servers[name] = out
+	}
+	return cfg, raw, true, nil
 }
 
-// recordOriginalExistence writes, once ever, whether agy's config file
-// existed before relay first touched it on this machine. It is a no-op if
-// the marker already exists - the fact is only ever true as of the very
-// first launch, so later launches must never overwrite it.
-func recordOriginalExistence(paths relayhome.Paths, existed bool) error {
-	p := paths.AgyOriginalSnapshotPath()
-	if _, err := os.Stat(p); err == nil {
-		return nil
+// isOurs reports whether e is relay's own stable entry.
+func isOurs(e entry) bool { return reflect.DeepEqual(e.Args, serverArgs) }
+
+// semantic normalises a config for comparison: empty means {}, and an empty
+// mcpServers table means no table (agy writes one where there was nothing).
+func semantic(raw []byte) (any, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return map[string]any{}, true
 	}
-	data, err := json.Marshal(struct {
-		Existed bool `json:"existed"`
-	}{existed})
-	if err != nil {
-		return err
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return nil, false
 	}
-	return os.WriteFile(p, data, 0o600)
+	if m, ok := v.(map[string]any); ok {
+		if s, ok := m["mcpServers"].(map[string]any); ok && len(s) == 0 {
+			delete(m, "mcpServers")
+		}
+	}
+	return v, true
 }
 
-// originalExisted reports the recorded fact, defaulting to true (never
-// delete) if no marker was ever written - the conservative direction, since
-// the only thing a wrong "true" costs is a harmless leftover empty shell,
-// while a wrong "false" could destroy a real user file.
-func originalExisted(paths relayhome.Paths) bool {
-	data, err := os.ReadFile(paths.AgyOriginalSnapshotPath())
-	if err != nil {
-		return true
-	}
-	var v struct {
-		Existed bool `json:"existed"`
-	}
-	if json.Unmarshal(data, &v) != nil {
-		return true
-	}
-	return v.Existed
-}
-
-// restoreLocked deletes agy's config file only when both hold: (a) it never
-// existed before relay touched this machine, and (b) its current content,
-// right now, is exactly the trivial empty shell - i.e. nothing else has put
-// anything real in it since. This can never destroy a sibling agent's live
-// entry or an unrelated user file: the worst case is a harmless empty shell
-// surviving one cycle longer than ideal. Must be called with the lock held.
-func restoreLocked(paths relayhome.Paths, cfgPath string) {
-	if originalExisted(paths) {
-		return
-	}
-	data, err := os.ReadFile(cfgPath)
-	if err != nil {
-		return
-	}
-	if isTrivialEmptyShell(data) {
-		_ = os.Remove(cfgPath)
-	}
-}
+// ---- running agy -------------------------------------------------------------
 
 func runAgy(agyBin string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, agyBin, args...)
+	cmd.WaitDelay = 2 * time.Second // a child holding the pipes open must not hang us past the timeout
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s %v: %w: %s", agyBin, args, err, out)
+		return fmt.Errorf("%s %s: %w: %s", filepath.Base(agyBin), strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// sweepLocked removes every relay-*-prefixed entry whose owning run
-// directory no longer exists (the directory embedded in the entry's own
-// registered --dir argument, self-contained, no extra bookkeeping needed).
-// This is hygiene for the one case signal-based Cleanup cannot reach
-// (`kill -9` of relay itself): a stale entry is already dead on arrival
-// (its RelayExe/RunDir target is gone), so leaving it a while longer is not
-// itself a risk. Must be called with the lock already held.
-func sweepLocked(agyBin, cfgPath string) []string {
-	cfg, existed, err := readConfig(cfgPath)
-	if !existed || err != nil {
+// ---- leases and snapshot -----------------------------------------------------
+
+type lease struct {
+	AgentID string    `json:"agent_id"`
+	PID     int       `json:"pid"`
+	Started time.Time `json:"started"`
+	// Ident is the process's pid and start time (relayhome.ProcessIdentity):
+	// once relay is killed, a process that later gets the same pid does not
+	// keep the lease alive. Empty in leases older relays wrote.
+	Ident string `json:"ident,omitempty"`
+}
+
+type snapshot struct {
+	Existed bool   `json:"existed"`
+	Data    []byte `json:"data"` // base64 in JSON
+	Mode    uint32 `json:"mode"`
+}
+
+type regState struct {
+	dir      string // relay's lock, leases and snapshot, next to the file they protect
+	cfgPath  string
+	cacheDir string // where agy caches the tool schemas of ServerName
+	agyBin   string
+	alive    func(pid int) bool
+	ident    func(pid int) string
+	waiting  func()
+}
+
+func (s regState) leasePath(agentID string) string {
+	return filepath.Join(s.dir, "leases", agentID+".json")
+}
+
+func (s regState) snapshotPath() string { return filepath.Join(s.dir, "snapshot.json") }
+
+// liveLeases lists the agent ids holding a lease whose process is alive.
+func (s regState) liveLeases() []string {
+	entries, err := os.ReadDir(filepath.Join(s.dir, "leases"))
+	if err != nil {
 		return nil
 	}
-	var removed []string
-	for name, srv := range cfg.MCPServers {
-		if !strings.HasPrefix(name, entryPrefix) {
-			continue // never touch a bare "relay" entry (another adaptor's naming) or anything not ours
-		}
-		dir := dirArg(srv.Args)
-		if dir == "" {
+	var live []string
+	for _, e := range entries {
+		data, err := os.ReadFile(filepath.Join(s.dir, "leases", e.Name()))
+		var l lease
+		if err != nil || json.Unmarshal(data, &l) != nil {
 			continue
 		}
-		if _, err := os.Stat(dir); err == nil {
-			continue // still owned by a live launch
+		if s.alive(l.PID) && (l.Ident == "" || s.ident(l.PID) == "" || s.ident(l.PID) == l.Ident) {
+			live = append(live, l.AgentID)
 		}
-		if runAgy(agyBin, "mcp", "remove", name) == nil {
+	}
+	sort.Strings(live)
+	return live
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Chmod(name, mode); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
+}
+
+func (s regState) writeLease(agentID string) error {
+	if err := os.MkdirAll(filepath.Join(s.dir, "leases"), 0o700); err != nil {
+		return err
+	}
+	data, _ := json.Marshal(lease{AgentID: agentID, PID: os.Getpid(), Started: time.Now(), Ident: s.ident(os.Getpid())})
+	return writeFileAtomic(s.leasePath(agentID), data, 0o600)
+}
+
+// takeSnapshot records agy's config as it is before relay's first add.
+// legacyExisted carries the answer an older relay recorded, when it recorded
+// that the file did not exist before relay created it.
+func (s regState) takeSnapshot(legacyNotExisted bool) error {
+	_, raw, existed, err := readConfig(s.cfgPath)
+	if err != nil {
+		return err
+	}
+	snap := snapshot{Existed: existed, Data: raw, Mode: 0o644}
+	if st, err := os.Stat(s.cfgPath); err == nil {
+		snap.Mode = uint32(st.Mode().Perm())
+	}
+	if existed && legacyNotExisted {
+		if v, ok := semantic(raw); ok && reflect.DeepEqual(v, map[string]any{}) {
+			snap.Existed = false // an older relay created this empty shell
+		}
+	}
+	data, _ := json.Marshal(snap)
+	return writeFileAtomic(s.snapshotPath(), data, 0o600)
+}
+
+// restore puts back the snapshot, if nothing but relay changed the file since.
+func (s regState) restore() {
+	data, err := os.ReadFile(s.snapshotPath())
+	if err != nil {
+		return
+	}
+	var snap snapshot
+	if json.Unmarshal(data, &snap) != nil {
+		return
+	}
+	cur, err := os.ReadFile(s.cfgPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	want, ok1 := semantic(snap.Data)
+	have, ok2 := semantic(cur)
+	if !snap.Existed {
+		want, ok1 = map[string]any{}, true
+	}
+	if !ok1 || !ok2 || !reflect.DeepEqual(want, have) {
+		return // someone changed the file meanwhile: agy's version stands
+	}
+	if !snap.Existed {
+		_ = os.Remove(s.cfgPath)
+		return
+	}
+	if bytes.Equal(cur, snap.Data) {
+		return
+	}
+	mode := os.FileMode(snap.Mode)
+	if mode == 0 {
+		mode = 0o644
+	}
+	// Written where a symlink points (the link stays), and only if the file
+	// is still what was just compared: agy itself takes no lock, so narrow
+	// the window in which a user's own `agy mcp add` could be lost.
+	path := s.cfgPath
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		path = real
+	}
+	if again, err := os.ReadFile(path); err != nil || !bytes.Equal(again, cur) {
+		return
+	}
+	_ = writeFileAtomic(path, snap.Data, mode)
+}
+
+// finish removes relay's entry, restores the original file and deletes all
+// of relay's state. Called with the lock held, only when no lease is live.
+func (s regState) finish() (removed []string, err error) {
+	cfg, _, _, rerr := readConfig(s.cfgPath)
+	if rerr != nil {
+		return nil, rerr
+	}
+	if e, ok := cfg.Servers[ServerName]; ok && isOurs(e) {
+		if err := runAgy(s.agyBin, "mcp", "remove", ServerName); err != nil {
+			return nil, err
+		}
+		cfg, _, _, _ = readConfig(s.cfgPath)
+		if e, ok := cfg.Servers[ServerName]; ok && isOurs(e) {
+			return nil, fmt.Errorf("agy mcp remove %s left the entry in place", ServerName)
+		}
+		removed = append(removed, ServerName)
+	}
+	s.restore()
+	if len(removed) > 0 { // agy's tool cache for relay's entry; a user's own "relay" keeps its own
+		_ = os.RemoveAll(s.cacheDir)
+	}
+	_ = os.RemoveAll(filepath.Join(s.dir, "leases"))
+	_ = os.Remove(s.snapshotPath())
+	return removed, nil
+}
+
+// sweepLegacy removes per-launch entries older relay versions registered
+// (relay-<id> running `mcp --dir <run dir>`) whose run directory is gone or
+// whose owner process is dead, a few per call. Called with the lock held.
+func (s regState) sweepLegacy(cfg config) []string {
+	var names []string
+	for name := range cfg.Servers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var removed []string
+	for _, name := range names {
+		if len(removed) >= maxLegacySweep {
+			break
+		}
+		e := cfg.Servers[name]
+		if !strings.HasPrefix(name, legacyPrefix) {
+			continue
+		}
+		dir := dirArg(e.Args)
+		if dir == "" || len(e.Args) != 3 || e.Args[0] != "mcp" {
+			continue // not something relay ever registered
+		}
+		if _, err := os.Stat(dir); err == nil {
+			if info, err := relayhome.ReadRunInfo(dir); err != nil || s.alive(info.PID) {
+				continue // still owned by a live (older) relay, or not provably dead
+			}
+		}
+		if runAgy(s.agyBin, "mcp", "remove", name) == nil {
 			removed = append(removed, name)
 		}
 	}
 	return removed
 }
 
-// dirArg extracts the value following a "--dir" argument, matching exactly
-// how relay's own adaptors register: ["mcp", "--dir", "<run dir>"].
+// dirArg extracts the value following a "--dir" argument.
 func dirArg(args []string) string {
 	for i, a := range args {
 		if a == "--dir" && i+1 < len(args) {
@@ -234,75 +418,254 @@ func dirArg(args []string) string {
 	return ""
 }
 
-// AddAndSweep registers entry (see EntryName) as relay's MCP server for this
-// one launch, first sweeping away any stale relay-* entries left by a prior
-// crashed launch. agyBin is the exact, already-resolved agy binary this
-// launch is about to run; relayExe/runDir describe the MCP server command
-// (`relayExe mcp --dir runDir`, identical in shape to every other adaptor).
-func AddAndSweep(paths relayhome.Paths, agyBin, relayExe, runDir string) (entry string, removedStale []string, err error) {
-	lock, err := agyFlock(paths.AgyMCPLockPath(), lockWait)
-	if err != nil {
-		return "", nil, err
-	}
-	defer lock.Close()
+// ---- public API ----------------------------------------------------------------
 
-	cfgPath, err := ConfigPath()
-	if err != nil {
-		return "", nil, err
-	}
-	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
-		return "", nil, err
-	}
-	_, existedBefore, err := readConfig(cfgPath)
-	if err != nil {
-		return "", nil, err
-	}
-	if err := recordOriginalExistence(paths, existedBefore); err != nil {
-		return "", nil, err
-	}
-
-	removedStale = sweepLocked(agyBin, cfgPath)
-
-	entry = EntryName(runDir)
-	if err := runAgy(agyBin, "mcp", "add", entry, relayExe, "mcp", "--dir", runDir); err != nil {
-		return "", removedStale, err
-	}
-	return entry, removedStale, nil
+// Options configures one registration call. Zero values are the real ones.
+type Options struct {
+	AgyBin   string
+	RelayExe string
+	// LegacyMarker is an older relay's per-RELAY_HOME existence record; its
+	// "did not exist" answer is honoured once and the file removed.
+	LegacyMarker string
+	// Alive reports whether a pid is running (relayhome.PIDAlive by default).
+	Alive func(pid int) bool
+	// Ident names a running process (relayhome.ProcessIdentity by default).
+	Ident func(pid int) string
+	// Waiting, if set, is called once if the lock is still held by another
+	// relay after lockNotice (so a launch never stalls silently).
+	Waiting func()
+	// Home is the user's home directory (default: the real one).
+	Home string
 }
 
-// Remove unregisters entry on exit and, only when provably safe, restores
-// true nonexistence (see restoreLocked). Safe to call for an entry that was
-// never added - `agy mcp remove` on an unknown name is a harmless no-op-ish
-// error, deliberately ignored here so Cleanup never fails on this path.
-func Remove(paths relayhome.Paths, agyBin, entry string) error {
-	lock, err := agyFlock(paths.AgyMCPLockPath(), lockWait)
+func (o Options) state() (regState, error) {
+	gem := filepath.Join(o.Home, ".gemini")
+	if o.Home == "" {
+		var err error
+		if gem, err = geminiHome(); err != nil {
+			return regState{}, err
+		}
+	}
+	alive, ident := o.Alive, o.Ident
+	if alive == nil {
+		alive = relayhome.PIDAlive
+	}
+	if ident == nil {
+		ident = relayhome.ProcessIdentity
+	}
+	return regState{
+		dir:      filepath.Join(gem, "config", stateDirName),
+		cfgPath:  filepath.Join(gem, "config", "mcp_config.json"),
+		cacheDir: filepath.Join(gem, "antigravity-cli", "mcp", ServerName),
+		agyBin:   o.AgyBin,
+		alive:    alive,
+		ident:    ident,
+		waiting:  o.Waiting,
+	}, nil
+}
+
+// withLock runs fn holding the per-user lock, creating the state directory.
+// When fn leaves no live lease behind, the state directory - lock included -
+// is removed, so no trace of relay remains in agy's config directory.
+func withLock(s regState, fn func() error) error {
+	lockPath := filepath.Join(s.dir, "lock")
+	if s.waiting != nil {
+		t := time.AfterFunc(lockNotice, s.waiting)
+		defer t.Stop()
+	}
+	lk, err := agyFlock(lockPath, func() error { return os.MkdirAll(s.dir, 0o700) }, lockWait)
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	ferr := fn()
+	idle := len(s.liveLeases()) == 0
+	if idle {
+		removeLockedFile(lockPath) // Unix: safe while held (acquirers verify the inode)
+	}
+	lk.Close()
+	if idle {
+		removeUnlockedFile(lockPath) // Windows: only possible once closed; fails harmlessly if reopened
+		_ = os.Remove(filepath.Join(s.dir, "leases"))
+		_ = os.Remove(s.dir) // only if empty: a concurrent launch may already be recreating it
+	}
+	return ferr
+}
 
-	cfgPath, err := ConfigPath()
+// Register makes relay's MCP server available to the agy this launch is
+// about to start, for agentID. The lease is written before the entry is
+// added, so a crash at any point leaves only things the next launch or
+// `relay gc` cleans up. notes are for the user.
+func Register(o Options, agentID string) (notes []string, err error) {
+	if !ids.Valid(agentID) {
+		return nil, fmt.Errorf("invalid agent id %q", agentID) // it names a lease file
+	}
+	s, err := o.state()
+	if err != nil {
+		return nil, err
+	}
+	err = withLock(s, func() error {
+		cfg, _, _, err := readConfig(s.cfgPath)
+		if err != nil {
+			return err
+		}
+		if e, ok := cfg.Servers[ServerName]; ok && !isOurs(e) {
+			return fmt.Errorf("agy already has an MCP server named %q that relay did not register (%s); rename or remove it with `agy mcp remove %s`", ServerName, e.Command, ServerName)
+		}
+		if len(s.liveLeases()) == 0 {
+			// First relay agy agent: tidy up after any crashed predecessor,
+			// then remember the file as the user had it.
+			_, statErr := os.Stat(s.snapshotPath())
+			if e, ok := cfg.Servers[ServerName]; statErr == nil || (ok && isOurs(e)) {
+				if _, err := s.finish(); err != nil {
+					return err
+				}
+			}
+			legacyNotExisted := false
+			if o.LegacyMarker != "" {
+				if data, err := os.ReadFile(o.LegacyMarker); err == nil {
+					var v struct {
+						Existed bool `json:"existed"`
+					}
+					legacyNotExisted = json.Unmarshal(data, &v) == nil && !v.Existed
+				}
+			}
+			if err := s.takeSnapshot(legacyNotExisted); err != nil {
+				return err
+			}
+			if o.LegacyMarker != "" {
+				_ = os.Remove(o.LegacyMarker)
+			}
+			cfg, _, _, _ = readConfig(s.cfgPath)
+		}
+		if removed := s.sweepLegacy(cfg); len(removed) > 0 {
+			notes = append(notes, fmt.Sprintf("removed %d stale agy MCP registration(s) left by an older relay", len(removed)))
+		}
+		if err := s.writeLease(agentID); err != nil {
+			return err
+		}
+		cur, ok := cfg.Servers[ServerName]
+		if ok && cur.Command == o.RelayExe {
+			return nil
+		}
+		if ok && len(s.liveLeases()) > 1 {
+			if _, err := os.Stat(cur.Command); err == nil {
+				return nil // another live agent's relay binary already serves it
+			}
+		}
+		addArgs := append([]string{"mcp", "add", ServerName, "--", o.RelayExe}, serverArgs...)
+		if err := runAgy(s.agyBin, addArgs...); err != nil {
+			_ = os.Remove(s.leasePath(agentID))
+			return err
+		}
+		cfg, _, _, err = readConfig(s.cfgPath)
+		if err != nil {
+			return err
+		}
+		if e, ok := cfg.Servers[ServerName]; !ok || !isOurs(e) {
+			_ = os.Remove(s.leasePath(agentID))
+			return fmt.Errorf("agy mcp add %s did not register the entry", ServerName)
+		}
+		return nil
+	})
+	return notes, err
+}
+
+// Unregister ends agentID's lease and, if it was the last live one, removes
+// relay's entry and restores agy's config exactly as the user had it.
+func Unregister(o Options, agentID string) error {
+	if !ids.Valid(agentID) {
+		return fmt.Errorf("invalid agent id %q", agentID)
+	}
+	s, err := o.state()
 	if err != nil {
 		return err
 	}
-	_ = runAgy(agyBin, "mcp", "remove", entry)
-	restoreLocked(paths, cfgPath)
-	return nil
+	return withLock(s, func() error {
+		_ = os.Remove(s.leasePath(agentID))
+		if len(s.liveLeases()) > 0 {
+			return nil
+		}
+		_, err := s.finish()
+		return err
+	})
 }
 
-// SweepStale is sweepLocked exposed for `relay gc`, so a user gets a
-// one-command cleanup of leftover relay-* entries even if they never
-// relaunch agy on this machine.
-func SweepStale(paths relayhome.Paths, agyBin string) ([]string, error) {
-	lock, err := agyFlock(paths.AgyMCPLockPath(), lockWait)
+// Sweep is `relay gc`'s cleanup: with no live relay agy agent left, it
+// removes relay's entry and state (crash leftovers), plus legacy entries.
+func Sweep(o Options) (removed []string, err error) {
+	s, err := o.state()
 	if err != nil {
 		return nil, err
 	}
-	defer lock.Close()
+	if _, err := os.Stat(s.dir); errors.Is(err, os.ErrNotExist) {
+		// Nothing of the current scheme; only legacy entries could remain.
+		cfg, _, existed, err := readConfig(s.cfgPath)
+		if err != nil || !existed || (!hasLegacy(cfg) && !hasOurs(cfg)) {
+			return nil, err
+		}
+	}
+	err = withLock(s, func() error {
+		cfg, _, _, err := readConfig(s.cfgPath)
+		if err != nil {
+			return err
+		}
+		removed = append(removed, s.sweepLegacy(cfg)...)
+		if len(s.liveLeases()) > 0 {
+			return nil
+		}
+		r, err := s.finish()
+		removed = append(removed, r...)
+		return err
+	})
+	return removed, err
+}
 
-	cfgPath, err := ConfigPath()
-	if err != nil {
-		return nil, err
+func hasOurs(cfg config) bool {
+	e, ok := cfg.Servers[ServerName]
+	return ok && isOurs(e)
+}
+
+func hasLegacy(cfg config) bool {
+	for name, e := range cfg.Servers {
+		if strings.HasPrefix(name, legacyPrefix) && dirArg(e.Args) != "" {
+			return true
+		}
 	}
-	return sweepLocked(agyBin, cfgPath), nil
+	return false
+}
+
+// Status describes relay's registration with agy, for `relay doctor`.
+type Status struct {
+	ConfigPath string
+	Registered bool     // relay's entry is in agy's config
+	LiveAgents []string // agent ids of running relay agy agents
+	Legacy     []string // older relay's per-launch entries still present
+	ParseError error    // agy's config is not valid JSON
+}
+
+// Stale reports whether relay's entry is left over with nobody using it.
+func (st Status) Stale() bool { return st.Registered && len(st.LiveAgents) == 0 }
+
+// Inspect reports the registration state without changing anything.
+func Inspect(o Options) (Status, error) {
+	s, err := o.state()
+	if err != nil {
+		return Status{}, err
+	}
+	st := Status{ConfigPath: s.cfgPath, LiveAgents: s.liveLeases()}
+	cfg, _, _, err := readConfig(s.cfgPath)
+	if err != nil {
+		st.ParseError = err
+		return st, nil
+	}
+	if e, ok := cfg.Servers[ServerName]; ok && isOurs(e) {
+		st.Registered = true
+	}
+	for name, e := range cfg.Servers {
+		if strings.HasPrefix(name, legacyPrefix) && dirArg(e.Args) != "" {
+			st.Legacy = append(st.Legacy, name)
+		}
+	}
+	sort.Strings(st.Legacy)
+	return st, nil
 }

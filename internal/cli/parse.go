@@ -80,6 +80,7 @@ type Parsed struct {
 	// admin
 	All        bool   // ls --all
 	Target     string // ls --session / session end <id>
+	FromEnv    bool   // mcp --from-env: the run directory comes from RELAY_RUN_DIR
 	SessionNm  string // session new --name
 	Foreground bool   // daemon --foreground
 
@@ -388,7 +389,15 @@ func parseMCP(args []string) (Parsed, error) {
 	p := Parsed{Kind: KindMCP}
 	for i := 0; i < len(args); i++ {
 		name := strings.TrimLeft(strings.SplitN(args[i], "=", 2)[0], "-")
-		if name != "dir" {
+		switch name {
+		case "from-env":
+			// agy's registration is one user-global entry that every agy
+			// process spawns: the run directory comes from the environment
+			// relay gave the agy it launched (see runMCP).
+			p.FromEnv = true
+			continue
+		case "dir":
+		default:
 			return p, usagef("unknown option %q for mcp (usage: relay mcp --dir <run dir>)", args[i])
 		}
 		v, j, err := flagValue(args, i, "dir")
@@ -397,7 +406,10 @@ func parseMCP(args []string) (Parsed, error) {
 		}
 		p.Target, i = v, j
 	}
-	if p.Target == "" {
+	if p.FromEnv && p.Target != "" {
+		return p, usagef("relay mcp: --from-env and --dir are exclusive")
+	}
+	if p.Target == "" && !p.FromEnv {
 		return p, usagef("usage: relay mcp --dir <run dir> (started by the tool, not by hand)")
 	}
 	return p, nil

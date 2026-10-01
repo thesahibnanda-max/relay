@@ -4,130 +4,249 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/thesahibnanda-max/relay/internal/adaptor/launch"
+	"github.com/thesahibnanda-max/relay/internal/state"
 )
 
 func TestNameAndBinary(t *testing.T) {
 	a := &AgyAdaptor{}
 	if a.Name() != "agy" || a.Binary() != "agy" {
-		t.Fatalf("Name/Binary = %q/%q", a.Name(), a.Binary())
+		t.Fatalf("got %q/%q", a.Name(), a.Binary())
 	}
 	if a.Env() != nil {
-		t.Fatalf("Env() must be nil")
+		t.Fatal("agy must not add --dangerously-skip-permissions or anything else to a real launch")
+	}
+}
+
+// Which flags take a value was confirmed live (`agy <flag>=x changelog`).
+func TestParseArgvFollowsAgysOwnFlagParsing(t *testing.T) {
+	cases := []struct {
+		args           []string
+		nonInteractive bool
+		resume         bool
+	}{
+		{nil, false, false},
+		{[]string{"--model", "gemini-3"}, false, false},
+		{[]string{"--mode", "agent"}, false, false}, // a flag value, not the "agent" subcommand
+		{[]string{"-i", "help"}, false, false},      // an -i prompt, not the "help" subcommand
+		{[]string{"-i=update the readme"}, false, false},
+		{[]string{"--add-dir", "/x", "--effort", "low"}, false, false},
+		{[]string{"-c"}, false, true},
+		{[]string{"--continue"}, false, true},
+		{[]string{"-c=false"}, false, false},
+		{[]string{"--conversation", "abc"}, false, true},
+		{[]string{"-p", "update"}, true, false}, // -p takes the prompt as its value
+		{[]string{"--print=hi"}, true, false},
+		{[]string{"--prompt", "hi"}, true, false},
+		{[]string{"--version"}, true, false},
+		{[]string{"-h"}, true, false},
+		{[]string{"mcp", "list"}, true, false},
+		{[]string{"--effort", "low", "changelog"}, true, false}, // a subcommand after flags
+		{[]string{"install"}, true, false},
+		{[]string{"--", "update"}, false, false},
+		{[]string{"fix the bug"}, false, false}, // a positional that is not a subcommand
+	}
+	for _, c := range cases {
+		a := parseArgv(c.args)
+		if a.nonInteractive() != c.nonInteractive || a.resume != c.resume {
+			t.Errorf("%q: nonInteractive=%v resume=%v, want %v/%v", c.args, a.nonInteractive(), a.resume, c.nonInteractive, c.resume)
+		}
+	}
+}
+
+func TestWithBriefing(t *testing.T) {
+	b := "BRIEF\n\n" + launch.BriefingTurnTail // no task yet: it says so
+	cases := []struct{ in, want []string }{
+		{nil, []string{"-i", b}},
+		{[]string{"--model", "m"}, []string{"-i", b, "--model", "m"}},
+		{[]string{"-i", "do x"}, []string{"-i", "BRIEF\n\n---\n\ndo x"}},
+		{[]string{"--prompt-interactive=do x"}, []string{"--prompt-interactive=BRIEF\n\n---\n\ndo x"}},
+		{[]string{"--model", "m", "-i", ""}, []string{"--model", "m", "-i", b}},
+		// A resumed conversation may be mid-task: never "there is no task".
+		{[]string{"-c"}, []string{"-i", "BRIEF", "-c"}},
+		{[]string{"--conversation", "abc"}, []string{"-i", "BRIEF", "--conversation", "abc"}},
+	}
+	for _, c := range cases {
+		if got := withBriefing(c.in, "BRIEF"); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("withBriefing(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func spec(t *testing.T, r *rig, args ...string) launch.Spec {
+	t.Helper()
+	return launch.Spec{
+		AgentID: agentA, AgentName: "bob", Session: "S", RunDir: t.TempDir(), RelayExe: r.opt.RelayExe,
+		RelayHome: t.TempDir(), ToolBin: r.opt.AgyBin, WithMCP: true, Briefing: "You are \"bob\".", UserArgs: args,
 	}
 }
 
 func TestPrepareNonInteractiveIsPassthrough(t *testing.T) {
+	r := newRig(t)
 	a := &AgyAdaptor{}
-	for _, args := range [][]string{{"-p", "hi"}, {"--print", "hi"}, {"mcp", "list"}, {"--version"}, {"install"}, {"--help"}} {
-		s := launch.Spec{RunDir: t.TempDir(), WithMCP: true, UserArgs: args}
-		p, err := a.Prepare(s)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !p.Passthrough || !reflect.DeepEqual(p.Args, args) || p.MCP {
-			t.Errorf("%q must pass through untouched, got %+v", args, p)
+	for _, args := range [][]string{{"-p", "hi"}, {"mcp", "list"}, {"--version"}, {"update"}} {
+		plan, err := a.Prepare(spec(t, r, args...))
+		if err != nil || !plan.Passthrough || !reflect.DeepEqual(plan.Args, args) {
+			t.Fatalf("%q: plan %+v err %v", args, plan, err)
 		}
 	}
-}
-
-func TestPrepareRegistersAndCleanupUnregisters(t *testing.T) {
-	paths, agyBin := setup(t)
-	a := &AgyAdaptor{}
-	runDir := t.TempDir()
-	s := launch.Spec{RunDir: runDir, RelayHome: paths.Root, RelayExe: "/opt/relay/relay", ToolBin: agyBin, WithMCP: true, UserArgs: []string{"fix bug"}}
-
-	p, err := a.Prepare(s)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !p.MCP || p.Passthrough {
-		t.Fatalf("%+v", p)
-	}
-	marker := filepath.Join(runDir, markerFile)
-	entry, rerr := os.ReadFile(marker)
-	if rerr != nil {
-		t.Fatalf("marker file: %v", rerr)
-	}
-	names := serverNames(t)
-	if !names[string(entry)] {
-		t.Fatalf("registered entry %q not found: %v", entry, names)
-	}
-
-	if err := a.Cleanup(s); err != nil {
-		t.Fatal(err)
-	}
-	names = serverNames(t)
-	if names[string(entry)] {
-		t.Fatalf("entry must be gone after Cleanup: %v", names)
+	if _, ok := r.read(); ok {
+		t.Fatal("a passthrough launch touched agy's config")
 	}
 }
 
-func TestPrepareSoloNeverTouchesAgy(t *testing.T) {
-	paths, agyBin := setup(t)
+func TestPrepareRegistersBriefsAndCleanupRestores(t *testing.T) {
+	r := newRig(t)
+	r.write("")
 	a := &AgyAdaptor{}
-	runDir := t.TempDir()
-	s := launch.Spec{RunDir: runDir, RelayHome: paths.Root, ToolBin: agyBin, WithMCP: false, UserArgs: []string{"a", "b"}}
-	p, err := a.Prepare(s)
-	if err != nil {
+	sp := spec(t, r, "--model", "m")
+	plan, err := a.Prepare(sp)
+	if err != nil || plan.Passthrough || !plan.MCP || !plan.BriefingDelivered || !plan.VerifySubmit {
+		t.Fatalf("plan %+v err %v", plan, err)
+	}
+	wantLog := filepath.Join(sp.RunDir, logFile)
+	want := []string{"-i", sp.Briefing + "\n\n" + launch.BriefingTurnTail, "--log-file", wantLog, "--model", "m"}
+	if !reflect.DeepEqual(plan.Args, want) || plan.ToolLog != wantLog {
+		t.Fatalf("args %q log %q, want %q %q", plan.Args, plan.ToolLog, want, wantLog)
+	}
+	if !reflect.DeepEqual(plan.Env, []string{"RELAY_RUN_DIR=" + sp.RunDir}) {
+		t.Fatalf("env %q", plan.Env)
+	}
+	r.assertOurEntry()
+	os.WriteFile(wantLog, []byte("agy log line\n"), 0o644)
+	if err := a.Cleanup(sp); err != nil {
 		t.Fatal(err)
 	}
-	if p.MCP || !reflect.DeepEqual(p.Args, []string{"a", "b"}) {
-		t.Fatalf("%+v", p)
+	if data, ok := r.read(); !ok || data != "" {
+		t.Fatalf("config %q exists=%v, want the original empty file", data, ok)
 	}
-	if _, err := os.Stat(filepath.Join(runDir, markerFile)); !os.IsNotExist(err) {
-		t.Fatal("no marker file when MCP was never requested")
-	}
-	if _, err := os.Stat(mustConfigPath(t)); !os.IsNotExist(err) {
-		t.Fatal("agy's config must not exist: nothing was ever registered")
+	r.assertNoTrace()
+	logs, _ := filepath.Glob(filepath.Join(r.home, ".gemini", "antigravity-cli", "log", "cli-*.log"))
+	if len(logs) != 1 {
+		t.Fatalf("agy's log was not handed back to agy's log directory: %v", logs)
 	}
 }
 
-func TestPrepareLeavesNoMarkerOrEntryWhenAddFails(t *testing.T) {
-	paths, _ := setup(t)
+func TestPrepareKeepsTheUsersOwnLogFile(t *testing.T) {
+	r := newRig(t)
 	a := &AgyAdaptor{}
-	runDir := t.TempDir()
-	// A binary that cannot possibly be agy: Prepare must degrade to a note,
-	// not fail the whole launch, and must leave nothing behind.
-	s := launch.Spec{RunDir: runDir, RelayHome: paths.Root, RelayExe: "/opt/relay/relay", ToolBin: filepath.Join(t.TempDir(), "no-such-binary"), WithMCP: true, UserArgs: []string{"go"}}
-	p, err := a.Prepare(s)
-	if err != nil {
-		t.Fatal(err) // Prepare itself must never fail; degrade via Notes instead
+	sp := spec(t, r, "--log-file", "/tmp/mine.log")
+	plan, _ := a.Prepare(sp)
+	defer a.Cleanup(sp)
+	if plan.ToolLog != "/tmp/mine.log" || strings.Count(strings.Join(plan.Args, " "), "--log-file") != 1 {
+		t.Fatalf("plan %+v", plan)
 	}
-	if p.MCP || len(p.Notes) == 0 {
-		t.Fatalf("expected a degrade note and MCP=false, got %+v", p)
+}
+
+func TestPrepareWithoutSessionNeverTouchesAgy(t *testing.T) {
+	r := newRig(t)
+	a := &AgyAdaptor{}
+	sp := spec(t, r)
+	sp.WithMCP, sp.RunDir = false, ""
+	plan, err := a.Prepare(sp)
+	if err != nil || plan.MCP || plan.ToolLog != "" {
+		t.Fatalf("plan %+v err %v", plan, err)
 	}
-	if _, err := os.Stat(filepath.Join(runDir, markerFile)); !os.IsNotExist(err) {
-		t.Fatal("no marker file when registration failed")
+	if _, ok := r.read(); ok {
+		t.Fatal("agy's config was touched without a shared session")
 	}
-	// Cleanup on this same spec must be a safe no-op.
-	if err := a.Cleanup(s); err != nil {
+	if err := a.Cleanup(sp); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPrepareDegradesWhenRegistrationFails(t *testing.T) {
+	r := newRig(t)
+	r.write("{broken")
+	a := &AgyAdaptor{}
+	sp := spec(t, r)
+	plan, err := a.Prepare(sp)
+	if err != nil || plan.MCP || len(plan.Notes) == 0 || !strings.Contains(strings.Join(plan.Notes, " "), "could not register") {
+		t.Fatalf("plan %+v err %v", plan, err)
+	}
+	if _, err := os.Stat(filepath.Join(sp.RunDir, markerFile)); err == nil {
+		t.Fatal("marker written for a failed registration")
+	}
+	if err := a.Cleanup(sp); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := r.read(); data != "{broken" {
+		t.Fatalf("config changed: %q", data)
 	}
 }
 
 func TestCleanupIsNoOpWithoutMarker(t *testing.T) {
-	a := &AgyAdaptor{}
-	s := launch.Spec{RunDir: t.TempDir()}
-	if err := a.Cleanup(s); err != nil {
-		t.Fatalf("Cleanup with no marker must be a safe no-op, got %v", err)
+	r := newRig(t)
+	if err := (&AgyAdaptor{}).Cleanup(spec(t, r)); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func TestScreenRulesNonEmpty(t *testing.T) {
+func TestPermissionNote(t *testing.T) {
+	r := newRig(t)
 	a := &AgyAdaptor{}
-	if len(a.ScreenRules()) == 0 {
-		t.Fatal("agy has no dialog rules: relay would type into permission prompts")
+	sp := spec(t, r)
+	plan, _ := a.Prepare(sp)
+	a.Cleanup(sp)
+	if !strings.Contains(strings.Join(plan.Notes, " "), "mcp(relay/*)") {
+		t.Fatalf("no permission hint: %q", plan.Notes)
+	}
+	settings := filepath.Join(r.home, ".gemini", "antigravity-cli", "settings.json")
+	os.MkdirAll(filepath.Dir(settings), 0o755)
+	os.WriteFile(settings, []byte(`{"permissions":{"allow":["mcp(relay/*)"]}}`), 0o644)
+	sp = spec(t, r)
+	plan, _ = a.Prepare(sp)
+	a.Cleanup(sp)
+	if strings.Contains(strings.Join(plan.Notes, " "), "mcp(relay/*)") {
+		t.Fatalf("hint shown although already allowed: %q", plan.Notes)
 	}
 }
 
-func mustConfigPath(t *testing.T) string {
-	t.Helper()
-	p, err := ConfigPath()
+// Screens captured live from agy 1.2.12/1.2.13.
+func TestScreenRulesRecogniseAgysDialogs(t *testing.T) {
+	rules := (&AgyAdaptor{}).ScreenRules()
+	dialog := func(screen string) bool {
+		sig, _, ok := state.FromScreen(strings.Split(screen, "\n"), rules)
+		return ok && sig.State == state.Dialog
+	}
+	menu := "\nAllow calling this tool?\n> 1. Yes, allow tool call\n  4. No, deny tool call\n\n  ↑/↓ Navigate · tab Amend\nesc to cancel      Gemini 3.8 Flash · high"
+	fileDialog := "/Users/x/hello.txt  +1\n   1 +  hi\n\nAllow creation of this file?\n> 1. Yes, allow creation\n  2. No, deny creation\n\n  ↑/↓ Navigate · tab Amend · f full diff\nesc to cancel"
+	trust := "Accessing workspace:\n\n/Users/x\n\nDo you trust the contents of this project?\n\n> Yes, I trust this folder\n  No, exit\n\n  ↑/↓ Navigate · enter Confirm\n                     Gemini 3.8 Flash · high"
+	exitPrompt := ">\n────────────────────\npress ctrl+d again to exit                     Gemini 3.8 Flash · high"
+	for name, s := range map[string]string{"tool": menu, "file": fileDialog, "trust": trust, "exit": exitPrompt} {
+		if !dialog(s) {
+			t.Errorf("%s dialog not recognised", name)
+		}
+	}
+	idle := "  42\n\n────────────────────\n>\n────────────────────\n? for shortcuts                     Gemini 3.8 Flash · high"
+	if dialog(idle) {
+		t.Error("the idle prompt was taken for a dialog")
+	}
+	busy := "⣾  Generating...\n────────────────────\n>\n────────────────────\nesc to cancel                     Gemini 3.8 Flash · high"
+	if sig, _, ok := state.FromScreen(strings.Split(busy, "\n"), rules); !ok || sig.State != state.Busy {
+		t.Errorf("the busy screen was not recognised: %+v %v", sig, ok)
+	}
+}
+
+// A user's own --log-file may hold earlier runs: this launch's lines start
+// where the file ends now, so old conversations and prompts are not replayed.
+func TestPrepareReadsAUsersOwnLogFromItsEnd(t *testing.T) {
+	r := newRig(t)
+	r.write("")
+	log := filepath.Join(t.TempDir(), "my.log")
+	os.WriteFile(log, []byte("I0930 old run] Created conversation 938faa13-bb0d-4fe0-9a4d-2218dab07166\n"), 0o644)
+	a := &AgyAdaptor{}
+	sp := spec(t, r, "--log-file", log)
+	plan, err := a.Prepare(sp)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return p
+	defer a.Cleanup(sp)
+	st, _ := os.Stat(log)
+	if plan.ToolLog != log || plan.ToolLogFrom != st.Size() {
+		t.Fatalf("log %q from %d, want %q from %d", plan.ToolLog, plan.ToolLogFrom, log, st.Size())
+	}
 }

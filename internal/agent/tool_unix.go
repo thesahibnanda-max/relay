@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 // unixTool wraps a real Unix pty (creack/pty) and the *exec.Cmd started
@@ -41,6 +42,23 @@ func (u *unixTool) Close() error                { return u.ptmx.Close() }
 
 func (u *unixTool) Resize(cols, rows int) error {
 	return pty.Setsize(u.ptmx, &pty.Winsize{Rows: uint16(rows), Cols: uint16(cols)})
+}
+
+// canonical reports whether the tool's terminal is still in canonical (line)
+// mode, read through the pty master (which reports the tool's side); ok is
+// false if it cannot be read. Through SyscallConn, not Fd, which would switch
+// the master to blocking mode and stop Close from ending a pending Read.
+func (u *unixTool) canonical() (canon, ok bool) {
+	rc, err := u.ptmx.SyscallConn()
+	if err != nil {
+		return false, false
+	}
+	var tio *unix.Termios
+	var terr error
+	if err := rc.Control(func(fd uintptr) { tio, terr = unix.IoctlGetTermios(int(fd), ioctlReadTermios) }); err != nil || terr != nil {
+		return false, false
+	}
+	return tio.Lflag&unix.ICANON != 0, true
 }
 
 func (u *unixTool) Wait() error              { return u.cmd.Wait() }

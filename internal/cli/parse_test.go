@@ -223,6 +223,12 @@ func TestMessagingCommands(t *testing.T) {
 	if _, err := parse("mcp"); err == nil {
 		t.Error("mcp needs --dir")
 	}
+	if p, err := parse("mcp", "--from-env"); err != nil || p.Kind != KindMCP || !p.FromEnv || p.Target != "" {
+		t.Fatalf("mcp --from-env: %+v %v", p, err)
+	}
+	if _, err := parse("mcp", "--from-env", "--dir", "/x"); err == nil {
+		t.Error("--from-env and --dir are exclusive")
+	}
 
 	p, err = parse("send", "bob", "--session="+id, "--priority=high", "--kind", "question", "what", "is", "up")
 	if err != nil || p.Kind != KindSend || p.Words[0] != "bob" || strings.Join(p.Words[1:], " ") != "what is up" ||

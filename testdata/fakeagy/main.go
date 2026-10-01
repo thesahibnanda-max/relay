@@ -1,51 +1,43 @@
-// fakeagy is a scripted stand-in for the real `agy` binary's `mcp add`/`mcp
-// remove` subcommands, used to test the agy adaptor deterministically without
-// touching a real ~/.gemini. It deliberately does a naive, unsynchronized
-// read-modify-write of its config file with NO locking of its own - mirroring
-// the real, confirmed-live bug in the real agy binary (10 concurrent
-// `agy mcp add` calls silently lost one addition) - so a test exercising it
-// directly (bypassing relay's own lock) can prove that bug still reproduces,
-// and a test going through relay's own locked wrapper can prove the lock
-// fixes it.
+// fakeagy is a scripted stand-in for the real `agy` binary (Google's
+// Antigravity CLI), faithful to what was confirmed live against agy
+// 1.2.12-1.2.14, so the agy adaptor can be tested end to end without a real,
+// authenticated agy or a real ~/.gemini:
 //
-// Config path: $GEMINI_HOME/config/mcp_config.json, matching the real agy
-// binary's own resolution (as approximated by this package's geminiHome()).
+//   - `mcp add/remove/list` (mcpcmd.go) edit $HOME/.gemini/config/mcp_config.json
+//     exactly like agy: flags before the name, "--" before the command, add
+//     or update, Go-sorted 2-space output, an empty or missing file is empty,
+//     invalid JSON is a hard error, unknown fields survive, and removing the
+//     last entry leaves {"mcpServers": {}}. Like agy it does NO locking of
+//     its own (a real, confirmed agy bug: concurrent adds lose updates).
+//   - Without a subcommand it is an interactive TUI (tui.go): bracketed
+//     paste, a prompt that Enter submits, queued messages while busy,
+//     permission dialogs, the folder-trust prompt, -i, -c, /new, Ctrl+D
+//     twice to exit - writing a conversation database (db.go) with agy's
+//     real schema and step/status/executor_metadata sequence, and spawning
+//     every configured MCP server as its own child, as agy does.
 //
-// Environment:
+// Environment (all optional):
 //
-//	FAKEAGY_DELAY_MS   sleep this long between reading and writing the config
-//	                   file (default 0), widening the race window so a
-//	                   concurrency test does not depend on getting lucky with
-//	                   real filesystem timing.
+//	FAKEAGY_DELAY_MS       sleep between reading and writing the MCP config
+//	                       (widens the race window for concurrency tests)
+//	FAKEAGY_LOG            append one JSON line per event (ready, submit,
+//	                       queued, dialog, answer, mcp) to this file
+//	FAKEAGY_LOGIN_MS       act as if logging in for this long at startup
+//	                       (input is queued, as agy does)
+//	FAKEAGY_TRUST          "prompt": show the folder-trust dialog first
+//	FAKEAGY_NO_MCP         "1": do not spawn MCP servers
+//	FAKEAGY_TURN_MS        how long each model step takes (default 150)
+//	FAKEAGY_ALLOW_MCP      "1": never ask before an MCP tool call
+//	FAKEAGY_SWALLOW_ENTER  ignore this many Enters that follow a paste (the
+//	                       "typed but never submitted" symptom of issue #50)
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strconv"
 	"time"
 )
-
-type mcpServer struct {
-	Command  string   `json:"command"`
-	Args     []string `json:"args"`
-	Disabled bool     `json:"disabled"`
-}
-
-type mcpConfig struct {
-	MCPServers map[string]mcpServer `json:"mcpServers"`
-}
-
-func configPath() string {
-	home := os.Getenv("GEMINI_HOME")
-	if home == "" {
-		fmt.Fprintln(os.Stderr, "fakeagy: GEMINI_HOME must be set")
-		os.Exit(1)
-	}
-	return filepath.Join(home, "config", "mcp_config.json")
-}
 
 func delay() {
 	if v, err := strconv.Atoi(os.Getenv("FAKEAGY_DELAY_MS")); err == nil && v > 0 {
@@ -53,49 +45,22 @@ func delay() {
 	}
 }
 
-func readConfig(path string) mcpConfig {
-	cfg := mcpConfig{MCPServers: map[string]mcpServer{}}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return cfg
-	}
-	json.Unmarshal(data, &cfg)
-	if cfg.MCPServers == nil {
-		cfg.MCPServers = map[string]mcpServer{}
-	}
-	return cfg
-}
-
-func writeConfig(path string, cfg mcpConfig) {
-	data, _ := json.MarshalIndent(cfg, "", "  ")
-	os.MkdirAll(filepath.Dir(path), 0o700)
-	os.WriteFile(path, data, 0o600)
-}
-
 func main() {
 	args := os.Args[1:]
-	if len(args) < 1 || args[0] != "mcp" {
-		fmt.Fprintln(os.Stderr, "fakeagy: usage: fakeagy mcp <add|remove> ...")
-		os.Exit(2)
+	if len(args) > 0 && args[0] == "mcp" {
+		os.Exit(mcpCommand(args[1:]))
 	}
-	path := configPath()
-	switch args[1] {
-	case "add":
-		name, command, rest := args[2], args[3], args[4:]
-		cfg := readConfig(path) // read...
-		delay()                 // ...(a real race window here, uncorrected: no lock)...
-		cfg.MCPServers[name] = mcpServer{Command: command, Args: append([]string{}, rest...), Disabled: false}
-		writeConfig(path, cfg) // ...write: last writer wins, silently dropping anyone else's add in between.
-		fmt.Printf("Added MCP server %q (stdio)\n", name)
-	case "remove":
-		name := args[2]
-		cfg := readConfig(path)
-		delay()
-		delete(cfg.MCPServers, name)
-		writeConfig(path, cfg)
-		fmt.Printf("Removed MCP server %q\n", name)
-	default:
-		fmt.Fprintln(os.Stderr, "fakeagy: unknown mcp subcommand", args[1])
-		os.Exit(2)
+	if len(args) > 0 && (args[0] == "--version" || args[0] == "-version") {
+		fmt.Println(version())
+		return
 	}
+	os.Exit(runTUI(args))
+}
+
+// version is the agy version faked (FAKEAGY_VERSION overrides it).
+func version() string {
+	if v := os.Getenv("FAKEAGY_VERSION"); v != "" {
+		return v
+	}
+	return "1.2.14"
 }

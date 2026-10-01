@@ -1,14 +1,15 @@
 package agy
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,11 +20,15 @@ var (
 	fakeAgyOnce sync.Once
 	fakeAgyBin  string
 	fakeAgyErr  error
+	// buildEnv is the environment before any test points HOME at a temp
+	// dir: go build under that HOME would fill it with a read-only module
+	// cache (where GOPATH is unset) that t.TempDir cannot remove.
+	buildEnv = os.Environ()
 )
 
-// buildFakeAgy compiles testdata/fakeagy once per test binary run - the
-// scripted stand-in for `agy mcp add`/`mcp remove` (see its own doc comment
-// for why it deliberately has no locking of its own).
+// buildFakeAgy compiles testdata/fakeagy once per test binary run: a
+// stand-in for the real agy that edits its MCP config exactly as agy does
+// (see its own doc comment), including agy's lack of any locking.
 func buildFakeAgy(t *testing.T) string {
 	t.Helper()
 	fakeAgyOnce.Do(func() {
@@ -34,305 +39,606 @@ func buildFakeAgy(t *testing.T) string {
 		}
 		name := "fakeagy"
 		if runtime.GOOS == "windows" {
-			// go build -o with an explicit path does NOT auto-append .exe
-			// (only the default output name does) - confirmed live: without
-			// this, exec.Command fails with "executable file not found",
-			// since Windows requires a recognized extension to launch a file
-			// directly, even though its bytes are a valid PE image.
-			name += ".exe"
+			name += ".exe" // go build -o with an explicit path does not add it
 		}
 		fakeAgyBin = filepath.Join(dir, name)
-		out, err := exec.Command("go", "build", "-o", fakeAgyBin, "../../../../testdata/fakeagy").CombinedOutput()
+		cmd := exec.Command("go", "build", "-o", fakeAgyBin, "../../../../testdata/fakeagy")
+		cmd.Env = buildEnv
+		out, err := cmd.CombinedOutput()
 		if err != nil {
 			fakeAgyErr = fmt.Errorf("%s: %w", out, err)
 		}
 	})
 	if fakeAgyErr != nil {
-		t.Skip("cannot build fakeagy (is `go` on PATH?):", fakeAgyErr)
+		if _, err := exec.LookPath("go"); err != nil {
+			t.Skip("cannot build fakeagy without go on PATH")
+		}
+		t.Fatal("cannot build fakeagy:", fakeAgyErr) // a broken build must never pass as a skip
 	}
 	return fakeAgyBin
 }
 
-// setup returns a relayhome.Paths rooted at a fresh temp dir (with RunDir
-// already created, matching what paths.Ensure() does in production) and
-// points GEMINI_HOME at a second, independent temp dir so this package's own
-// ConfigPath() and fakeagy's own config resolution agree without ever
-// touching a real ~/.gemini.
-func setup(t *testing.T) (paths relayhome.Paths, agyBin string) {
+// setHome points the user's home directory (which both this package and
+// fakeagy resolve agy's files from, exactly as the real agy does) at a
+// fresh temp dir, so no test ever touches a real ~/.gemini.
+func setHome(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
-	paths = relayhome.Paths{Root: root}
-	if err := os.MkdirAll(paths.RunDir(), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("GEMINI_HOME", t.TempDir())
-	return paths, buildFakeAgy(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	return home
 }
 
-func readRawConfig(t *testing.T) map[string]json.RawMessage {
+type rig struct {
+	t    *testing.T
+	home string
+	opt  Options
+	cfg  string
+	dead map[int]bool
+	mu   sync.Mutex
+}
+
+// newRig returns Options wired to fakeagy and a fake liveness table: a lease
+// written by this test process counts as alive unless marked dead.
+func newRig(t *testing.T) *rig {
 	t.Helper()
-	cfgPath, err := ConfigPath()
-	if err != nil {
-		t.Fatal(err)
+	home := setHome(t)
+	r := &rig{t: t, home: home, dead: map[int]bool{}}
+	r.opt = Options{AgyBin: buildFakeAgy(t), RelayExe: "/opt/relay/bin/relay", Alive: r.alive}
+	r.cfg = filepath.Join(home, ".gemini", "config", "mcp_config.json")
+	return r
+}
+
+func (r *rig) alive(pid int) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return pid > 0 && !r.dead[pid]
+}
+
+// crash makes every lease written so far (all carry this process's pid)
+// look like it belongs to a process killed with kill -9.
+func (r *rig) crash() {
+	r.mu.Lock()
+	r.dead[os.Getpid()] = true
+	r.mu.Unlock()
+}
+
+func (r *rig) revive() {
+	r.mu.Lock()
+	delete(r.dead, os.Getpid())
+	r.mu.Unlock()
+}
+
+func (r *rig) write(data string) {
+	r.t.Helper()
+	if err := os.MkdirAll(filepath.Dir(r.cfg), 0o755); err != nil {
+		r.t.Fatal(err)
 	}
-	data, err := os.ReadFile(cfgPath)
+	if err := os.WriteFile(r.cfg, []byte(data), 0o644); err != nil {
+		r.t.Fatal(err)
+	}
+}
+
+func (r *rig) read() (string, bool) {
+	data, err := os.ReadFile(r.cfg)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false
+	}
 	if err != nil {
+		r.t.Fatal(err)
+	}
+	return string(data), true
+}
+
+func (r *rig) servers() map[string]json.RawMessage {
+	r.t.Helper()
+	data, ok := r.read()
+	if !ok || len(bytes.TrimSpace([]byte(data))) == 0 {
 		return nil
 	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(data, &top); err != nil {
-		t.Fatalf("invalid JSON in config: %v (%s)", err, data)
+	var top struct {
+		MCPServers map[string]json.RawMessage `json:"mcpServers"`
 	}
-	return top
+	if err := json.Unmarshal([]byte(data), &top); err != nil {
+		r.t.Fatalf("invalid JSON in agy config: %v (%s)", err, data)
+	}
+	return top.MCPServers
 }
 
-func serverNames(t *testing.T) map[string]bool {
-	t.Helper()
-	top := readRawConfig(t)
-	var servers map[string]json.RawMessage
-	if raw, ok := top["mcpServers"]; ok {
-		json.Unmarshal(raw, &servers)
-	}
-	names := map[string]bool{}
-	for k := range servers {
-		names[k] = true
-	}
-	return names
-}
-
-func TestAddAndSweepRegistersEntryThenRemoveRestoresNonexistence(t *testing.T) {
-	paths, agyBin := setup(t)
-	cfgPath, _ := ConfigPath()
-	if _, err := os.Stat(cfgPath); err == nil {
-		t.Fatal("config must not exist before the first add")
-	}
-
-	runDir := t.TempDir()
-	entry, removed, err := AddAndSweep(paths, agyBin, "/opt/relay/relay", runDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(removed) != 0 {
-		t.Fatalf("nothing stale to sweep yet, got %v", removed)
-	}
-	wantEntry := EntryName(runDir)
-	if entry != wantEntry {
-		t.Fatalf("entry = %q, want %q", entry, wantEntry)
-	}
-	names := serverNames(t)
-	if !names[entry] || len(names) != 1 {
-		t.Fatalf("config after add: %v", names)
-	}
-
-	if err := Remove(paths, agyBin, entry); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
-		t.Fatalf("config must be removed entirely (never existed before): stat err = %v", err)
+func (r *rig) register(agentID string) {
+	r.t.Helper()
+	if _, err := Register(r.opt, agentID); err != nil {
+		r.t.Fatalf("Register(%s): %v", agentID, err)
 	}
 }
 
-func TestRemoveRestoresPreexistingContentByteIdentical(t *testing.T) {
-	paths, agyBin := setup(t)
-	cfgPath, _ := ConfigPath()
-	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
-		t.Fatal(err)
+func (r *rig) unregister(agentID string) {
+	r.t.Helper()
+	if err := Unregister(r.opt, agentID); err != nil {
+		r.t.Fatalf("Unregister(%s): %v", agentID, err)
 	}
-	original := []byte(`{
-  "mcpServers": {
-    "existing-user-server": {
-      "command": "/usr/bin/something",
-      "args": ["--flag"],
-      "disabled": false
-    }
-  }
-}`)
-	if err := os.WriteFile(cfgPath, original, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	runDir := t.TempDir()
-	entry, _, err := AddAndSweep(paths, agyBin, "/opt/relay/relay", runDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := Remove(paths, agyBin, entry); err != nil {
-		t.Fatal(err)
-	}
-	names := serverNames(t)
-	if len(names) != 1 || !names["existing-user-server"] {
-		t.Fatalf("the pre-existing entry must survive untouched: %v", names)
-	}
-	// content fidelity is agy's own job (trusted, not re-verified byte-for-byte
-	// here since fakeagy re-serializes JSON); existence and the untouched key
-	// are what this package's own logic is responsible for.
 }
 
-func TestSweepRemovesOnlyStaleRelayPrefixedEntries(t *testing.T) {
-	paths, agyBin := setup(t)
-	cfgPath, _ := ConfigPath()
-
-	liveDir := t.TempDir()
-	deadDir := filepath.Join(t.TempDir(), "does-not-exist")
-
-	seed := mcpConfig{MCPServers: map[string]mcpServer{
-		"relay-live":     {Command: "/opt/relay/relay", Args: []string{"mcp", "--dir", liveDir}},
-		"relay-dead":     {Command: "/opt/relay/relay", Args: []string{"mcp", "--dir", deadDir}},
-		"relay":          {Command: "/some/other/tool", Args: []string{"mcp", "--dir", deadDir}}, // another adaptor's naming: never ours to sweep
-		"unrelated-tool": {Command: "/usr/bin/unrelated", Args: []string{"--dir", deadDir}},
-	}}
-	data, _ := json.MarshalIndent(seed, "", "  ")
-	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cfgPath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	removed, err := SweepStale(paths, agyBin)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(removed) != 1 || removed[0] != "relay-dead" {
-		t.Fatalf("removed = %v, want exactly [relay-dead]", removed)
-	}
-	names := serverNames(t)
-	for _, want := range []string{"relay-live", "relay", "unrelated-tool"} {
-		if !names[want] {
-			t.Errorf("%q must survive the sweep, got %v", want, names)
+// assertNoTrace checks nothing of relay's is left in agy's directories.
+func (r *rig) assertNoTrace() {
+	r.t.Helper()
+	for _, p := range []string{
+		filepath.Join(r.home, ".gemini", "config", stateDirName),
+		filepath.Join(r.home, ".gemini", "antigravity-cli", "mcp", ServerName),
+	} {
+		if _, err := os.Stat(p); err == nil {
+			r.t.Errorf("%s left behind", p)
 		}
 	}
-	if names["relay-dead"] {
-		t.Error("relay-dead must have been removed")
+}
+
+func (r *rig) assertOurEntry() {
+	r.t.Helper()
+	raw, ok := r.servers()[ServerName]
+	if !ok {
+		r.t.Fatalf("no %q entry; config: %v", ServerName, r.servers())
+	}
+	var e struct {
+		Command string   `json:"command"`
+		Args    []string `json:"args"`
+	}
+	json.Unmarshal(raw, &e)
+	if e.Command != r.opt.RelayExe || len(e.Args) != 2 || e.Args[0] != "mcp" || e.Args[1] != "--from-env" {
+		r.t.Fatalf("entry = %s, want %s mcp --from-env", raw, r.opt.RelayExe)
 	}
 }
 
-// TestSiblingAgentSurvivesAnotherOnesCleanup is decision 3's core safety
-// property: two agy agents launched on the same machine (a completely normal
-// situation - agy's config is one file shared by all of them) each register
-// their own entry; one exiting and cleaning up must never touch the other's
-// still-live entry, and - because the file did NOT exist before either of
-// them started, so a naive "restore original state" would try to delete it -
-// must also not delete the config file while a sibling's real entry is still
-// in it.
-func TestSiblingAgentSurvivesAnotherOnesCleanup(t *testing.T) {
-	paths, agyBin := setup(t)
-	cfgPath, _ := ConfigPath()
-	if _, err := os.Stat(cfgPath); err == nil {
-		t.Fatal("config must not exist before the first add")
-	}
+const agentA, agentB = "01K6AAAAAAAAAAAAAAAAAAAAAA", "01K6BBBBBBBBBBBBBBBBBBBBBB"
 
-	runDirA, runDirB := t.TempDir(), t.TempDir()
-	entryA, _, err := AddAndSweep(paths, agyBin, "/opt/relay/relay", runDirA)
-	if err != nil {
-		t.Fatal(err)
+func TestRegisterThenUnregisterRestoresNonexistence(t *testing.T) {
+	r := newRig(t)
+	r.register(agentA)
+	r.assertOurEntry()
+	// agy caches tool schemas per server name; relay's goes when relay does.
+	cache := filepath.Join(r.home, ".gemini", "antigravity-cli", "mcp", ServerName)
+	os.MkdirAll(cache, 0o755)
+	os.WriteFile(filepath.Join(cache, "relay_send.json"), []byte("{}"), 0o644)
+	r.unregister(agentA)
+	if data, ok := r.read(); ok {
+		t.Fatalf("agy config should not exist again, has %q", data)
 	}
-	entryB, _, err := AddAndSweep(paths, agyBin, "/opt/relay/relay", runDirB)
-	if err != nil {
-		t.Fatal(err)
-	}
+	r.assertNoTrace()
+}
 
-	// Agent A exits and cleans up first.
-	if err := Remove(paths, agyBin, entryA); err != nil {
-		t.Fatal(err)
-	}
-	names := serverNames(t)
-	if names[entryA] {
-		t.Fatalf("A's own entry must be gone: %v", names)
-	}
-	if !names[entryB] {
-		t.Fatalf("B's entry must survive A's cleanup: %v", names)
-	}
-	if _, err := os.Stat(cfgPath); err != nil {
-		t.Fatalf("the config file itself must survive while B is still registered: %v", err)
-	}
-
-	// Now B exits too: only then may the file's existence be reversed.
-	if err := Remove(paths, agyBin, entryB); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
-		t.Fatalf("once both are gone, the config must be restored to nonexistence: stat err = %v", err)
+// Confirmed live: a 0-byte mcp_config.json is what a fresh agy install has,
+// and it broke registration outright before (issue #50's missing tools).
+func TestEmptyFileRegistersAndComesBackEmpty(t *testing.T) {
+	for _, orig := range []string{"", "  \n"} {
+		r := newRig(t)
+		r.write(orig)
+		r.register(agentA)
+		r.assertOurEntry()
+		r.unregister(agentA)
+		if data, ok := r.read(); !ok || data != orig {
+			t.Fatalf("config = %q (exists %v), want the original %q back byte for byte", data, ok, orig)
+		}
+		r.assertNoTrace()
 	}
 }
 
-func TestLockTimesOutWhenAnotherHolderHasIt(t *testing.T) {
-	paths, _ := setup(t)
-	held, err := agyFlock(paths.AgyMCPLockPath(), time.Second)
+// agy rewrites the whole file (sorted keys, its own indentation) on every
+// add/remove; relay puts the user's exact bytes back.
+func TestUserContentRestoredByteForByte(t *testing.T) {
+	r := newRig(t)
+	orig := "{\"mcpServers\":{\"mine\":{\"command\":\"echo\",\"args\":[\"a\"],\"env\":{\"K\":\"v\"}}},\n   \"other\": 5}"
+	r.write(orig)
+	r.register(agentA)
+	if _, ok := r.servers()["mine"]; !ok {
+		t.Fatal("the user's own server was lost")
+	}
+	r.unregister(agentA)
+	if data, _ := r.read(); data != orig {
+		t.Fatalf("config = %q, want the original bytes %q", data, orig)
+	}
+}
+
+func TestUserChangesDuringSessionAreKept(t *testing.T) {
+	r := newRig(t)
+	r.write(`{"mcpServers":{}}`)
+	r.register(agentA)
+	if out, err := exec.Command(r.opt.AgyBin, "mcp", "add", "added-meanwhile", "--", "echo", "x").CombinedOutput(); err != nil {
+		t.Fatalf("%s: %v", out, err)
+	}
+	r.unregister(agentA)
+	s := r.servers()
+	if _, ok := s["added-meanwhile"]; !ok {
+		t.Fatalf("a server the user added during the session was lost: %v", s)
+	}
+	if _, ok := s[ServerName]; ok {
+		t.Fatal("relay's entry left behind")
+	}
+}
+
+func TestEntryStaysUntilTheLastAgentLeaves(t *testing.T) {
+	r := newRig(t)
+	r.register(agentA)
+	r.register(agentB)
+	r.unregister(agentA)
+	r.assertOurEntry()
+	r.unregister(agentB)
+	if _, ok := r.read(); ok {
+		t.Fatal("entry not removed after the last agent left")
+	}
+	r.assertNoTrace()
+}
+
+// kill -9 of relay leaves its lease and entry behind; the next launch must
+// clean up the dead one's share and still restore the original at the end.
+func TestCrashedLaunchIsCleanedUpByTheNext(t *testing.T) {
+	r := newRig(t)
+	orig := `{"mcpServers":{"mine":{"command":"echo"}}}`
+	r.write(orig)
+	r.register(agentA)
+	// agentA's relay is killed without unregistering: its lease now names a dead pid.
+	const deadPID = 999999999
+	r.mu.Lock()
+	r.dead[deadPID] = true
+	r.mu.Unlock()
+	stale, _ := json.Marshal(lease{AgentID: agentA, PID: deadPID, Started: time.Now()})
+	os.WriteFile(filepath.Join(r.home, ".gemini", "config", stateDirName, "leases", agentA+".json"), stale, 0o600)
+	r.register(agentB)
+	r.assertOurEntry()
+	r.unregister(agentB)
+	if data, _ := r.read(); data != orig {
+		t.Fatalf("config = %q, want the original %q", data, orig)
+	}
+	r.assertNoTrace()
+}
+
+func TestSweepCleansUpAfterACrashButNotAfterALiveAgent(t *testing.T) {
+	r := newRig(t)
+	r.register(agentA)
+	if removed, err := Sweep(r.opt); err != nil || len(removed) != 0 {
+		t.Fatalf("Sweep with a live agent = %v, %v; want nothing removed", removed, err)
+	}
+	r.assertOurEntry()
+	r.crash()
+	removed, err := Sweep(r.opt)
+	if err != nil || len(removed) != 1 || removed[0] != ServerName {
+		t.Fatalf("Sweep after a crash = %v, %v; want [%s]", removed, err, ServerName)
+	}
+	if _, ok := r.read(); ok {
+		t.Fatal("config should be gone again")
+	}
+	r.assertNoTrace()
+}
+
+func TestSweepWithNothingRegisteredTouchesNothing(t *testing.T) {
+	r := newRig(t)
+	r.write(`{"mcpServers":{"mine":{"command":"echo"}}}`)
+	if removed, err := Sweep(r.opt); err != nil || len(removed) != 0 {
+		t.Fatalf("Sweep = %v, %v", removed, err)
+	}
+	if data, _ := r.read(); data != `{"mcpServers":{"mine":{"command":"echo"}}}` {
+		t.Fatalf("config changed: %q", data)
+	}
+	r.assertNoTrace()
+}
+
+func TestForeignRelayEntryIsNeverTouched(t *testing.T) {
+	r := newRig(t)
+	orig := `{"mcpServers":{"relay":{"command":"/usr/local/bin/some-other-relay","args":["serve"]}}}`
+	r.write(orig)
+	if _, err := Register(r.opt, agentA); err == nil {
+		t.Fatal("Register over a foreign \"relay\" entry must fail")
+	}
+	if data, _ := r.read(); data != orig {
+		t.Fatalf("config changed: %q", data)
+	}
+	r.assertNoTrace()
+}
+
+// agy refuses non-JSON configs too (comments, a BOM, trailing commas -
+// confirmed live), so relay leaves them alone and says so.
+func TestUnparseableConfigIsLeftAlone(t *testing.T) {
+	for _, orig := range []string{"{ // comment\n}", "\xef\xbb\xbf{}", `{"mcpServers": {"x": }`} {
+		r := newRig(t)
+		r.write(orig)
+		_, err := Register(r.opt, agentA)
+		if !errors.Is(err, ErrUnparseable) {
+			t.Fatalf("Register(%q) err = %v, want ErrUnparseable", orig, err)
+		}
+		if data, _ := r.read(); data != orig {
+			t.Fatalf("config changed: %q", data)
+		}
+		r.assertNoTrace()
+	}
+}
+
+// agy accepts and keeps odd user entries (confirmed live: "args" as a
+// string); relay must not fail on them.
+func TestOddUserEntriesAreTolerated(t *testing.T) {
+	r := newRig(t)
+	orig := `{"mcpServers":{"odd":{"command":5,"args":"notalist"},"web":{"serverUrl":"https://x"}}}`
+	r.write(orig)
+	r.register(agentA)
+	r.assertOurEntry()
+	r.unregister(agentA)
+	if data, _ := r.read(); data != orig {
+		t.Fatalf("config = %q, want %q", data, orig)
+	}
+}
+
+func TestLegacyPerLaunchEntriesAreSwept(t *testing.T) {
+	r := newRig(t)
+	liveDir := t.TempDir()
+	info, _ := json.Marshal(relayhome.RunInfo{AgentID: agentB, PID: os.Getpid()})
+	os.WriteFile(filepath.Join(liveDir, "agent.json"), info, 0o600)
+	r.write(fmt.Sprintf(`{"mcpServers":{
+		"relay-01K6CCCCCCCCCCCCCCCCCCCCCC":{"command":"/r","args":["mcp","--dir","/nonexistent/a"]},
+		"relay-01K6DDDDDDDDDDDDDDDDDDDDDD":{"command":"/r","args":["mcp","--dir",%q]},
+		"relay-notours":{"command":"/r","args":["other"]}}}`, liveDir))
+	notes, err := Register(r.opt, agentA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := r.servers()
+	if _, ok := s["relay-01K6CCCCCCCCCCCCCCCCCCCCCC"]; ok {
+		t.Error("a legacy entry for a gone run dir was not swept")
+	}
+	if _, ok := s["relay-01K6DDDDDDDDDDDDDDDDDDDDDD"]; !ok {
+		t.Error("a legacy entry still owned by a live (older) relay was swept")
+	}
+	if _, ok := s["relay-notours"]; !ok {
+		t.Error("an entry relay never registered was swept")
+	}
+	if len(notes) == 0 {
+		t.Error("no note about the swept entry")
+	}
+}
+
+// An older relay recorded, per RELAY_HOME, that the file did not exist
+// before it; that answer is honoured once so the empty shell it left goes.
+func TestLegacyExistenceMarkerIsHonoured(t *testing.T) {
+	r := newRig(t)
+	r.write("{\n  \"mcpServers\": {}\n}\n")
+	marker := filepath.Join(t.TempDir(), "agy-mcp-original.json")
+	os.WriteFile(marker, []byte(`{"existed":false}`), 0o600)
+	r.opt.LegacyMarker = marker
+	r.register(agentA)
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("legacy marker not removed once honoured")
+	}
+	r.unregister(agentA)
+	if _, ok := r.read(); ok {
+		t.Fatal("the empty shell an older relay created should be gone")
+	}
+}
+
+func TestInspect(t *testing.T) {
+	r := newRig(t)
+	st, err := Inspect(r.opt)
+	if err != nil || st.Registered || st.Stale() {
+		t.Fatalf("fresh: %+v %v", st, err)
+	}
+	r.register(agentA)
+	st, _ = Inspect(r.opt)
+	if !st.Registered || st.Stale() || len(st.LiveAgents) != 1 {
+		t.Fatalf("live: %+v", st)
+	}
+	r.crash()
+	st, _ = Inspect(r.opt)
+	if !st.Stale() {
+		t.Fatalf("after crash: %+v, want stale", st)
+	}
+	r.write("{nope")
+	st, _ = Inspect(r.opt)
+	if st.ParseError == nil {
+		t.Fatal("unparseable config not reported")
+	}
+}
+
+func TestLockTimesOut(t *testing.T) {
+	r := newRig(t)
+	old := lockWait
+	lockWait = 200 * time.Millisecond
+	defer func() { lockWait = old }()
+	s, _ := r.opt.state()
+	os.MkdirAll(s.dir, 0o700)
+	held, err := agyFlock(filepath.Join(s.dir, "lock"), func() error { return nil }, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer held.Close()
-
-	_, err = agyFlock(paths.AgyMCPLockPath(), 100*time.Millisecond)
-	if err != ErrLockTimeout {
-		t.Fatalf("err = %v, want ErrLockTimeout", err)
+	if _, err := Register(r.opt, agentA); !errors.Is(err, ErrLockTimeout) {
+		t.Fatalf("Register while locked: %v, want ErrLockTimeout", err)
 	}
 }
 
-// TestConcurrentAddThroughRelaysLockLosesNothing is the fix for the real,
-// live-confirmed bug in the real agy binary: unsynchronized concurrent
-// `agy mcp add` calls on one shared file silently lose writes. Going through
-// AddAndSweep (which serializes every call under agyFlock) must never lose
-// one, even with fakeagy's own artificial race window widened via
-// FAKEAGY_DELAY_MS.
-func TestConcurrentAddThroughRelaysLockLosesNothing(t *testing.T) {
-	paths, agyBin := setup(t)
+// Many relays launching agy at once must each end up with a lease, the one
+// entry registered, and - after all leave - the file exactly as it was.
+func TestConcurrentLaunchesThroughTheLockLoseNothing(t *testing.T) {
+	r := newRig(t)
 	t.Setenv("FAKEAGY_DELAY_MS", "20")
-
-	const n = 10
+	orig := `{"mcpServers":{"mine":{"command":"echo"}}}`
+	r.write(orig)
+	const n = 8
+	ids := make([]string, n)
 	var wg sync.WaitGroup
-	var failures int32
-	for i := 0; i < n; i++ {
+	errs := make(chan error, n)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("01K6EEEEEEEEEEEEEEEEEEEEE%d", i)
 		wg.Add(1)
-		go func(i int) {
+		go func(id string) {
 			defer wg.Done()
-			runDir := filepath.Join(t.TempDir(), fmt.Sprintf("run-%d", i))
-			if err := os.MkdirAll(runDir, 0o700); err != nil {
-				atomic.AddInt32(&failures, 1)
-				return
+			if _, err := Register(r.opt, id); err != nil {
+				errs <- err
 			}
-			if _, _, err := AddAndSweep(paths, agyBin, "/opt/relay/relay", runDir); err != nil {
-				atomic.AddInt32(&failures, 1)
-			}
-		}(i)
+		}(ids[i])
 	}
 	wg.Wait()
-	if failures != 0 {
-		t.Fatalf("%d/%d AddAndSweep calls failed", failures, n)
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
 	}
-	names := serverNames(t)
-	if len(names) != n {
-		t.Fatalf("got %d entries, want %d - relay's lock must serialize every add: %v", len(names), n, names)
+	st, _ := Inspect(r.opt)
+	if len(st.LiveAgents) != n {
+		t.Fatalf("%d leases, want %d", len(st.LiveAgents), n)
+	}
+	for _, id := range ids {
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			if err := Unregister(r.opt, id); err != nil {
+				t.Error(err)
+			}
+		}(id)
+	}
+	wg.Wait()
+	if data, _ := r.read(); data != orig {
+		t.Fatalf("config = %q, want %q", data, orig)
+	}
+	r.assertNoTrace()
+}
+
+// The lock above is what prevents the loss, not fakeagy being unable to
+// lose writes: called directly, concurrently, fakeagy (like the real agy)
+// loses some. If this ever stops reproducing, the test above proves nothing.
+func TestFakeAgyLosesWritesWithoutTheLock(t *testing.T) {
+	r := newRig(t)
+	t.Setenv("FAKEAGY_DELAY_MS", "30")
+	const n = 10
+	lost := false
+	for attempt := 0; attempt < 5 && !lost; attempt++ {
+		os.Remove(r.cfg)
+		var wg sync.WaitGroup
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				exec.Command(r.opt.AgyBin, "mcp", "add", fmt.Sprintf("race-%d", i), "--", "/bin/true").Run()
+			}(i)
+		}
+		wg.Wait()
+		lost = len(r.servers()) < n
+	}
+	if !lost {
+		t.Fatal("fakeagy never lost a concurrent write: it no longer models agy's missing locking")
 	}
 }
 
-// TestFakeAgyReproducesTheRealRaceWhenCalledDirectly proves the previous
-// test's zero-loss result comes from relay's own lock, not from fakeagy
-// being unable to lose writes: calling fakeagy directly, bypassing relay's
-// lock entirely (exactly how nothing protected the real agy binary in the
-// original live repro), must still show the loss. If this test ever stops
-// failing to reproduce the race, TestConcurrentAddThroughRelaysLockLosesNothing
-// would no longer be proving anything.
-func TestFakeAgyReproducesTheRealRaceWhenCalledDirectly(t *testing.T) {
-	_, agyBin := setup(t)
-	t.Setenv("FAKEAGY_DELAY_MS", "20")
-	geminiHome := os.Getenv("GEMINI_HOME")
+// An agent id names a lease file: one that is not a ULID never reaches a path.
+func TestRegisterRefusesAnInvalidAgentID(t *testing.T) {
+	r := newRig(t)
+	for _, bad := range []string{"../../x", "a/b", ""} {
+		if _, err := Register(r.opt, bad); err == nil {
+			t.Fatalf("Register(%q) succeeded", bad)
+		}
+		if err := Unregister(r.opt, bad); err == nil {
+			t.Fatalf("Unregister(%q) succeeded", bad)
+		}
+	}
+	if _, ok := r.read(); ok {
+		t.Fatal("agy's config was touched")
+	}
+}
 
-	const n = 10
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			cmd := exec.Command(agyBin, "mcp", "add", fmt.Sprintf("relay-race-%d", i), "/opt/relay/relay", "mcp", "--dir", "/tmp/x")
-			cmd.Env = append(os.Environ(), "GEMINI_HOME="+geminiHome)
-			cmd.Run()
-		}(i)
+// relay killed outright, and its pid later reused by some other process: the
+// lease is dead all the same, so the entry is cleaned up.
+func TestLeaseOfAReusedPIDIsDead(t *testing.T) {
+	r := newRig(t)
+	r.write("")
+	r.register(agentA)
+	r.opt.Ident = func(int) string { return "someone-else" } // the pid now names another process
+	if _, err := Sweep(r.opt); err != nil {
+		t.Fatal(err)
 	}
-	wg.Wait()
-	names := serverNames(t)
-	if len(names) == n {
-		t.Skip("fakeagy did not reproduce the race this run (timing-dependent); not a failure of relay's own code")
+	if data, ok := r.read(); !ok || data != "" {
+		t.Fatalf("config %q exists=%v: the reused pid kept relay's entry alive", data, ok)
 	}
+}
+
+// relay's entry left behind with no state directory next to it (a config
+// synced from another machine, or the directory deleted): doctor calls it
+// stale, so gc must clean it too.
+func TestSweepRemovesAnEntryWithNoStateDir(t *testing.T) {
+	r := newRig(t)
+	r.write(`{"mcpServers":{"mine":{"command":"x"}}}`)
+	r.register(agentA)
+	r.crash()
+	os.RemoveAll(filepath.Join(r.home, ".gemini", "config", stateDirName))
+	if st, _ := Inspect(r.opt); !st.Stale() {
+		t.Fatalf("doctor would not flag it: %+v", st)
+	}
+	if _, err := Sweep(r.opt); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.servers()[ServerName]; ok {
+		t.Fatal("gc left relay's entry in place")
+	}
+	if _, ok := r.servers()["mine"]; !ok {
+		t.Fatal("gc removed the user's own entry")
+	}
+}
+
+// A config kept elsewhere (dotfiles) behind a symlink comes back through the
+// link: the link stays a link, its target byte for byte as it was.
+func TestRestoreKeepsASymlinkedConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks need privileges on Windows")
+	}
+	r := newRig(t)
+	orig := "{\n    \"mcpServers\": {\"mine\": {\"command\": \"x\"}}\n}\n"
+	target := filepath.Join(t.TempDir(), "mcp_config.json")
+	os.WriteFile(target, []byte(orig), 0o644)
+	os.MkdirAll(filepath.Dir(r.cfg), 0o755)
+	if err := os.Symlink(target, r.cfg); err != nil {
+		t.Fatal(err)
+	}
+	r.register(agentA)
+	r.unregister(agentA)
+	if st, err := os.Lstat(r.cfg); err != nil || st.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("the symlink was replaced by a file")
+	}
+	if got, _ := os.ReadFile(target); string(got) != orig {
+		t.Fatalf("target is\n%s\nwant\n%s", got, orig)
+	}
+}
+
+// A server of the user's own that happens to be named "relay": its tool
+// cache is agy's and the user's, never relay's to delete.
+func TestSweepKeepsTheCacheOfAUsersOwnRelayServer(t *testing.T) {
+	r := newRig(t)
+	r.write(`{"mcpServers":{"relay":{"command":"/usr/bin/something-else"}}}`)
+	cache := filepath.Join(r.home, ".gemini", "antigravity-cli", "mcp", ServerName)
+	os.MkdirAll(cache, 0o755)
+	os.MkdirAll(filepath.Join(r.home, ".gemini", "config", stateDirName), 0o700) // a crashed launch's leftovers
+	if _, err := Sweep(r.opt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cache); err != nil {
+		t.Fatal("gc deleted the tool cache of a server that is not relay's")
+	}
+}
+
+// A launch held up by another relay's agy bookkeeping says so.
+func TestWaitingForTheLockIsReported(t *testing.T) {
+	r := newRig(t)
+	defer func(d time.Duration) { lockNotice = d }(lockNotice)
+	lockNotice = 50 * time.Millisecond
+	st, _ := r.opt.state()
+	held := make(chan struct{})
+	release := make(chan struct{})
+	go withLock(st, func() error { close(held); <-release; return nil })
+	<-held
+	waited := make(chan struct{}, 1)
+	opt := r.opt
+	opt.Waiting = func() { waited <- struct{}{} }
+	done := make(chan error, 1)
+	go func() { _, err := Register(opt, agentA); done <- err }()
+	select {
+	case <-waited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no word while waiting for the lock")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	r.unregister(agentA)
 }

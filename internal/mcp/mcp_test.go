@@ -204,3 +204,47 @@ func TestToolSchemasAreValidJSONSchema(t *testing.T) {
 		}
 	}
 }
+
+// agy 1.2.12/1.2.13 opens with server/discover (answered "method not found",
+// after which it falls back to initialize - confirmed live) and asks for
+// protocol 2025-11-25.
+func TestAgyHandshake(t *testing.T) {
+	c := start(t, &fakeBackend{})
+	c.send(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "server/discover", "params": map[string]any{}})
+	if e, ok := c.read()["error"].(map[string]any); !ok || e["code"].(float64) != -32601 {
+		t.Fatal("server/discover must be answered method-not-found")
+	}
+	c.send(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": map[string]any{"protocolVersion": "2025-11-25"}})
+	if v := c.read()["result"].(map[string]any)["protocolVersion"]; v != "2025-11-25" {
+		t.Fatalf("negotiated %v, want 2025-11-25", v)
+	}
+}
+
+// A disabled server (an agy session relay did not start) is a valid MCP
+// server offering nothing, never another agent's identity.
+func TestDisabledServerOffersNoTools(t *testing.T) {
+	fb := &fakeBackend{calls: make(chan string, 4)}
+	ir, iw := io.Pipe()
+	or, ow := io.Pipe()
+	s := &Server{Version: "test", Backend: fb, Instructions: "be nice", Disabled: true}
+	go func() { s.Serve(context.Background(), ir, ow); ow.Close() }()
+	t.Cleanup(func() { iw.Close() })
+	c := &client{t: t, in: iw, out: bufio.NewReader(or)}
+	c.send(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": map[string]any{"protocolVersion": "2025-06-18"}})
+	if r := c.read()["result"].(map[string]any); r["instructions"] != nil {
+		t.Fatalf("a disabled server must not send instructions: %v", r)
+	}
+	c.send(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+	if tools := c.read()["result"].(map[string]any)["tools"].([]any); len(tools) != 0 {
+		t.Fatalf("tools = %v, want none", tools)
+	}
+	c.send(map[string]any{"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": map[string]any{"name": "relay_send", "arguments": map[string]any{"to": "x", "body": "y"}}})
+	if _, isErr := text(t, c.read()); !isErr {
+		t.Fatal("a call on a disabled server must fail")
+	}
+	select {
+	case op := <-fb.calls:
+		t.Fatalf("a disabled server reached the backend: %s", op)
+	default:
+	}
+}

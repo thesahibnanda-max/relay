@@ -3,53 +3,128 @@ package transcript
 import (
 	"context"
 	"database/sql"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver, matching internal/store's own usage
 )
 
-// agy's `steps` table schema, confirmed live against real conversation
-// databases (~/.gemini/antigravity-cli/conversations/<uuid>.db) on agy
-// 1.2.11: idx (primary key, monotonically increasing), step_type, status,
-// step_payload (BLOB), among other BLOB columns this package does not need.
+// agy keeps each conversation in its own SQLite database
+// (~/.gemini/antigravity-cli/conversations/<id>.db, WAL mode). Confirmed live
+// against agy 1.2.12/1.2.13:
 //
-// step_type/status enum values confirmed live:
+//   - steps(idx, step_type, status, step_payload, ...) grows by one row per
+//     step; a row's status changes in place (8 generating -> 3 done, or 9
+//     waiting for the user's permission -> 3 done / 6 cancelled). Types seen:
+//     14 user input, 15 model output (answers and tool-call plans alike -
+//     one is written, done, before every tool call), 132 tool execution, 101
+//     a system/background event (which can start a turn on its own).
+//   - executor_metadata gets exactly one row when a turn ends, completed or
+//     cancelled; its field 3 is the turn's last step idx.
 //
-//	stepTypeUserMessage      = 14  - starts a turn
-//	stepTypeAssistantMessage = 15  - status=3 here (and only here) means the
-//	                                 whole turn is done
-//	stepTypeToolCall         = 132 - can also reach status=3 mid-turn without
-//	                                 the turn being over: idle detection must
-//	                                 key off step_type==15 specifically, never
-//	                                 status alone.
+// So the conversation is busy exactly while a step exists past the last
+// finished turn, and a step in status 9 is a permission prompt on screen.
 const (
-	agyStepUserMessage      = 14
-	agyStepAssistantMessage = 15
-	agyStatusComplete       = 3
+	agyStepUser   = 14
+	agyStepModel  = 15
+	agyStatusDone = 3
+	agyStatusAsk  = 9 // waiting for the user to approve
 )
 
-// SQLiteTailer follows one of agy's per-conversation SQLite databases. Unlike
-// every other adaptor's transcript (an append-only JSONL file, handled by the
-// line-offset Tailer), agy's `steps` table is mutated in place, not appended
-// to - so this polls full snapshots instead: each poll re-checks the
-// last-seen row's own (idx, step_type, status), since that one row can still
-// change after first being seen, and processes any row with a higher idx as
-// new.
-type SQLiteTailer struct {
-	Path  string
-	Fn    func(Record)
-	Every time.Duration // poll interval (default 250ms)
+// Signals only the agy tailer emits: its state is authoritative and re-sent
+// periodically, so consumers give it a short TTL (see collab).
+const (
+	SigAgyBusy        = "agy_busy"
+	SigAgyIdle        = "agy_idle"
+	SigAgyDialog      = "agy_dialog"       // a step is waiting for the user's permission
+	SigAgyDialogClear = "agy_dialog_clear" // ...and no longer is
+)
+
+// agyReassert is how often the tailer repeats an unchanged state, so a
+// stopped tailer's last word cannot outlive it.
+const agyReassert = 3 * time.Second
+
+// AgyDBURI is the read-only SQLite URI for one of agy's databases, escaped
+// so any path works. A live database has a -wal file and is opened
+// read-only through it; once agy closes a conversation it checkpoints and
+// removes -wal/-shm, and a read-only open of a WAL database without -shm
+// fails ("unable to open database file", confirmed live) - that one is
+// immutable, so it is opened as such.
+func AgyDBURI(path string) string {
+	p := filepath.ToSlash(path)
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p // Windows drive path: file:///C:/...
+	}
+	q := "mode=ro&_pragma=busy_timeout(3000)"
+	if _, err := os.Stat(path + "-wal"); err != nil {
+		q = "mode=ro&immutable=1" // mode=ro too: never create a missing file in agy's folder
+	}
+	return (&url.URL{Scheme: "file", Path: p, RawQuery: q}).String()
 }
 
-func (t *SQLiteTailer) Run(ctx context.Context) {
+// AgyDBTailer follows one agy conversation database.
+type AgyDBTailer struct {
+	Path string
+	Fn   func(Record)
+	// SkipExisting treats steps already in the database when following
+	// starts as history: their turns are not reported (a resumed
+	// conversation), only the state is.
+	SkipExisting bool
+	Every        time.Duration // poll interval (default 250ms)
+	// Unreadable, if set, is called once if the database cannot be read -
+	// missing, or not in the schema relay knows - for agyUnreadableAfter.
+	Unreadable func()
+}
+
+// agyUnreadableAfter is how long a conversation database may stay unreadable
+// (agy creating or checkpointing it) before the tailer reports it.
+const agyUnreadableAfter = 10 * time.Second
+
+type agyStep struct {
+	idx            int64
+	typ, status    int
+	payloadPending bool
+}
+
+type agyTail struct {
+	t        *AgyDBTailer
+	db       *sql.DB
+	dbURI    string
+	seeded   bool
+	reported map[int64]bool // steps whose turn was reported (or skipped as history)
+	state    string
+	dialog   bool
+	lastSent time.Time
+
+	failingSince time.Time // first failed poll since the last good one
+	reportedBad  bool
+	lastDone     int64 // the last finished turn's last step idx, as last reported
+}
+
+// failed records a poll that could not read the database.
+func (a *agyTail) failed() {
+	a.close()
+	if a.failingSince.IsZero() {
+		a.failingSince = time.Now()
+	}
+	if !a.reportedBad && a.t.Unreadable != nil && time.Since(a.failingSince) >= agyUnreadableAfter {
+		a.reportedBad = true
+		a.t.Unreadable()
+	}
+}
+
+func (t *AgyDBTailer) Run(ctx context.Context) {
 	every := t.Every
 	if every == 0 {
 		every = 250 * time.Millisecond
 	}
-	var lastIdx int64 = -1
-	var lastStepType, lastStatus int
+	a := newAgyTail(t)
+	defer a.close()
 	for {
-		t.poll(ctx, &lastIdx, &lastStepType, &lastStatus)
+		a.poll(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -58,39 +133,163 @@ func (t *SQLiteTailer) Run(ctx context.Context) {
 	}
 }
 
-func (t *SQLiteTailer) poll(ctx context.Context, lastIdx *int64, lastStepType, lastStatus *int) {
-	db, err := sql.Open("sqlite", "file:"+t.Path+"?mode=ro&_pragma=busy_timeout(3000)")
-	if err != nil {
-		return
-	}
-	defer db.Close()
-	rows, err := db.QueryContext(ctx, `SELECT idx, step_type, status FROM steps WHERE idx >= ? ORDER BY idx`, *lastIdx)
-	if err != nil {
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var idx int64
-		var stepType, status int
-		if rows.Scan(&idx, &stepType, &status) != nil {
-			continue
+// AgyUserTurns reads, once, the text of every finished user turn in an agy
+// conversation database (none if it cannot be read).
+func AgyUserTurns(ctx context.Context, path string) []string {
+	var out []string
+	a := newAgyTail(&AgyDBTailer{Path: path, Fn: func(r Record) {
+		for _, t := range r.Turns {
+			if t.Role == "user" {
+				out = append(out, t.Text)
+			}
 		}
-		if idx == *lastIdx && stepType == *lastStepType && status == *lastStatus {
-			continue // the one row we might re-see: unchanged since last poll
-		}
-		*lastIdx, *lastStepType, *lastStatus = idx, stepType, status
-		if rec := agyRecord(stepType, status); rec.Signal != "" {
-			t.Fn(rec)
-		}
+	}})
+	defer a.close()
+	a.poll(ctx)
+	return out
+}
+
+func newAgyTail(t *AgyDBTailer) *agyTail {
+	return &agyTail{t: t, reported: map[int64]bool{}, lastDone: -1}
+}
+
+func (a *agyTail) close() {
+	if a.db != nil {
+		a.db.Close()
+		a.db = nil
 	}
 }
 
-func agyRecord(stepType, status int) Record {
-	switch {
-	case stepType == agyStepUserMessage:
-		return Record{Signal: SigTaskStarted}
-	case stepType == agyStepAssistantMessage && status == agyStatusComplete:
-		return Record{Signal: SigTaskComplete}
+func (a *agyTail) open() bool {
+	uri := AgyDBURI(a.t.Path)
+	if a.db != nil && uri == a.dbURI {
+		return true
 	}
-	return Record{}
+	a.close()
+	db, err := sql.Open("sqlite", uri)
+	if err != nil {
+		return false
+	}
+	db.SetMaxOpenConns(1)
+	a.db, a.dbURI = db, uri
+	return true
+}
+
+func (a *agyTail) poll(ctx context.Context) {
+	if !a.open() {
+		return
+	}
+	lastDone := int64(-1)
+	var meta []byte
+	switch err := a.db.QueryRowContext(ctx, `SELECT data FROM executor_metadata ORDER BY idx DESC LIMIT 1`).Scan(&meta); err {
+	case nil:
+		if v, ok := pbUint(meta, 3); ok {
+			lastDone = int64(v)
+		}
+	case sql.ErrNoRows:
+	default:
+		a.failed() // reopen next time (the database may have been checkpointed/closed)
+		return
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT idx, step_type, status FROM steps ORDER BY idx`)
+	if err != nil {
+		a.failed()
+		return
+	}
+	var steps []agyStep
+	for rows.Next() {
+		var s agyStep
+		if rows.Scan(&s.idx, &s.typ, &s.status) == nil {
+			steps = append(steps, s)
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		a.failed()
+		return
+	}
+	a.failingSince = time.Time{}
+
+	ended := lastDone > a.lastDone
+	if !a.seeded {
+		a.seeded = true
+		if a.t.SkipExisting {
+			for _, s := range steps {
+				a.reported[s.idx] = true
+			}
+			ended = false // history
+		}
+	}
+	a.lastDone = max(a.lastDone, lastDone)
+
+	var turns []Turn
+	for _, s := range steps {
+		if a.reported[s.idx] || s.status != agyStatusDone || (s.typ != agyStepUser && s.typ != agyStepModel) {
+			continue
+		}
+		a.reported[s.idx] = true
+		if t, ok := a.turn(ctx, s); ok {
+			turns = append(turns, t)
+		}
+	}
+
+	busy, dialog := false, false
+	for _, s := range steps {
+		if s.idx > lastDone {
+			busy = true
+			if s.status == agyStatusAsk {
+				dialog = true
+			}
+		}
+	}
+	state := SigAgyIdle
+	if busy {
+		state = SigAgyBusy
+	}
+	rec := Record{Turns: turns, TurnEnded: ended}
+	// New turns and ends always carry the state: a whole turn can begin and
+	// end between two polls, leaving it unchanged.
+	if state != a.state || len(turns) > 0 || ended || time.Since(a.lastSent) >= agyReassert {
+		rec.Signal, a.state, a.lastSent = state, state, time.Now()
+	}
+	if len(rec.Turns) > 0 || rec.Signal != "" {
+		a.t.Fn(rec)
+	}
+	if dialog != a.dialog || (dialog && rec.Signal != "") {
+		a.dialog = dialog
+		sig := SigAgyDialogClear
+		if dialog {
+			sig = SigAgyDialog
+		}
+		a.t.Fn(Record{Signal: sig})
+	}
+}
+
+// turn extracts the text of a finished user input (field 19.2) or model
+// answer (field 20.1) step.
+func (a *agyTail) turn(ctx context.Context, s agyStep) (Turn, bool) {
+	var payload []byte
+	if a.db.QueryRowContext(ctx, `SELECT step_payload FROM steps WHERE idx=?`, s.idx).Scan(&payload) != nil {
+		return Turn{}, false
+	}
+	var text, role string
+	switch s.typ {
+	case agyStepUser:
+		text, _ = pbString(payload, 19, 2)
+		role = "user"
+	case agyStepModel:
+		text, _ = pbString(payload, 20, 1)
+		role = "assistant"
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return Turn{}, false
+	}
+	t := Turn{Role: role, Text: clip(text)}
+	if sec, ok := pbUint(payload, 5, 1, 1); ok {
+		nsec, _ := pbUint(payload, 5, 1, 2)
+		t.TS = time.Unix(int64(sec), int64(nsec))
+	}
+	return t, true
 }

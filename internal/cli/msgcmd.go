@@ -23,6 +23,7 @@ import (
 	"github.com/thesahibnanda-max/relay/internal/daemon"
 	"github.com/thesahibnanda-max/relay/internal/doctor"
 	"github.com/thesahibnanda-max/relay/internal/globallink"
+	"github.com/thesahibnanda-max/relay/internal/ids"
 	"github.com/thesahibnanda-max/relay/internal/mcp"
 	"github.com/thesahibnanda-max/relay/internal/proto"
 	"github.com/thesahibnanda-max/relay/internal/relayhome"
@@ -349,22 +350,44 @@ func runApproveGlobal(p Parsed, out, errw io.Writer) int {
 	return 0
 }
 
+// adaptorAgyServer is the MCP entry name relay registers with agy.
+const adaptorAgyServer = "relay"
+
 func runGC(p Parsed, out, errw io.Writer) int {
 	paths, err := relayhome.Resolve()
 	if err != nil {
 		fmt.Fprintf(errw, "relay: %v\n", err)
 		return 1
 	}
-	if !p.DryRun { // per-launch leftovers of crashed agents: always safe to collect
+	if p.DryRun {
+		for _, d := range paths.StaleRunDirs() {
+			fmt.Fprintln(out, "would remove", d)
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			if st, err := adaptor.InspectAgy(home); err == nil {
+				for _, name := range st.Legacy {
+					fmt.Fprintln(out, "would remove stale agy MCP server", name)
+				}
+				if st.Stale() {
+					fmt.Fprintln(out, "would remove agy MCP server", adaptorAgyServer, "(no relay agy agent is running) and restore", st.ConfigPath)
+				}
+			}
+		}
+	} else { // per-launch leftovers of crashed agents: always safe to collect
+		// Run directories first: a legacy agy entry is stale once its run
+		// directory is gone.
 		removed, _ := paths.GC(nil)
 		for _, d := range removed {
 			fmt.Fprintln(out, "removed", d)
 		}
-		removedAgy, _ := adaptor.AgySweepStale(paths)
+		removedAgy, err := adaptor.AgySweepStale(paths)
+		if err != nil {
+			fmt.Fprintf(errw, "relay: cleaning up agy's MCP registration: %v\n", err)
+		}
 		for _, name := range removedAgy {
 			fmt.Fprintln(out, "removed stale agy MCP server", name)
 		}
-		if len(removed) == 0 && len(removedAgy) == 0 && p.OlderThan == 0 && !p.Compress {
+		if len(removed) == 0 && len(removedAgy) == 0 && err == nil && p.OlderThan == 0 && !p.Compress {
 			fmt.Fprintln(out, "Nothing to clean up.")
 		}
 	}
@@ -422,9 +445,15 @@ func humanBytes(n int64) string {
 func runMCP(p Parsed) int {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	dir := p.Target
+	disabled := false
+	if p.FromEnv {
+		dir, disabled = mcpDirFromEnv()
+	}
 	srv := &mcp.Server{
 		Version:      Version,
-		Backend:      mcp.CtlBackend{Dir: p.Target},
+		Backend:      mcp.CtlBackend{Dir: dir},
+		Disabled:     disabled,
 		Instructions: "Relay connects you to other AI coding agents in your session: relay_list_agents to see them, relay_send to hand work over or answer, relay_inbox to read waiting messages.",
 	}
 	if err := srv.Serve(ctx, os.Stdin, os.Stdout); err != nil {
@@ -432,6 +461,25 @@ func runMCP(p Parsed) int {
 		return 1
 	}
 	return 0
+}
+
+// mcpDirFromEnv resolves `relay mcp --from-env`'s run directory from the
+// environment relay gives the tool it launches, and reports disabled when
+// this process was not spawned by such a tool. agy registers MCP servers in
+// one user-global file, so every agy process on the machine spawns this
+// server; only the one relay started (whose RELAY_AGENT_ID matches the owner
+// recorded in RELAY_RUN_DIR) may act as that agent. Everything else gets a
+// server with no tools.
+func mcpDirFromEnv() (dir string, disabled bool) {
+	dir, id := os.Getenv("RELAY_RUN_DIR"), os.Getenv("RELAY_AGENT_ID")
+	if dir == "" || id == "" {
+		return "", true
+	}
+	info, err := relayhome.ReadRunInfo(dir)
+	if err != nil || !ids.Valid(id) || ids.Normalize(info.AgentID) != ids.Normalize(id) {
+		return "", true
+	}
+	return dir, false
 }
 
 // runHook is what Claude runs for each registered hook event. It must never

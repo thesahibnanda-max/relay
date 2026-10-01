@@ -46,7 +46,63 @@ type tool interface {
 // exits; a lingering grandchild holding the PTY open would otherwise hang us.
 const drainTimeout = 250 * time.Millisecond
 
+// eofRepeatGap separates repeated EOF presses so the tool reads them as two keys.
+const eofRepeatGap = 300 * time.Millisecond
+
+// eofRawWait bounds how long pressEOF watches for a tool to leave canonical mode.
+const eofRawWait = time.Minute
+
+// pressEOF ends the tool once piped stdin has ended. Some tools ask for EOF
+// twice before exiting (agy: "press ctrl+d again to exit"). A full-screen
+// tool that has not yet put its terminal in raw mode never sees these keys:
+// the line discipline takes them as end-of-line (Linux later hands the raw
+// reader NUL in their place). Pressed at once - right for a tool that reads
+// lines - and pressed again if the tool goes raw while still running.
+func pressEOF(t tool, mux *InputMux, presses int, exited <-chan struct{}) {
+	press := func() {
+		for i := 0; i < presses; i++ {
+			if i > 0 {
+				time.Sleep(eofRepeatGap)
+			}
+			_, _ = mux.WriteUser(eofSignal())
+		}
+	}
+	c, ok := t.(interface{ canonical() (bool, bool) })
+	canon, known := false, false
+	if ok {
+		canon, known = c.canonical()
+	}
+	press()
+	if !known || !canon {
+		return
+	}
+	tk := time.NewTicker(50 * time.Millisecond)
+	defer tk.Stop()
+	deadline := time.After(eofRawWait)
+	for {
+		select {
+		case <-exited:
+			return
+		case <-deadline:
+			return
+		case <-tk.C:
+			canon, known := c.canonical()
+			if !known {
+				return
+			}
+			if !canon {
+				press()
+				return
+			}
+		}
+	}
+}
+
 type Config struct {
+	// EOFPresses is how many EOF keys end the tool when piped stdin ends
+	// (default 1).
+	EOFPresses int
+
 	Tool string
 	Bin  string
 	Args []string
@@ -88,6 +144,10 @@ func (h *Handle) ClearDraft() { h.mux.ClearDraft() }
 
 // Interrupt presses Esc in the tool (at a safe boundary in the user's input).
 func (h *Handle) Interrupt(ctx context.Context) error { return h.mux.Raw(ctx, []byte{0x1b}) }
+
+// PressEnter sends a lone Enter at a safe key boundary: a resubmit for a
+// tool that left an injected message in its input box.
+func (h *Handle) PressEnter(ctx context.Context) error { return h.mux.Raw(ctx, []byte{'\r'}) }
 
 // SetChord reserves a command prefix key in the user's input (see InputMux.SetChord).
 func (h *Handle) SetChord(prefix byte, fn func(key byte)) { h.mux.SetChord(prefix, fn) }
@@ -275,6 +335,7 @@ func Run(cfg Config) (int, error) {
 	}()
 
 	// user -> tool. Left running when the tool exits; it dies with the process.
+	exited := make(chan struct{})
 	go func() {
 		buf := make([]byte, 32*1024)
 		for {
@@ -288,7 +349,7 @@ func Run(cfg Config) (int, error) {
 			}
 			if err != nil {
 				if !isTTY && errors.Is(err, io.EOF) {
-					_, _ = mux.WriteUser(eofSignal()) // piped stdin ended
+					pressEOF(t, mux, max(1, cfg.EOFPresses), exited)
 				}
 				return
 			}
@@ -296,10 +357,22 @@ func Run(cfg Config) (int, error) {
 	}()
 
 	waitErr := t.Wait()
+	close(exited)
 
 	select {
 	case <-outDone:
 	case <-time.After(drainTimeout):
+	}
+	if isTTY {
+		// Whatever the tool left switched on (it crashed, or was killed before
+		// restoring the terminal) is switched off, so the shell gets back the
+		// terminal it had.
+		tracker.Sync()
+		if reset := tracker.Modes().ResetSequence(); reset != "" {
+			outMu.Lock()
+			_, _ = io.WriteString(cfg.Out, reset)
+			outMu.Unlock()
+		}
 	}
 
 	return t.ExitCode(waitErr), nil

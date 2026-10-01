@@ -5,13 +5,14 @@ import (
 	"github.com/thesahibnanda-max/relay/internal/relayhome"
 )
 
-// AgySweepStale removes any leftover relay-*-prefixed MCP entries agy's own
-// AgyAdaptor left in agy's persistent, global mcp_config.json after a
-// crashed launch (see that adaptor's Prepare, which runs the identical sweep
-// before every add). Exported here so `relay gc` can offer the same
-// one-command cleanup even for a user who never relaunches agy - internal/cli
-// cannot import internal/adaptor/internal/agy directly (Go's internal
-// package visibility), so this is the seam.
+// AgySweepStale finishes the cleanup a crashed agy launch could not: with no
+// relay agy agent running, it removes relay's MCP entry from agy's
+// persistent, user-global mcp_config.json, restores that file as the user
+// had it, and removes entries older relay versions left (see the agy
+// adaptor's Prepare). Exported here so `relay gc` can offer it even to a
+// user who never relaunches agy - internal/cli cannot import
+// internal/adaptor/internal/agy directly (Go's internal package visibility),
+// so this is the seam.
 //
 // A no-op, not an error, when agy isn't installed on this machine: there is
 // nothing of agy's to clean up.
@@ -20,5 +21,14 @@ func AgySweepStale(paths relayhome.Paths) ([]string, error) {
 	if err != nil {
 		return nil, nil
 	}
-	return internalagy.SweepStale(paths, bin)
+	return internalagy.Sweep(internalagy.Options{AgyBin: bin, LegacyMarker: paths.AgyOriginalSnapshotPath()})
+}
+
+// AgyStatus is relay's registration with agy, for `relay doctor`.
+type AgyStatus = internalagy.Status
+
+// InspectAgy reports relay's registration with agy, for the user whose home
+// directory is home, without changing anything.
+func InspectAgy(home string) (AgyStatus, error) {
+	return internalagy.Inspect(internalagy.Options{Home: home})
 }

@@ -5,7 +5,7 @@
 **🌐 [relay-sahib-nanda.vercel.app](https://relay-sahib-nanda.vercel.app)** &middot; website, demo and one-line install
 
 Relay lets AI coding agents in separate terminals work as one team. Run Claude Code, Codex, GitHub
-Copilot CLI and Google's Antigravity CLI 🧪 (or several of each) side by side, and one can hand work to
+Copilot CLI and Google's Antigravity CLI (or several of each) side by side, and one can hand work to
 another (*"tell codex to fix the failing test"*), ask what another has done, and answer back, while
 every terminal still looks and behaves exactly like the tool itself.
 
@@ -45,17 +45,26 @@ and they behave exactly as before.
 
 One exception: Google's Antigravity CLI (`agy`) has no per-launch way to register an MCP server at
 all - the only mechanism it offers is `agy mcp add`, which writes into its own global, persistent
-config. Relay uses that anyway, but only for the one launch: it registers a uniquely-named entry,
-removes it on exit (or on the next `relay <tool>` launch or `relay gc`, if the process was killed
-before it could), and locks around every change so it can never race `agy`'s own config file. `relay
-doctor`/`relay gc` flag and clean up anything left behind.
+config. Relay uses that, as narrowly as it can: while at least one `relay agy` agent is running, agy's
+config has one entry named `relay`, and the last agent to exit removes it and writes the file back
+byte for byte as it was (or deletes it, if it did not exist). The entry only works for an `agy` that
+Relay itself started - any other `agy` session sees a server with no tools - and every change is
+made under a lock, so concurrent launches never race `agy`'s own config file. If Relay is killed
+before it can clean up, the next `relay agy` launch or `relay gc` finishes the job, and `relay
+doctor` says so.
+
+`agy` asks before every MCP tool call. Until Relay's tools are allowed, every interactive `relay agy`
+launch offers to allow them from then on; only a `y` makes Relay add `"mcp(relay/*)"` to
+`permissions.allow` in `~/.gemini/antigravity-cli/settings.json` (keeping everything else in the file).
+You can also choose *always allow ... (Persist to settings.json)* at agy's first prompt. Relay never
+answers agy's own prompts and never types into them.
 
 Linux, macOS, WSL and native Windows. One static binary, no cgo.
 
 **New to Relay?** [NOTICE.md](NOTICE.md) explains everything in plain language: what it does, where it works,
-and what its limits are. In short: macOS/Linux/WSL with Claude Code, Codex or Copilot CLI is the most
-battle-tested combination; `agy` support and native Windows are both 🧪 **Experimental** - please
-[open an issue](https://github.com/thesahibnanda-max/relay/issues/new) if something looks off on either.
+and what its limits are. In short: macOS/Linux/WSL with Claude Code, Codex, Copilot CLI or `agy` is the
+tested combination; native Windows is 🧪 **Experimental** - please
+[open an issue](https://github.com/thesahibnanda-max/relay/issues/new) if something looks off there.
 
 ## Install
 

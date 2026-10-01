@@ -24,7 +24,10 @@ type Backend interface {
 	Call(ctx context.Context, op string, args json.RawMessage) (result json.RawMessage, pending int, err error)
 }
 
-var supportedVersions = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
+// supportedVersions are the protocol revisions this server speaks, newest
+// first. agy 1.2.12 asks for 2025-11-25 (confirmed live); the tools surface
+// used here is identical across all of them.
+var supportedVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
 
 type rpcMessage struct {
 	JSONRPC string          `json:"jsonrpc"`
@@ -51,6 +54,12 @@ type Server struct {
 	Backend Backend
 	// Instructions is shown to the model by clients that surface server instructions.
 	Instructions string
+	// Disabled makes the server a valid MCP server that offers no tools. It
+	// is what a tool gets when it spawned `relay mcp` without being started by
+	// relay itself (agy's MCP registration is user-global, so every agy
+	// process spawns it): an unrelated session sees nothing, instead of a
+	// broken server or another agent's identity.
+	Disabled bool
 
 	wmu sync.Mutex
 	w   io.Writer
@@ -129,13 +138,17 @@ func (s *Server) handle(ctx context.Context, m rpcMessage) {
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": "relay", "version": s.Version},
 		}
-		if s.Instructions != "" {
+		if s.Instructions != "" && !s.Disabled {
 			res["instructions"] = s.Instructions
 		}
 		s.reply(m.ID, res, nil)
 	case "ping":
 		s.reply(m.ID, map[string]any{}, nil)
 	case "tools/list":
+		if s.Disabled {
+			s.reply(m.ID, map[string]any{"tools": []Tool{}}, nil)
+			return
+		}
 		s.reply(m.ID, map[string]any{"tools": Tools()}, nil)
 	case "tools/call":
 		s.callTool(ctx, m)
@@ -173,6 +186,10 @@ func (s *Server) callTool(ctx context.Context, m rpcMessage) {
 	}
 	if json.Unmarshal(m.Params, &p) != nil {
 		s.reply(m.ID, nil, &rpcError{Code: -32602, Message: "invalid params"})
+		return
+	}
+	if s.Disabled {
+		s.reply(m.ID, textResult("relay tools are not available here: this session was not started by relay", true), nil)
 		return
 	}
 	var tool *Tool

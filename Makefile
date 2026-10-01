@@ -49,6 +49,8 @@ fuzz:            ## run every fuzz target briefly (FUZZTIME=30s to lengthen)
 	$(GO) test ./internal/transcript -run XXX -fuzz '^FuzzCodexParser$$'    -fuzztime $(FUZZTIME)
 	$(GO) test ./internal/redact    -run XXX -fuzz '^FuzzRedact$$'          -fuzztime $(FUZZTIME)
 	$(GO) test ./internal/mcp       -run XXX -fuzz '^FuzzServe$$'           -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/transcript -run XXX -fuzz '^FuzzAgyReaders$$'     -fuzztime $(FUZZTIME)
+	$(GO) test ./internal/bus       -run XXX -fuzz '^FuzzComposeHasOneHeader$$' -fuzztime $(FUZZTIME)
 
 cross:           ## build for every supported platform into ./dist
 	@mkdir -p dist

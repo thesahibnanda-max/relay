@@ -11,8 +11,8 @@ and test it, and what a pull request needs before it can be merged.
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the "zero footprint" section of
   [README.md](README.md)) that a change needs to respect, and it's much cheaper to align on
   direction before writing code than after.
-* **Antigravity CLI (`agy`) and native Windows support are marked 🧪 Experimental** (see
-  [NOTICE.md](NOTICE.md)). Reports and fixes for either are especially welcome.
+* **Native Windows support is marked 🧪 Experimental** (see [NOTICE.md](NOTICE.md)). Reports and
+  fixes for it are especially welcome.
 
 ## Development setup
 
@@ -33,6 +33,22 @@ make fuzz         # every fuzz target, briefly
 make cross        # cross-compile every supported platform into ./dist
 make fmt          # gofmt -w .
 ```
+
+### Live tests against the real tools
+
+CI drives fakes (`testdata/fakeagent`, `testdata/fakeagy`). Changes to how Relay reads a tool's screen,
+transcript or database, or types into it, also need a run against the real tool, which spends model
+quota. For `agy`, with an authenticated `agy` on your `PATH` (the tests trust their working directory,
+`RELAY_AGY_CWD`, default `~/.relay-agy-lab/live`, for their own duration):
+
+```sh
+go test -tags e2e_real -run RealAgy -v -timeout 60m -count=1 ./internal/cli
+```
+
+It uses your real `~/.gemini` (with an isolated `RELAY_HOME`), fails if agy's config files are not left
+byte-identical, and restores them either way. `RELAY_AGY_DIR=/dir` runs a specific agy version found
+there (a copy of its binary named `agy`). Real Claude/Codex/Copilot tests live in `internal/agent`
+(`-tags e2e_real -run Real`).
 
 ### Website (`ui/`)
 

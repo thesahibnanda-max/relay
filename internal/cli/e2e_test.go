@@ -60,17 +60,18 @@ func buildBinaries(t *testing.T) string {
 				return
 			}
 		}
-		// agy's own `mcp add`/`mcp remove` subcommands, used only by the gc/
-		// doctor-level tests below - fakeagy has no interactive session mode,
-		// so it does not stand in for `relay agy ...` itself (see fakeagy's
-		// own doc comment).
+		// fakeagy stands in for agy: its MCP subcommands and its interactive
+		// session (see its own doc comment).
 		if err := os.Symlink(filepath.Join(binDir, binName("fakeagy")), filepath.Join(binDir, binName("agy"))); err != nil {
 			buildErr = err
 			return
 		}
 	})
 	if buildErr != nil {
-		t.Skip("cannot build binaries:", buildErr)
+		if _, err := exec.LookPath("go"); err != nil {
+			t.Skip("cannot build binaries without go on PATH:", buildErr)
+		}
+		t.Fatal("cannot build binaries:", buildErr) // a broken build must never pass as a skip
 	}
 	return binDir
 }
@@ -104,7 +105,13 @@ type world struct {
 	relay string // RELAY_HOME
 	bin   string
 	env   []string
+	// permissionAnswer answers relay agy's offer to allow relay's tools in
+	// agy's settings (default "n").
+	permissionAnswer string
 }
+
+// permissionQuestion starts relay agy's launch offer (agy.PermissionQuestion).
+const permissionQuestion = "relay: agy asks before every relay tool call."
 
 func newWorld(t *testing.T) *world {
 	t.Helper()
@@ -127,8 +134,7 @@ func newWorld(t *testing.T) *world {
 		os.WriteFile(full, []byte(content), 0o644)
 	}
 	w.env = append(os.Environ(),
-		"HOME="+w.home, "CODEX_HOME="+filepath.Join(w.home, ".codex"), "COPILOT_HOME="+filepath.Join(w.home, ".copilot"),
-		"GEMINI_HOME="+filepath.Join(w.home, ".gemini"),
+		"HOME="+w.home, "USERPROFILE="+w.home, "CODEX_HOME="+filepath.Join(w.home, ".codex"), "COPILOT_HOME="+filepath.Join(w.home, ".copilot"),
 		"RELAY_HOME="+w.relay, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"RELAY_ACTIVE=", // never inherit the nesting marker from an outer relay
 	)
@@ -172,6 +178,25 @@ type relayProc struct {
 	done    chan struct{}
 }
 
+// events reads the fake tool's event log (fakeagy's "ev" lines).
+func (a *relayProc) events(ev string) []map[string]string {
+	f, err := os.Open(a.logPath)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var out []map[string]string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(nil, 1<<20)
+	for sc.Scan() {
+		var m map[string]string
+		if json.Unmarshal(sc.Bytes(), &m) == nil && m["ev"] == ev {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 // sharedSessionArgs reports whether args requests any shared session
 // (--session=NEW, NEW_LOCAL, a bare id, or a global token) - every one of
 // them makes relay pause after printing the "others join with" banner,
@@ -204,7 +229,7 @@ func (w *world) startWithAck(tool string, ack bool, args ...string) *relayProc {
 	w.t.Helper()
 	a := &relayProc{t: w.t, logPath: filepath.Join(w.t.TempDir(), tool+".jsonl"), done: make(chan struct{})}
 	a.cmd = exec.Command(filepath.Join(w.bin, binName("relay")), append([]string{tool}, args...)...)
-	a.cmd.Env = append(append([]string(nil), w.env...), "FAKE_LOG="+a.logPath, "FAKE_BUSY_MS=300")
+	a.cmd.Env = append(append([]string(nil), w.env...), "FAKE_LOG="+a.logPath, "FAKEAGY_LOG="+a.logPath, "FAKE_BUSY_MS=300")
 	a.cmd.Dir = w.t.TempDir()
 	var err error
 	a.pty, err = pty.StartWithSize(a.cmd, &pty.Winsize{Rows: 30, Cols: 100})
@@ -221,12 +246,21 @@ func (w *world) startWithAck(tool string, ack bool, args ...string) *relayProc {
 			w.t.Fatalf("acknowledging the session banner: %v", err)
 		}
 	}
+	answer := w.permissionAnswer // agy's launch offer to allow relay's tools: "no" unless a test says
+	if answer == "" {
+		answer = "n"
+	}
+	asked := false
 	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, err := a.pty.Read(buf)
 			a.mu.Lock()
 			a.out.Write(buf[:n])
+			if !asked && tool == "agy" && strings.Contains(a.out.String(), permissionQuestion) {
+				asked = true
+				a.pty.Write([]byte(answer + "\n"))
+			}
 			a.mu.Unlock()
 			if err != nil {
 				close(a.done)
@@ -235,7 +269,18 @@ func (w *world) startWithAck(tool string, ack bool, args ...string) *relayProc {
 		}
 	}()
 	w.t.Cleanup(func() {
-		a.pty.Write([]byte("\x03\x03"))
+		if tool == "agy" {
+			// agy ends on a second Ctrl+D (Ctrl+C only clears its input), and
+			// its fake reports any write that failed.
+			a.pty.Write([]byte{0x04})
+			time.Sleep(150 * time.Millisecond)
+			a.pty.Write([]byte{0x04})
+			if ev := a.events("db_error"); len(ev) > 0 {
+				w.t.Errorf("fake agy database errors: %v", ev)
+			}
+		} else {
+			a.pty.Write([]byte("\x03\x03"))
+		}
 		select {
 		case <-a.done:
 		case <-time.After(3 * time.Second):

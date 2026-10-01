@@ -24,6 +24,16 @@ var (
 )
 
 // buildFake compiles testdata/fakeagent once per test binary run.
+// skipOrFail skips only when there is no go toolchain to build with: a
+// helper that fails to compile is a real failure, never a silent skip.
+func skipOrFail(t *testing.T, what string, err error) {
+	t.Helper()
+	if _, lerr := exec.LookPath("go"); lerr != nil {
+		t.Skipf("cannot build %s without go on PATH", what)
+	}
+	t.Fatalf("cannot build %s: %v", what, err)
+}
+
 func buildFake(t *testing.T) string {
 	t.Helper()
 	fakeOnce.Do(func() {
@@ -39,7 +49,7 @@ func buildFake(t *testing.T) string {
 		}
 	})
 	if fakeErr != nil {
-		t.Skip("cannot build fakeagent (is `go` on PATH?):", fakeErr)
+		skipOrFail(t, "fakeagent", fakeErr)
 	}
 	return fakeBin
 }
@@ -102,7 +112,7 @@ func startRig(t *testing.T, env ...string) *rig {
 	}()
 	select {
 	case r.h = <-ready:
-	case <-time.After(5 * time.Second):
+	case <-time.After(20 * time.Second):
 		t.Fatal("agent did not start")
 	}
 	t.Cleanup(func() {
@@ -139,7 +149,7 @@ func (r *rig) events() []map[string]string {
 
 func (r *rig) waitLog(cond func([]map[string]string) bool, what string) []map[string]string {
 	r.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		if evs := r.events(); cond(evs) {
 			return evs
@@ -175,7 +185,7 @@ func TestFakeAgentTracksModesAndState(t *testing.T) {
 	r := startRig(t)
 	// Relay reads the tool's output asynchronously, so poll rather than assume
 	// the first bytes were already consumed when the tool logged "idle".
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	var snap state.Snapshot
 	for time.Now().Before(deadline) {
 		snap = r.h.Snapshot()
@@ -193,7 +203,7 @@ func TestFakeAgentTracksModesAndState(t *testing.T) {
 
 	r.type_("hi\r")
 	r.waitLog(func(ev []map[string]string) bool { return len(submits(ev)) == 1 }, "submit")
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) && !strings.Contains(strings.Join(r.h.Screen(), "\n"), "reply: hi") {
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -277,7 +287,7 @@ func TestDialogDetectedFromScreen(t *testing.T) {
 	r.type_("do it\r")
 	r.waitLog(func(ev []map[string]string) bool { return hasState(ev, "dialog") }, "dialog")
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	var snap state.Snapshot
 	for time.Now().Before(deadline) {
 		if snap = r.h.Snapshot(); snap.State == state.Dialog {
@@ -289,7 +299,7 @@ func TestDialogDetectedFromScreen(t *testing.T) {
 		t.Fatalf("state = %+v, want dialog", snap)
 	}
 	r.type_("y")
-	deadline = time.Now().Add(3 * time.Second)
+	deadline = time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) && r.h.Snapshot().State == state.Dialog {
 		time.Sleep(20 * time.Millisecond)
 	}

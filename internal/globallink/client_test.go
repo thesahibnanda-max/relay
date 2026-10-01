@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -29,6 +30,7 @@ type fakeServer struct {
 	tokenSeq       int
 	pushOnHello    []messageView // pushed as deliver frames right after Welcome
 	pushNoticeHeld []int         // pushed as notice frames right after Welcome
+	agentID        string        // sent instead of a fresh ULID, if set
 }
 
 func (f *fakeServer) handler() http.Handler {
@@ -58,7 +60,10 @@ func (f *fakeServer) serve(w http.ResponseWriter, r *http.Request) {
 
 	f.mu.Lock()
 	f.agentSeq++
-	agentID := "agent-" + strconv.Itoa(f.agentSeq)
+	agentID := fmt.Sprintf("01ARZ3NDEKTSV4RRFFQ69G5F%02d", f.agentSeq)
+	if f.agentID != "" {
+		agentID = f.agentID
+	}
 	sessionID := "01TESTSESSIONULID0000000A"
 	if h.Session != "" && h.Session != "NEW" {
 		sessionID = h.Session
@@ -366,12 +371,12 @@ func TestNotice_CallsOnNotice(t *testing.T) {
 	}
 }
 
-// TestDeliver_CallsOnDeliverAndAcksEveryTime proves the transport layer
-// never assumes at-most-once delivery: the same message id can legitimately
-// arrive twice (a real reconnect-triggered replay), OnDeliver fires both
-// times (dedup is internal/bus's job, not this package's), and an ack is
-// sent back both times too - idempotent by design.
-func TestDeliver_CallsOnDeliverAndAcksEveryTime(t *testing.T) {
+// TestDeliver_CallsOnDeliverEveryTimeAndNeverAcksOnReceipt: the same
+// message id can legitimately arrive twice (a reconnect-triggered replay) and
+// OnDeliver fires both times (dedup is internal/bus's job). Receiving is not
+// acknowledging: an ack on receipt made the server stop replaying messages
+// relay had not typed yet, losing them if the process then exited.
+func TestDeliver_CallsOnDeliverEveryTimeAndNeverAcksOnReceipt(t *testing.T) {
 	fs := &fakeServer{pushOnHello: []messageView{
 		{ID: "dup-1", From: "bob", To: "alice", Kind: "task", Body: "hello"},
 		{ID: "dup-1", From: "bob", To: "alice", Kind: "task", Body: "hello"},
@@ -392,27 +397,18 @@ func TestDeliver_CallsOnDeliverAndAcksEveryTime(t *testing.T) {
 			}
 		},
 	})
-
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("did not receive both deliver frames")
 	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		fs.mu.Lock()
-		n := len(fs.acksSeen)
-		fs.mu.Unlock()
-		if n >= 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("expected 2 acks, got %d", n)
-		}
-		time.Sleep(20 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
+	fs.mu.Lock()
+	acks := len(fs.acksSeen)
+	fs.mu.Unlock()
+	if acks != 0 {
+		t.Fatalf("%d acks sent on mere receipt", acks)
 	}
-
 	mu.Lock()
 	defer mu.Unlock()
 	if len(delivered) != 2 || delivered[0] != "dup-1" || delivered[1] != "dup-1" {
@@ -438,5 +434,19 @@ func TestDialURL_NoForceTLSNoEnvVarStaysPlainWS(t *testing.T) {
 	c := &Client{opt: Options{HostPort: "relay.example.com:5555"}}
 	if got, want := c.dialURL(), "ws://relay.example.com:5555"+wsPath; got != want {
 		t.Errorf("dialURL() = %q, want %q", got, want)
+	}
+}
+
+// The agent id a server assigns names directories and files on this machine
+// (run dir, agy lease): anything but a ULID is refused, never joined into a
+// path.
+func TestConnect_RefusesAnAgentIDThatIsNotAULID(t *testing.T) {
+	for _, bad := range []string{"../../../../.gemini/antigravity-cli/settings", "agent-1"} {
+		hostPort := startFakeServer(t, &fakeServer{agentID: bad})
+		c, err := Connect(context.Background(), Options{HostPort: hostPort, Hello: proto.Hello{Session: "NEW", Name: "alice"}})
+		if err == nil {
+			c.Close(0)
+			t.Fatalf("agent id %q was accepted", bad)
+		}
 	}
 }

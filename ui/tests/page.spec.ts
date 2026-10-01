@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 
 const REPO = 'https://github.com/thesahibnanda-max/relay';
 
@@ -63,6 +63,14 @@ test('copy button copies the exact command', async ({ page, context, baseURL, br
   }
   await expect(btn.locator('.copy-label')).toHaveText('Copy', { timeout: 5000 });
 });
+
+// scrollTo brings el into view at once. Not locator.scrollIntoViewIfNeeded:
+// that waits for el to stop moving, which on mobile WebKit it may not for a
+// while (animations nearby), and a smooth scroll still running would make
+// iOS drop the next tap.
+async function scrollTo(el: Locator) {
+  await el.evaluate((e) => e.scrollIntoView({ block: 'center', behavior: 'instant' }));
+}
 
 // The theme control is a System / Light / Dark radio group. On small screens it
 // lives in the menu, so open that first when the menu button is showing.
@@ -154,7 +162,7 @@ test.describe('the four supported CLIs', () => {
       }
       // every symbol the page references exists in the sprite
       for (const a of agents) await expect(page.locator(`symbol${a.symbol}`)).toHaveCount(1);
-      await expect(page.locator('#agents .a-agy .tag-experimental')).toContainText('Experimental');
+      await expect(page.locator('#agents .tag-experimental')).toHaveCount(0); // no agent is experimental
     });
   }
 
@@ -504,14 +512,14 @@ test.describe('demo screenshot', () => {
     await page.goto('/');
     await page.locator('#demo-tab-local').click();
     const section = page.locator('#demo-local');
-    await section.scrollIntoViewIfNeeded();
+    await scrollTo(section);
     await expect.poll(() => page.locator('#demo-local .shot-dark img').evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
     expect(loaded.filter((f) => f.startsWith('lightdemo'))).toEqual([]);
     await setTheme(page, 'light');
     await expect(page.locator('#demo-local .shot-light')).toBeVisible();
     await expect(page.locator('#demo-local .shot-dark')).toBeHidden();
     const light = page.locator('#demo-local .shot-light img');
-    await light.scrollIntoViewIfNeeded();
+    await scrollTo(light);
     await expect.poll(() => light.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
     expect(await light.evaluate((el: HTMLImageElement) => el.currentSrc)).toMatch(/lightdemo[^/]*\.webp$/);
     await setTheme(page, 'dark');
@@ -625,7 +633,7 @@ test.describe('cross-machine image', () => {
   test('actually renders, sharp, without stretching', async ({ page }) => {
     await page.goto('/');
     const img = page.locator('#together .shot-frame:visible img');
-    await img.scrollIntoViewIfNeeded();
+    await scrollTo(img);
     await expect.poll(() => img.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth > 0)).toBe(true);
     const m = await img.evaluate((el: HTMLImageElement) => ({ nw: el.naturalWidth, nh: el.naturalHeight, w: el.clientWidth, h: el.clientHeight, src: el.currentSrc }));
     expect(m.src).toMatch(/\.webp$/);

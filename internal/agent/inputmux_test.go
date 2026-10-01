@@ -310,3 +310,87 @@ func TestRawWaitsForSafeBoundary(t *testing.T) {
 		t.Fatalf("raw write at a boundary: %v %q", err, buf.String())
 	}
 }
+
+// agy switches on kitty's keyboard protocol (CSI >1u) and xterm's
+// modifyOtherKeys (CSI >4;2m) - confirmed live - so on terminals that honour
+// them the user's keys arrive encoded. They must mean the same for the draft.
+func TestDraftTrackingWithExtendedKeyEncodings(t *testing.T) {
+	var buf bytes.Buffer
+	m := NewInputMux(&buf)
+	now := time.Now()
+	m.now = func() time.Time { return now }
+	step := func(keys string, want bool, what string) {
+		t.Helper()
+		m.WriteUser([]byte(keys))
+		if got := m.DraftDirty(); got != want {
+			t.Fatalf("%s: DraftDirty=%v, want %v", what, got, want)
+		}
+	}
+	step("hi", true, "typing")
+	step("\x1b[99;5u", false, "kitty Ctrl+C clears")
+	step("\x1b[27;2;65~", true, "modifyOtherKeys Shift+A is text")
+	step("\x1b[27;5;99~", false, "modifyOtherKeys Ctrl+C clears")
+	step("\x1b[97;1u", true, "kitty a is text")
+	step("\x1b[13u", false, "kitty Enter submits")
+	step("\x1b[57399u", false, "kitty private-use function key is not text")
+	step("\x1b[97;1:3u", false, "a key release is not a key")
+	step("\x1b[13;2u", false, "Shift+Enter is not a submit")
+	step("x\x1b[13;2u", true, "Shift+Enter (a newline) keeps the draft")
+	step("\x1b[?u", true, "a mode query is not a key")
+}
+
+func TestChordRecognisesEncodedPrefix(t *testing.T) {
+	for _, prefix := range []string{"\x1b[92;5u", "\x1b[27;5;92~"} {
+		var buf bytes.Buffer
+		m := NewInputMux(&buf)
+		keys := make(chan byte, 4)
+		m.SetChord(0x1c, func(k byte) { keys <- k })
+		m.WriteUser([]byte("x" + prefix + "a"))
+		if got := buf.String(); got != "x" {
+			t.Fatalf("%q: forwarded %q", prefix, got)
+		}
+		select {
+		case k := <-keys:
+			if k != 'a' {
+				t.Fatalf("%q: key %q", prefix, k)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("%q: chord not recognised", prefix)
+		}
+		buf.Reset()
+		m.WriteUser([]byte(prefix + prefix)) // doubled: sent through once
+		if got := buf.String(); got != prefix {
+			t.Fatalf("%q doubled: forwarded %q", prefix, got)
+		}
+		buf.Reset()
+		m.WriteUser([]byte("\x1b[93;5u")) // Ctrl+] is not the prefix
+		if got := buf.String(); got != "\x1b[93;5u" {
+			t.Fatalf("another key was swallowed: %q", got)
+		}
+	}
+}
+
+func TestEncodedKey(t *testing.T) {
+	cases := []struct {
+		params     string
+		final      byte
+		code, mods int
+		ok         bool
+	}{
+		{"99;5", 'u', 99, 5, true},
+		{"13", 'u', 13, 1, true},
+		{"97:65;2", 'u', 97, 2, true},
+		{"97;1:3", 'u', 0, 0, false},
+		{"?", 'u', 0, 0, false},
+		{">1", 'u', 0, 0, false},
+		{"27;5;99", '~', 99, 5, true},
+		{"2", '~', 0, 0, false},
+		{"x;y", 'u', 0, 0, false},
+	}
+	for _, c := range cases {
+		code, mods, ok := encodedKey([]byte(c.params), c.final)
+		if ok != c.ok || (ok && (code != c.code || mods != c.mods)) {
+			t.Errorf("%q%c = %d,%d,%v want %d,%d,%v", c.params, c.final, code, mods, ok, c.code, c.mods, c.ok)
+		}
+	}
+}

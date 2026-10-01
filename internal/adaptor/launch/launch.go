@@ -17,6 +17,7 @@ import (
 
 // Spec describes the agent being launched.
 type Spec struct {
+	AgentID   string
 	AgentName string
 	Session   string
 	RunDir    string // private, ephemeral, owned by this launch
@@ -51,7 +52,29 @@ type Plan struct {
 	Hooks             bool     // Relay's hooks are registered for this launch
 	Passthrough       bool     // not an interactive session: the tool runs exactly as typed
 	Notes             []string // why anything was skipped or degraded
+	// Env is extra KEY=VALUE entries for this launch's child environment.
+	Env []string
+	// ToolLog is a diagnostic log the tool writes for this launch, which the
+	// agent follows for authoritative state (agy: which conversation is live,
+	// which prompts were accepted).
+	ToolLog string
+	// ToolLogFrom is where in ToolLog this launch's lines start (a user's
+	// own log file may hold earlier runs).
+	ToolLogFrom int64
+	// VerifySubmit: the tool reports accepted prompts (in ToolLog), so the
+	// agent checks every injected message was taken and resubmits if not.
+	VerifySubmit bool
+	// StartupGate: nothing is typed until the tool's own records say its
+	// first turn (the briefing, delivered by flag) has finished - its screen
+	// looks ready long before it accepts input into a conversation.
+	StartupGate bool
 }
+
+// BriefingTurnTail ends a briefing typed as a conversation turn of its own
+// (not a system prompt): without saying there is nothing to do yet, the model
+// goes exploring (agy, confirmed live: shell commands behind permission
+// prompts, before any real task).
+const BriefingTurnTail = "This message is only your briefing and there is no task yet: reply with one short line and wait for work to arrive."
 
 // Passthrough is a Plan that runs the tool exactly as the user asked.
 func Passthrough(spec Spec, why string) Plan {

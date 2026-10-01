@@ -51,6 +51,62 @@ type Session struct {
 
 	held atomic.Int32 // messages held for a human on this agent
 	nat  native
+
+	// verifySubmit: the tool reports every prompt it accepts (agy's log), so
+	// an injection it did not take can be caught and resubmitted.
+	verifySubmit atomic.Bool
+	acceptMu     sync.Mutex
+	acceptedAt   time.Time
+
+	gateClosed atomic.Bool // see SetStartupGate
+	gateTimer  *time.Timer
+
+	warnMu   sync.Mutex
+	warnings []string
+}
+
+// startupGateMax bounds the startup gate: if the tool's records never say
+// its first turn ended, delivery starts anyway (falling back to the screen).
+const startupGateMax = 3 * time.Minute
+
+// SetStartupGate holds delivery until the tool's own records report its
+// first turn finished (agy: the -i briefing), or startupGateMax passes.
+func (s *Session) SetStartupGate(on bool) {
+	s.gateClosed.Store(on)
+	if on {
+		s.gateTimer = time.AfterFunc(startupGateMax, func() {
+			if s.gateClosed.Load() {
+				s.warn(s.tool + " never reported its first turn finished; relay started delivering messages after " + startupGateMax.String() + " anyway")
+			}
+			s.openGate()
+		})
+	}
+}
+
+// warn records something the user should know; it is printed once the tool
+// has exited (a full-screen tool leaves nowhere safe to print before).
+func (s *Session) warn(msg string) {
+	s.warnMu.Lock()
+	defer s.warnMu.Unlock()
+	for _, w := range s.warnings {
+		if w == msg {
+			return
+		}
+	}
+	s.warnings = append(s.warnings, msg)
+}
+
+// Warnings returns what warn recorded.
+func (s *Session) Warnings() []string {
+	s.warnMu.Lock()
+	defer s.warnMu.Unlock()
+	return append([]string(nil), s.warnings...)
+}
+
+func (s *Session) openGate() {
+	if s.gateClosed.CompareAndSwap(true, false) {
+		s.bus.Poke()
+	}
 }
 
 // New creates the session before the daemon connection exists (its Deliver and
@@ -105,6 +161,9 @@ func (s *Session) Attach(h *agent.Handle, approveInbound bool) {
 
 // Stop ends scheduling; queued messages remain in the daemon.
 func (s *Session) Stop() {
+	if s.gateTimer != nil {
+		s.gateTimer.Stop()
+	}
 	if s.cancel != nil {
 		s.cancel()
 	}
@@ -168,7 +227,11 @@ func (e *sessionEnv) handle() *agent.Handle { return e.s.handle.Load() }
 
 func (e *sessionEnv) Snapshot() state.Snapshot {
 	if h := e.handle(); h != nil {
-		return h.Snapshot()
+		snap := h.Snapshot()
+		if e.s.gateClosed.Load() && snap.State != state.Dialog {
+			snap.State = state.Starting // the startup gate: not ready for input yet
+		}
+		return snap
 	}
 	return state.Snapshot{State: state.Starting}
 }
@@ -192,7 +255,13 @@ func (e *sessionEnv) Inject(ctx context.Context, text string) error {
 	if h == nil {
 		return errors.New("tool not running")
 	}
-	return h.Inject(ctx, text, agent.InjectOptions{Paste: true, Submit: true})
+	if err := h.Inject(ctx, text, agent.InjectOptions{Paste: true, Submit: true}); err != nil {
+		return err
+	}
+	if e.s.verifySubmit.Load() {
+		go e.s.confirmSubmit(h, text, time.Now())
+	}
+	return nil
 }
 
 func (e *sessionEnv) Interrupt() error {
@@ -227,6 +296,9 @@ func (e *sessionEnv) Report(ctx context.Context, id, st string) error {
 }
 
 // ---- control socket (MCP shim) ------------------------------------------------------
+
+// maxWaitS is the longest single relay_wait (the daemon's own cap).
+const maxWaitS = 45
 
 // tool-facing argument shapes (what the model sends)
 type inboxArgs struct {
@@ -320,8 +392,11 @@ func (s *Session) HandleCtl(ctx context.Context, op string, args json.RawMessage
 		if json.Unmarshal(args, &a) != nil || a.MsgID == "" {
 			return nil, pending, &proto.Error{Code: proto.CodeBadRequest, Message: "msg_id is required"}
 		}
-		if a.TimeoutS <= 0 {
+		if a.TimeoutS <= 0 || a.TimeoutS != a.TimeoutS { // also NaN
 			a.TimeoutS = 20
+		}
+		if a.TimeoutS > maxWaitS {
+			a.TimeoutS = maxWaitS // the router caps it too; this keeps the Duration below from overflowing
 		}
 		var r proto.WaitResult
 		wctx, cancel := context.WithTimeout(ctx, time.Duration(a.TimeoutS*float64(time.Second))+10*time.Second)

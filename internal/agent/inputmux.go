@@ -80,8 +80,23 @@ func (m *InputMux) WriteUser(p []byte) (int, error) {
 	now := m.now()
 	out := make([]byte, 0, len(p))
 	var fire []byte
-	for _, b := range p {
+	for i := 0; i < len(p); i++ {
+		b := p[i]
 		if m.chord != nil {
+			// The prefix key as an extended keyboard encoding (agy switches
+			// those on): one whole sequence, taken at a key boundary.
+			if n := encodedChord(p[i:], m.chord.prefix); n > 0 && m.p.atGround() {
+				if m.chordPending && now.Sub(m.chordAt) <= chordTimeout {
+					m.chordPending = false
+					for _, c := range p[i : i+n] {
+						out = m.forward(out, c, now) // prefix twice: send it through
+					}
+				} else {
+					m.chordPending, m.chordAt = true, now
+				}
+				i += n - 1
+				continue
+			}
 			if m.chordPending {
 				m.chordPending = false
 				if now.Sub(m.chordAt) <= chordTimeout {
@@ -122,6 +137,30 @@ func (m *InputMux) WriteUser(p []byte) (int, error) {
 		return 0, err
 	}
 	return len(p), nil
+}
+
+// encodedChord reports the length of the sequence at the start of p if it is
+// Ctrl+<prefix's letter> in kitty (CSI code;5u) or modifyOtherKeys
+// (CSI 27;5;code~) encoding, else 0. prefix is a C0 control (Ctrl+\ = 0x1c).
+func encodedChord(p []byte, prefix byte) int {
+	if len(p) < 4 || p[0] != 0x1b || p[1] != '[' || prefix >= 0x20 {
+		return 0
+	}
+	end := 2
+	for end < len(p) && (p[end] < 0x40 || p[end] > 0x7e) {
+		end++
+	}
+	if end >= len(p) {
+		return 0
+	}
+	code, mods, ok := encodedKey(p[2:end], p[end])
+	if !ok || (mods-1)&4 == 0 || (mods-1)&^4 != 0 {
+		return 0
+	}
+	if byte(code)&0x1f != prefix || code < 0x40 || code > 0x7f {
+		return 0
+	}
+	return end + 1
 }
 
 // forward appends a byte that will reach the tool, tracking what it means for the draft.

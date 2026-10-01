@@ -1,6 +1,10 @@
 package agent
 
-import "time"
+import (
+	"strconv"
+	"strings"
+	"time"
+)
 
 // escTimeout is how long a lone ESC must sit unfollowed before we treat it as
 // the Escape key rather than the start of a sequence.
@@ -128,6 +132,9 @@ func (p *inputParser) feed(b byte) keyEvent {
 				p.st, ev = psGround, evHistory
 			default:
 				p.st = psGround
+				if code, mods, ok := encodedKey(p.csiParams, b); ok {
+					ev = keyMeaning(code, mods)
+				}
 			}
 		case b == 0x1b:
 			p.st = psEsc // aborted sequence
@@ -156,6 +163,62 @@ func (p *inputParser) feed(b byte) keyEvent {
 		}
 	}
 	return ev
+}
+
+// encodedKey decodes a key sent in one of the extended keyboard encodings
+// agy switches on (confirmed live: kitty's CSI >1u "disambiguate" and
+// xterm's modifyOtherKeys CSI >4;2m): CSI code[:alt][;mods[:event][;text]] u
+// and CSI 27;mods;code ~. mods is 1 + a bitmask (shift 1, alt 2, ctrl 4);
+// a kitty key-release event (event 3) is reported as not a key.
+func encodedKey(params []byte, final byte) (code, mods int, ok bool) {
+	fields := strings.Split(string(params), ";")
+	num := func(s string) (int, bool) {
+		s, _, _ = strings.Cut(s, ":")
+		n, err := strconv.Atoi(s)
+		return n, err == nil
+	}
+	mods = 1
+	switch final {
+	case 'u':
+		if len(fields) == 0 || strings.HasPrefix(fields[0], "?") || strings.HasPrefix(fields[0], ">") ||
+			strings.HasPrefix(fields[0], "<") || strings.HasPrefix(fields[0], "=") {
+			return 0, 0, false // a mode query/push/pop, not a key
+		}
+		if code, ok = num(fields[0]); !ok {
+			return 0, 0, false
+		}
+		if len(fields) > 1 && fields[1] != "" {
+			if mods, ok = num(fields[1]); !ok {
+				return 0, 0, false
+			}
+			if _, ev, found := strings.Cut(fields[1], ":"); found && ev == "3" {
+				return 0, 0, false
+			}
+		}
+		return code, mods, true
+	case '~':
+		if len(fields) == 3 && fields[0] == "27" {
+			m, ok1 := num(fields[1])
+			c, ok2 := num(fields[2])
+			return c, m, ok1 && ok2
+		}
+	}
+	return 0, 0, false
+}
+
+// keyMeaning is what an encoded key means for the draft.
+func keyMeaning(code, mods int) keyEvent {
+	bits := mods - 1
+	ctrl, alt := bits&4 != 0, bits&2 != 0
+	switch {
+	case code == 13 && !ctrl && !alt && bits&1 == 0:
+		return evSubmit
+	case (code == 'c' || code == 'C') && ctrl:
+		return evCancel
+	case !ctrl && !alt && (code >= 0x20 && code < 0x7f || code >= 0xa0 && code < 0xe000):
+		return evText // kitty's private-use range (0xe000+) is function keys
+	}
+	return evNone
 }
 
 // safe reports whether injecting bytes now cannot corrupt what the user is

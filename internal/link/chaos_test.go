@@ -47,7 +47,10 @@ func TestChaosDaemonRestartsDuringDelivery(t *testing.T) {
 		t.Skip("chaos test")
 	}
 	d := newTestDaemon(t)
-	d.tune = func(o *daemon.Options) { o.PairLimit, o.SenderLimit = 1<<20, 1<<20 }
+	// Every rate limit is lifted, the per-connection RPC one included: on a
+	// fast machine all sends can land before the first restart resets the
+	// connection, and 300 sends exceed the default 200 RPCs per 10 s (issue #54).
+	d.tune = func(o *daemon.Options) { o.PairLimit, o.SenderLimit, o.RPCLimit = 1<<20, 1<<20, 1<<20 }
 	d.stop()
 	d.start()
 
@@ -90,6 +93,9 @@ func TestChaosDaemonRestartsDuringDelivery(t *testing.T) {
 		if err := alice.Call(bg, proto.OpSend, proto.SendArgs{To: "bob", Body: fmt.Sprintf("payload-%04d", i)}, &res); err != nil {
 			t.Fatalf("send %d failed for good: %v", i, err)
 		}
+		// Paced so the sends always span several restarts, however fast
+		// the machine: the chaos is the point of the test.
+		time.Sleep(3 * time.Millisecond)
 	}
 	close(stopChaos)
 	chaos.Wait()

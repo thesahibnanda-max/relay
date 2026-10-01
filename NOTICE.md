@@ -13,9 +13,10 @@ Be aware of the difference between "built and tested" and "should work".
 
 **The mature, most battle-tested combination is macOS, Linux or WSL with Claude Code, Codex or
 GitHub Copilot CLI** - that's where the great majority of real-world use and testing has happened.
-**Antigravity CLI (`agy`) support and native Windows support are both marked Experimental**: they
-work and are covered by CI, but they're new enough to have real rough edges still to find. If
-something looks wrong on either, please [open a GitHub issue](https://github.com/thesahibnanda-max/relay/issues/new) -
+**Antigravity CLI (`agy`)** is the newest of the four: it has been run end to end with the real,
+authenticated `agy` (1.2.14) on macOS, and CI covers it on every pull request. **Native Windows support
+is marked Experimental**: it works and is covered by CI, but it's new enough to have real rough edges
+still to find. If something looks wrong, please [open a GitHub issue](https://github.com/thesahibnanda-max/relay/issues/new) -
 real reports from real use are exactly what moves something from Experimental to proven.
 
 | Platform | Status |
@@ -29,11 +30,12 @@ Two more caveats:
 
 * **Tool versions.** Relay depends on how the tools behave: their hook formats, their log-file formats and
   what their screens look like. It was built and verified against **Claude Code 2.1.282**, **Codex 0.155.1**,
-  **GitHub Copilot CLI 1.0.88** and **Antigravity CLI (`agy`) 1.2.11**. If a tool changes in an update, parts
+  **GitHub Copilot CLI 1.0.88** and **Antigravity CLI (`agy`) 1.2.12 to 1.2.14** (for any other `agy`
+  version, `relay doctor` warns and `relay agy` says so when the session ends). If a tool changes in an update, parts
   of Relay may need adjusting - Copilot CLI in particular ships near-daily updates, and its per-session
   event log is explicitly undocumented and unstable upstream, so re-verify after upgrading it. `agy`'s own
-  conversation-database schema and MCP config format are likewise undocumented upstream, and `agy` support
-  overall is marked 🧪 Experimental, the newest of the four adaptors - see the note above.
+  conversation-database schema and MCP config format are likewise undocumented upstream: if a new `agy`
+  changes them, Relay falls back to reading `agy`'s screen and tells you so when the session ends.
 * **Claude's permission prompts.** They were never seen on screen during testing, because the test machine's
   Claude runs in "bypass permissions" mode. Relay has protection for them, but it was only tested against
   Codex's and Copilot's real prompts.
@@ -191,14 +193,26 @@ writes into its own single, global, permanent config file (`~/.gemini/config/mcp
 that mechanism anyway, because it is the only way to give an `agy` agent the same abilities as the others,
 but keeps it as close to "zero footprint" as that allows:
 
-* It registers a uniquely-named entry (never a fixed name, since `agy`'s config is shared by every `agy`
-  agent you have running at once) and removes it the moment that one agent exits.
-* If Relay is killed outright (`kill -9`, a crash, a power loss) before it can clean up, the leftover entry
-  is inert - it points at files Relay already deleted - and is removed automatically the next time you run
-  `relay agy ...` or `relay gc`. `relay doctor` also flags one if you run it first.
-* Every change is made under Relay's own lock, so it can never race or corrupt `agy`'s config even with
-  several `agy` agents starting or stopping at once (a real bug in `agy` itself otherwise: concurrent
-  `agy mcp add` calls with no lock of its own can silently lose one).
+* While at least one `relay agy` agent is running, the file has one entry named `relay`. When the last
+  one exits, Relay removes it and writes the file back exactly as it was, byte for byte (or deletes it
+  again, if it did not exist before). If you changed the file yourself in the meantime, your version is
+  kept.
+* The entry only works for an `agy` that Relay itself started: every other `agy` session on your
+  machine sees a server that offers no tools at all.
+* If Relay is killed outright (`kill -9`, a crash, a power loss) before it can clean up, the next
+  `relay agy ...` or `relay gc` finishes the cleanup. `relay doctor` tells you if one is pending.
+* Every change is made under a lock next to that file, so it can never race or corrupt `agy`'s config
+  even with several `agy` agents starting or stopping at once (a real bug in `agy` itself otherwise:
+  concurrent `agy mcp add` calls with no lock of its own can silently lose one).
+* `agy` keeps its own session log; Relay asks `agy` to write it into Relay's per-launch folder (it is
+  how Relay knows which conversation is live and that a message was really received) and moves it back
+  into `agy`'s own log folder when the session ends.
+
+`agy` asks before every MCP tool call, Relay's included. Until Relay's tools are allowed, every
+interactive `relay agy` launch offers to allow them from then on, and only a `y` makes Relay add
+`"mcp(relay/*)"` to `permissions.allow` in `~/.gemini/antigravity-cli/settings.json` (nothing else in
+that file changes). You can also choose *always allow ... (Persist to settings.json)* at agy's first
+prompt.
 
 ---
 
