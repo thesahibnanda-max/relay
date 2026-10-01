@@ -4,7 +4,6 @@ package cli
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -516,11 +515,21 @@ func TestAgyE2EDeliversWithoutAgysLog(t *testing.T) {
 	w := newWorld(t)
 	bob := w.startAgy("bob", "FAKEAGY_NO_LOG=1")
 	id := w.send("bob", "What is 6 times 7?")
+	answered := func() bool { // the text field only: timestamps hold digits too
+		for _, m := range bob.events("answer") {
+			if m["text"] == "42" {
+				return true
+			}
+		}
+		return false
+	}
 	deadline := time.Now().Add(agyLogWaitForTests)
-	for time.Now().Before(deadline) && !strings.Contains(fmt.Sprint(bob.events("answer")), "42") {
+	for time.Now().Before(deadline) && !answered() {
 		time.Sleep(200 * time.Millisecond)
 	}
-	bob.waitEvent("answer", "text", "42")
+	if !answered() {
+		t.Fatalf("not delivered within %v; output:\n%s", agyLogWaitForTests, bob.output())
+	}
 	w.waitState(id, "injected")
 	bob.quitAgy()
 	if !strings.Contains(bob.output(), "relay: warning: agy wrote nothing to the log relay reads") {
