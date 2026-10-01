@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -83,6 +84,16 @@ func (f liveFile) restore() {
 	}
 }
 
+// sameJSON reports whether the file still holds the same JSON value.
+func (f liveFile) sameJSON() bool {
+	data, err := os.ReadFile(f.path)
+	if err != nil || !f.exists {
+		return err != nil && !f.exists
+	}
+	var a, b any
+	return json.Unmarshal(f.data, &a) == nil && json.Unmarshal(data, &b) == nil && reflect.DeepEqual(a, b)
+}
+
 func (f liveFile) unchanged() bool {
 	data, err := os.ReadFile(f.path)
 	if !f.exists {
@@ -137,7 +148,7 @@ func newLive(t *testing.T) *live {
 		stop.Env = l.env // this test's RELAY_HOME: never the user's own daemon
 		_ = stop.Run()
 		cfgOK := cfg.unchanged()
-		if !allowed.unchanged() {
+		if !allowed.sameJSON() { // agy rewrites this file itself at every start (formatting only)
 			t.Errorf("relay changed agy's %s during the test", settings.path)
 		}
 		cfg.restore()
