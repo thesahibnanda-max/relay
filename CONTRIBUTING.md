@@ -11,8 +11,8 @@ and test it, and what a pull request needs before it can be merged.
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and the "zero footprint" section of
   [README.md](README.md)) that a change needs to respect, and it's much cheaper to align on
   direction before writing code than after.
-* **Antigravity CLI (`agy`) and native Windows support are marked 🧪 Experimental** (see
-  [NOTICE.md](NOTICE.md)). Reports and fixes for either are especially welcome.
+* **Native Windows support is marked 🧪 Experimental** (see [NOTICE.md](NOTICE.md)). Reports and
+  fixes for it are especially welcome.
 
 ## Development setup
 

@@ -35,7 +35,6 @@
   --accent: #a78bfa;
   --accent-strong: #8b5cf6;
   --warn: #f5a524;
-  --tag-warn: #f5a524;
   --btn-grad: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 45%, #5b21b6 100%);
   --btn-ink: #ffffff;
   --chip-bg: #f3efff;
@@ -78,7 +77,6 @@
     --accent: #7c3aed;
     --accent-strong: #6d28d9;
     --warn: #9a4a06;
-    --tag-warn: #7c3d00;
     --btn-grad: linear-gradient(135deg, #7c3aed 0%, #6d28d9 50%, #5b21b6 100%);
     --btn-ink: #ffffff;
     --chip-bg: #1b1233;
@@ -115,7 +113,6 @@
   --accent: #7c3aed;
   --accent-strong: #6d28d9;
   --warn: #9a4a06;
-  --tag-warn: #7c3d00;
   --btn-grad: linear-gradient(135deg, #7c3aed 0%, #6d28d9 50%, #5b21b6 100%);
   --btn-ink: #ffffff;
   --chip-bg: #1b1233;
@@ -427,7 +424,6 @@ code:not(pre code) {
 }
 .node-tile svg { width: 56%; height: 56%; }
 .n-copilot .node-tile svg, .a-copilot .agent-icon svg { color: var(--text); }
-.node-badge { position: absolute; right: -.4rem; top: -.45rem; font-size: .85rem; line-height: 1; }
 .node-label { font-size: clamp(.72rem, 3.1cqi, .88rem); font-weight: 650; color: var(--text); white-space: nowrap; }
 @media (prefers-reduced-motion: no-preference) {
   .node-tile { animation: bob 6s ease-in-out infinite; }
@@ -516,13 +512,6 @@ code:not(pre code) {
 .agent-card h3 { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
 .agent-card p { flex: 1; }
 .agent-card .code { margin-top: 1rem; }
-.tag-experimental {
-  display: inline-block; font-family: var(--font-mono); font-size: .66rem; font-weight: 700;
-  letter-spacing: .06em; text-transform: uppercase; padding: .22rem .52rem; border-radius: 999px;
-  color: var(--tag-warn); background: color-mix(in srgb, var(--warn) 14%, transparent);
-  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
-}
-
 .nb, code.nb { white-space: nowrap; overflow-wrap: normal; }
 .code {
   margin: 0; padding: .8rem .95rem; background: var(--bg-deep); border: 1px solid var(--line); border-radius: var(--radius-sm);

@@ -13,9 +13,10 @@ Be aware of the difference between "built and tested" and "should work".
 
 **The mature, most battle-tested combination is macOS, Linux or WSL with Claude Code, Codex or
 GitHub Copilot CLI** - that's where the great majority of real-world use and testing has happened.
-**Antigravity CLI (`agy`) support and native Windows support are both marked Experimental**: they
-work and are covered by CI, but they're new enough to have real rough edges still to find. If
-something looks wrong on either, please [open a GitHub issue](https://github.com/thesahibnanda-max/relay/issues/new) -
+**Antigravity CLI (`agy`)** is the newest of the four: it has been run end to end with the real,
+authenticated `agy` (1.2.14) on macOS, and CI covers it on every pull request. **Native Windows support
+is marked Experimental**: it works and is covered by CI, but it's new enough to have real rough edges
+still to find. If something looks wrong, please [open a GitHub issue](https://github.com/thesahibnanda-max/relay/issues/new) -
 real reports from real use are exactly what moves something from Experimental to proven.
 
 | Platform | Status |
@@ -33,8 +34,8 @@ Two more caveats:
   version, `relay doctor` warns and `relay agy` says so when the session ends). If a tool changes in an update, parts
   of Relay may need adjusting - Copilot CLI in particular ships near-daily updates, and its per-session
   event log is explicitly undocumented and unstable upstream, so re-verify after upgrading it. `agy`'s own
-  conversation-database schema and MCP config format are likewise undocumented upstream, and `agy` support
-  overall is marked 🧪 Experimental, the newest of the four adaptors - see the note above.
+  conversation-database schema and MCP config format are likewise undocumented upstream: if a new `agy`
+  changes them, Relay falls back to reading `agy`'s screen and tells you so when the session ends.
 * **Claude's permission prompts.** They were never seen on screen during testing, because the test machine's
   Claude runs in "bypass permissions" mode. Relay has protection for them, but it was only tested against
   Codex's and Copilot's real prompts.

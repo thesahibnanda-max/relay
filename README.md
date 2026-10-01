@@ -5,7 +5,7 @@
 **🌐 [relay-sahib-nanda.vercel.app](https://relay-sahib-nanda.vercel.app)** &middot; website, demo and one-line install
 
 Relay lets AI coding agents in separate terminals work as one team. Run Claude Code, Codex, GitHub
-Copilot CLI and Google's Antigravity CLI 🧪 (or several of each) side by side, and one can hand work to
+Copilot CLI and Google's Antigravity CLI (or several of each) side by side, and one can hand work to
 another (*"tell codex to fix the failing test"*), ask what another has done, and answer back, while
 every terminal still looks and behaves exactly like the tool itself.
 
@@ -62,9 +62,9 @@ answers agy's own prompts and never types into them.
 Linux, macOS, WSL and native Windows. One static binary, no cgo.
 
 **New to Relay?** [NOTICE.md](NOTICE.md) explains everything in plain language: what it does, where it works,
-and what its limits are. In short: macOS/Linux/WSL with Claude Code, Codex or Copilot CLI is the most
-battle-tested combination; `agy` support and native Windows are both 🧪 **Experimental** - please
-[open an issue](https://github.com/thesahibnanda-max/relay/issues/new) if something looks off on either.
+and what its limits are. In short: macOS/Linux/WSL with Claude Code, Codex, Copilot CLI or `agy` is the
+tested combination; native Windows is 🧪 **Experimental** - please
+[open an issue](https://github.com/thesahibnanda-max/relay/issues/new) if something looks off there.
 
 ## Install
 

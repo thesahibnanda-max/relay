@@ -154,7 +154,7 @@ test.describe('the four supported CLIs', () => {
       }
       // every symbol the page references exists in the sprite
       for (const a of agents) await expect(page.locator(`symbol${a.symbol}`)).toHaveCount(1);
-      await expect(page.locator('#agents .a-agy .tag-experimental')).toContainText('Experimental');
+      await expect(page.locator('#agents .tag-experimental')).toHaveCount(0); // no agent is experimental
     });
   }
 
